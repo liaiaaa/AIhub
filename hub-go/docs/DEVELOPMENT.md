@@ -112,6 +112,33 @@ Qoder 的 COSY 签名**每个请求都不同**（绑定 payload + 时间戳 + bo
 
 ## 6. 常见坑
 
+### ⚠️ 头号大坑：`go build` 不带 `-o` 会覆盖正在用的 exe
+
+`go build` 不带 `-o` 时，会在**当前目录**生成以包名命名的可执行文件。
+本模块 `module workbuddy-hub` 且 main 包在模块根，于是：
+
+```powershell
+cd hub-go
+& 'E:\software\go\bin\go.exe' build ./...     # ❌ 直接覆盖 hub-go\workbuddy-hub.exe！
+```
+
+这会**静默替换掉你正在使用的那份 exe**（虽然正在运行的进程用的是内存映像、
+不会立刻崩，但下次启动就跑的是新文件了）。
+
+**永远显式指定输出路径**：
+
+```powershell
+& 'E:\software\go\bin\go.exe' build -o bin\workbuddy-hub.exe .   # ✅
+```
+
+或者直接用 `scripts\build.bat`（它固定 `-o bin\workbuddy-hub.exe`，安全）。
+
+> 本仓库确实发生过一次：重构期间用 `go build ./...` 验证时覆盖了 `hub-go\workbuddy-hub.exe`。
+> 原始文件（11575296 字节）已备份到
+> `archive\exe-backups\workbuddy-hub-ORIGINAL-11575296.exe`，需要回退可从此处取。
+
+### 其它
+
 | 现象 | 原因 / 处理 |
 |------|-------------|
 | 改了代码但行为没变 | 正在跑的是**旧 exe**。重新 `build.bat` 并替换后重启。 |

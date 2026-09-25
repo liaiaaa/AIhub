@@ -124,7 +124,7 @@ func (p *Proxy) Start() (bool, string) {
 	if auth == nil {
 		return false, msg
 	}
-	log := NewFileLogger(filepath.Join(hubRoot, p.LogPath))
+	log := NewFileLogger(dataPath(p.LogPath))
 
 	// 先自己绑定端口，绑定失败就如实报错（而不是靠端口探测猜）。
 	// 端口被占时先清扫再重试，最多重试 3 次、每次间隔 500ms，

@@ -45,9 +45,9 @@ func NewIntlProxy(authDir string) *Proxy {
 
 func credDirs() map[string]string {
 	return map[string]string{
-		"<凭证目录A>":  filepath.Join(hubRoot, "<凭证目录A>"),
-		"<凭证目录B>": filepath.Join(hubRoot, "<凭证目录B>"),
-		"<凭证目录C>":  filepath.Join(hubRoot, "<凭证目录C>"),
+		"<凭证目录A>":  dataPath("<凭证目录A>"),
+		"<凭证目录B>": dataPath("<凭证目录B>"),
+		"<凭证目录C>":  dataPath("<凭证目录C>"),
 	}
 }
 

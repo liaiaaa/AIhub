@@ -46,11 +46,8 @@ const (
 	defaultIntlCred = "<凭证目录B>"
 )
 
-// hubRoot = exe 所在目录的上级（workbuddy-hub\），凭证/日志/state.json 都在那里。
-var hubRoot = func() string {
-	exe, _ := os.Executable()
-	return filepath.Dir(filepath.Dir(exe))
-}()
+// hubRoot（数据根目录：凭证/日志/state.json 的所在处）见 paths.go。
+// 它不再硬绑 exe 位置，解析规则与覆盖方式也一并写在那里。
 
 func main() {
 	port := flag.Int("port", HubPort, "控制台端口")
@@ -119,7 +116,7 @@ func NewHub() *Hub {
 }
 
 func (h *Hub) loadState() {
-	b, err := os.ReadFile(filepath.Join(hubRoot, "state.json"))
+	b, err := os.ReadFile(dataPath("state.json"))
 	if err != nil {
 		return
 	}
@@ -133,7 +130,7 @@ func (h *Hub) loadState() {
 
 func (h *Hub) saveStateLocked() {
 	b, _ := json.Marshal(map[string]any{"intl_cred": h.intlCred})
-	os.WriteFile(filepath.Join(hubRoot, "state.json"), b, 0644)
+	os.WriteFile(dataPath("state.json"), b, 0644)
 }
 
 // ---------- 代理启停 ----------
@@ -636,7 +633,7 @@ func openBrowser(port int) {
 
 func logHub(format string, args ...any) {
 	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
-	if f, err := os.OpenFile(filepath.Join(hubRoot, "hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+	if f, err := os.OpenFile(dataPath("hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 		f.WriteString(line)
 		f.Close()
 	}

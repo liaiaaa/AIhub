@@ -453,7 +453,7 @@ func (p *QoderProxy) Start() (bool, string) {
 	if err := p.auth.Reload(); err != nil {
 		return false, "Qoder 凭据加载失败：" + err.Error()
 	}
-	p.log = NewFileLogger(filepath.Join(hubRoot, "converter-qoder.log"))
+	p.log = NewFileLogger(dataPath("converter-qoder.log"))
 	// gateway.qoder.com.cn 国内（阿里云）可达：直连，不读系统/环境代理。
 	p.client = directClient()
 

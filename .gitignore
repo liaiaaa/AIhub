@@ -1,0 +1,46 @@
+# ---- 构建产物 ----
+bin/
+*.exe
+*.exe~
+*.exe.bak*
+*.exe.bak-*
+*.dll
+
+# ---- 源码备份（统一归档到 archive/，不入版本库）----
+*.bak
+*.bak-*
+*.go.bak*
+*.go.bak-*
+_backups_disabled/
+
+# ---- 凭据：绝不入库（含 accessToken / refreshToken）----
+*.info
+<凭证目录A>/
+<凭证目录B>/
+<凭证目录C>/
+
+# ---- 归档区（保留在磁盘，但不进版本库）----
+archive/
+
+# ---- 运行时状态与日志 ----
+*.log
+state.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# ---- 临时/调试脚本 ----
+_*.ps1
+_*.txt
+
+# ---- 与 Go 代理无关的实验沙箱（0.44GB，独立 scratch 工作区）----
+qoder-sandbox/
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# ---- Go ----
+# vendor/ 视需要再决定是否入库

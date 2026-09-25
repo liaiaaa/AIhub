@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"os"
 )
 
 // ---------- 思考/正文分流（<think> → reasoning_content） ----------
@@ -374,8 +376,67 @@ func qoderUnwrapFrames(r io.Reader, out *bytes.Buffer) string {
 	return firstErr
 }
 
+// upstreamErrorFrame 识别网关的「业务错误帧」并抽出可读信息。
+//
+// 形态（HTTP 200，但没有 choices，只有 code+message）：
+//
+//	{"code":"400","message":"[FAIL]node:oa_qwen-plus-main msg:Execution failed: ..."}
+//
+// 返回 (错误文案, true) 表示这是错误帧。正常 OpenAI chunk（有 choices）不受影响。
+func upstreamErrorFrame(raw string) (string, bool) {
+	if raw == "" || raw == "[DONE]" || !strings.HasPrefix(raw, "{") {
+		return "", false
+	}
+	var probe map[string]any
+	if json.Unmarshal([]byte(raw), &probe) != nil {
+		return "", false
+	}
+	// 正常数据帧带 choices，直接放行
+	if _, hasChoices := probe["choices"]; hasChoices {
+		return "", false
+	}
+	// 已是标准 OpenAI error 形态，无需再包装
+	if _, hasErr := probe["error"]; hasErr {
+		return "", false
+	}
+	msg, _ := probe["message"].(string)
+	code := ""
+	switch c := probe["code"].(type) {
+	case string:
+		code = c
+	case json.Number:
+		code = c.String()
+	case float64:
+		code = strconv.FormatFloat(c, 'f', -1, 64)
+	}
+	if msg == "" && code == "" {
+		return "", false
+	}
+	if code != "" && msg != "" {
+		return fmt.Sprintf("上游网关错误 %s: %s", code, msg), true
+	}
+	if msg != "" {
+		return msg, true
+	}
+	return "上游网关错误 " + code, true
+}
+
+// mustJSON 序列化失败时返回一个合法的错误 JSON（不会返回半截字符串）。
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"error":{"message":"marshal failed","type":"internal_error"}}`
+	}
+	return string(b)
+}
+
 func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payload []byte, t0 time.Time, rid string) {
 	thinkFrames := 0 // 诊断：含 reasoning_content 的帧数
+	// 临时诊断（QODER_DIAG_STREAM=1）：累计 reasoning / content / tool_calls 的实际内容，
+	// 用于定位「客户端到底收到了什么」。默认关闭，不影响正常路径。
+	var diagReason, diagContent strings.Builder
+	diagTools := 0
+	diagOn := os.Getenv("QODER_DIAG_STREAM") == "1"
 	resp, err := p.openInferValidated(r.Context(), payload, p.log, rid)
 	if err != nil {
 		if p.log != nil {
@@ -406,6 +467,11 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 	st := newQoderThinkState()
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	// 上游业务错误计数：网关会在 HTTP 200 的流里塞 {"code":"400","message":...}
+	// 这种裸错误帧。OpenAI 客户端只认 choices / error，裸错误帧会被静默忽略，
+	// 客户端最终表现为「模型没有任何输出」，完全看不到真实原因（2026-09-25 实测）。
+	// 这里把它转写成标准 OpenAI error 事件，保证错误一定可见。
+	upstreamErrs := 0
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "event:") || !strings.HasPrefix(line, "data:") {
@@ -416,12 +482,49 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 		if json.Unmarshal([]byte(raw), &wrapper) == nil && wrapper.Body != "" {
 			raw = wrapper.Body
 		}
+		// 网关裸错误帧 → 标准 OpenAI error（否则客户端会静默忽略）
+		if errMsg, ok := upstreamErrorFrame(raw); ok {
+			upstreamErrs++
+			if p.log != nil {
+				p.log.Log("[%s] ✗ 上游错误帧 #%d | %s", rid, upstreamErrs, truncate(errMsg, 300))
+			}
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{
+				"error": map[string]any{
+					"message": errMsg,
+					"type":    "upstream_error",
+					"code":    "upstream_error",
+				},
+			}))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			continue
+		}
 		if raw == "[DONE]" {
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 		} else {
 			rw := qoderRewriteChunk(raw, st, false)
 			if strings.Contains(rw, `"reasoning_content"`) {
 				thinkFrames++
+			}
+			// 临时诊断：提取实际内容
+			if diagOn {
+				var dm map[string]any
+				if json.Unmarshal([]byte(rw), &dm) == nil {
+					for _, ch := range asSlice(dm["choices"]) {
+						cm, _ := ch.(map[string]any)
+						d, _ := cm["delta"].(map[string]any)
+						if s, _ := d["reasoning_content"].(string); s != "" {
+							diagReason.WriteString(s)
+						}
+						if s, _ := d["content"].(string); s != "" {
+							diagContent.WriteString(s)
+						}
+						if d["tool_calls"] != nil {
+							diagTools++
+						}
+					}
+				}
 			}
 			fmt.Fprintf(w, "data: %s\n\n", rw)
 		}
@@ -453,6 +556,15 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 	}
 	if p.log != nil {
 		p.log.Log("[%s] ◀ RESPONSE | %.1fs | stream | think=%d帧", rid, time.Since(t0).Seconds(), thinkFrames)
+		// 临时诊断：把客户端实际收到的三类内容落盘，便于核对
+		if diagOn {
+			p.log.Log("[%s] ◀ DIAG | reasoning=%d字 content=%d字 tool_call帧=%d",
+				rid, diagReason.Len(), diagContent.Len(), diagTools)
+			if diagReason.Len() > 0 {
+				p.log.Log("[%s] ◀ DIAG reasoning 全文:\n%s", rid, truncate(diagReason.String(), 4000))
+			}
+			p.log.Log("[%s] ◀ DIAG content 全文:\n%s", rid, truncate(diagContent.String(), 2000))
+		}
 	}
 }
 
@@ -515,4 +627,6 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 	res["model"] = model
 	writeJSON(w, http.StatusOK, res)
 }
+
+
 

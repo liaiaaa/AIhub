@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"os"
 )
 
 // ---------- 代理服务 ----------
@@ -269,6 +270,37 @@ func (p *QoderProxy) resolveModel(name string) string {
 	return name
 }
 
+// firstSystemSnippet 取第一条 system 消息的文本片段（临时诊断用）。
+// content 可能是字符串，也可能是多段数组（视觉消息）。
+func firstSystemSnippet(msgs []any) (string, bool) {
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := mm["role"].(string); role != "system" {
+			continue
+		}
+		switch c := mm["content"].(type) {
+		case string:
+			return c, true
+		case []any:
+			var b strings.Builder
+			for _, part := range c {
+				if pm, ok := part.(map[string]any); ok {
+					if s, ok := pm["text"].(string); ok {
+						b.WriteString(s)
+					}
+				}
+			}
+			if b.Len() > 0 {
+				return b.String(), true
+			}
+		}
+	}
+	return "", false
+}
+
 func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -330,6 +362,41 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d%s", rid, modelName, clientStream, len(msgs),
 			lastUserSuffix(msgs))
 		p.log.Log("[%s] ▶ THINK %s", rid, qoderThinkDiag(raw, body, entry, markedNoThink))
+		// 临时诊断：记录客户端请求形态（tools / 思考字段），用于核对 DSH 实际发了什么
+		if os.Getenv("QODER_DIAG_STREAM") == "1" {
+			nTools := 0
+			if t, ok := raw["tools"].([]any); ok {
+				nTools = len(t)
+			}
+			names := make([]string, 0, 4)
+			if t, ok := raw["tools"].([]any); ok {
+				for i, tv := range t {
+					if i >= 4 {
+						break
+					}
+					if tm, ok := tv.(map[string]any); ok {
+						if fn, ok := tm["function"].(map[string]any); ok {
+							names = append(names, fmt.Sprintf("%v", fn["name"]))
+						}
+					}
+				}
+			}
+			p.log.Log("[%s] ▶ DIAG client | tools=%d(%v) tool_choice=%v stream=%v topEffort=%v thinking=%v enable_thinking=%v",
+				rid, nTools, strings.Join(names, ","), raw["tool_choice"], raw["stream"],
+				raw["reasoning_effort"], raw["thinking"], raw["enable_thinking"])
+			if sysMsg, ok := firstSystemSnippet(msgs); ok {
+				p.log.Log("[%s] ▶ DIAG system提示词(前300字) | %s", rid, truncate(sysMsg, 300))
+				p.log.Log("[%s] ▶ DIAG system提示词长度=%d字", rid, len(sysMsg))
+			}
+			// 完整请求体 dump（仅诊断模式，写独立文件，便于精确复现）
+			if os.Getenv("QODER_DIAG_DUMP") == "1" {
+				if fb, err := json.MarshalIndent(raw, "", " "); err == nil {
+					dumpPath := dataPath("qoder-dump-" + rid + ".json")
+					os.WriteFile(dumpPath, fb, 0644)
+					p.log.Log("[%s] ▶ DIAG 已 dump 完整请求: %s (%d 字节)", rid, dumpPath, len(fb))
+				}
+			}
+		}
 	}
 	t0 := time.Now()
 
@@ -339,4 +406,5 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	p.aggregateToClient(w, r, payload, modelName, t0, rid)
 }
+
 

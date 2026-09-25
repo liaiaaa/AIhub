@@ -137,15 +137,47 @@ cd hub-go
 > 原始文件（11575296 字节）已备份到
 > `archive\exe-backups\workbuddy-hub-ORIGINAL-11575296.exe`，需要回退可从此处取。
 
+### ⚠️ 二号大坑：`.bat` 必须是 ASCII + CRLF
+
+中文 Windows 的 `cmd.exe` 按 **GBK** 读取 `.bat` 文件。如果脚本写成 **UTF-8**（尤其是
+带中文注释/回显），cmd 会把多字节序列解析错乱，出现这类报错：
+
+```
+'��动打开控制台' is not recognized as an internal or external command
+'The system cannot find the file \bin\workbuddy-hub.exe.'
+```
+
+脚本会**直接跑不起来**（或只跑一半）。同理，`.bat` 必须是 **CRLF** 换行，裸 LF 也会出问题。
+
+**约定**：`scripts\*.bat` 一律 **纯 ASCII 内容 + CRLF**（消息用英文，和原项目一致）。
+
+> 本仓库实际踩过：重构时把三个 `.bat` 改成 UTF-8 中文注释 + LF，
+> 结果 `build.bat` / `启动控制台-Go.bat` / `编译并启动.bat` 全部失效
+> （桌面快捷方式点了没反应）。已全部改回 ASCII + CRLF 并逐个实测。
+
+### 数据根解析：只用权威标志
+
+`looksLikeDataRoot` 只认 `state.json` 和凭证目录，**不要**把 `*.log` 加回标志列表：
+日志是 hub 自己写的，一旦某目录被误写日志就会被误判成数据根，错误会自我固化。
+
+解析会**从 exe 目录逐级向上找最多 4 级**，所以 exe 放在 `bin\` 也能找到仓库根。
+改 `paths.go` 后务必跑这两个回归测试：
+
+```
+TestLogsAloneDoNotMakeDataRoot
+TestResolveHubRootFindsRootAboveBin
+```
+
 ### 其它
 
 | 现象 | 原因 / 处理 |
 |------|-------------|
-| 改了代码但行为没变 | 正在跑的是**旧 exe**。重新 `build.bat` 并替换后重启。 |
+| 改了代码但行为没变 | 正在跑的是**旧 exe**。重新 `build.bat` 并重启。 |
 | 「国际代理起不来」 | 先看凭证目录有没有 `.info`；再看是否需要 VPN。 |
 | 端口被占启动失败 | 程序会自动清扫并重试 4 次；仍失败看是否被别的程序占用。 |
-| 二进制体积异常 | 用 `build.bat`（含 `-s -w -H=windowsgui`）；手动 `go build` 不带这些标志会更大。 |
+| 二进制体积异常 | 用 `build.bat`（含 `-s -w -H=windowsgui`）；手动 `go build` 不带这些标志会更大、还会弹黑窗。 |
 | 测试里 `resolveHubRoot()` 指向临时目录 | 正常：`go test` 的「exe」是测试二进制。生产代码不受影响。 |
+| 日志写到了意料外的目录 | 检查该目录是否含 `state.json`/凭证目录（会被当数据根）；或设 `WORKBUDDY_HUB_ROOT` 固定。 |
 
 ## 7. 归档区
 
@@ -153,10 +185,10 @@ cd hub-go
 
 | 子目录 | 内容 |
 |--------|------|
-| `exe-backups\` | 11 个旧 exe 备份（约 80MB，可确认无用时自行删除） |
+| `exe-backups\` | 12 个旧 exe 备份（约 108MB，含重构前的 `workbuddy-hub-ORIGINAL-11575296.exe`，确认无用时自行删除） |
 | `src-backups\` | 拆分的源文件原名（对照校验用）、`.bak`、`_backups_disabled\` |
 | `scripts\` | 一次性调试脚本 `_*.ps1` |
-| `logs\` | 历史日志 |
+| `logs\` | 历史日志（含期间误写到 `hub-go\` 的两份） |
 | `python-legacy\` | 已失效的 Python 版 `启动控制台.bat` |
 
 Git 基线快照：`chore: 重构前快照（基线）` 提交，可用它对比重构前后差异。

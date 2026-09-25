@@ -1,31 +1,32 @@
 @echo off
 rem ============================================================
-rem  WorkBuddy Hub (Go) - 启动控制台
+rem  WorkBuddy Hub (Go) - start console (no rebuild)
 rem
-rem  默认：所有代理均为停止状态，由你在网页上选择启动哪一个。
-rem  控制台地址：http://127.0.0.1:8801
+rem  Opens the console at http://127.0.0.1:8801
+rem  All proxies start STOPPED; pick one on the web page.
 rem
-rem  查找顺序（先命中先用）：
-rem    1) <项目根>\bin\workbuddy-hub.exe   （build.bat 的默认产物）
-rem    2) <项目根>\hub-go\workbuddy-hub.exe （历史位置，兼容旧部署）
+rem  Locates the exe in this order:
+rem    1) <root>\bin\workbuddy-hub.exe
+rem    2) <root>\hub-go\workbuddy-hub.exe   (legacy location)
+rem
+rem  ASCII-only + CRLF on purpose (see build.bat notes).
 rem ============================================================
 setlocal
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 
 set "EXE="
-if exist "%ROOT%\bin\workbuddy-hub.exe"   set "EXE=%ROOT%\bin\workbuddy-hub.exe"
+if exist "%ROOT%\bin\workbuddy-hub.exe" set "EXE=%ROOT%\bin\workbuddy-hub.exe"
 if not defined EXE if exist "%ROOT%\hub-go\workbuddy-hub.exe" set "EXE=%ROOT%\hub-go\workbuddy-hub.exe"
 
 if not defined EXE (
-  echo [ERROR] 未找到 workbuddy-hub.exe
-  echo   期望位置之一：
+  echo [ERROR] workbuddy-hub.exe not found. Expected one of:
   echo     %ROOT%\bin\workbuddy-hub.exe
   echo     %ROOT%\hub-go\workbuddy-hub.exe
-  echo   请先运行 scripts\build.bat 编译。
+  echo Run scripts\build.bat first.
   pause
   exit /b 1
 )
 
-echo 启动: %EXE%
+echo Starting: %EXE%
 start "" "%EXE%"

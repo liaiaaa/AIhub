@@ -1,21 +1,24 @@
 @echo off
 rem ============================================================
-rem  WorkBuddy Hub (Go) - 构建脚本
+rem  WorkBuddy Hub (Go) - build script
 rem
-rem  用法：双击本文件，或从任意目录执行 scripts\build.bat
-rem  产物：<项目根>\bin\workbuddy-hub.exe
+rem  Usage: double-click, or run scripts\build.bat from anywhere.
+rem  Output: <project root>\bin\workbuddy-hub.exe
 rem
-rem  说明：
-rem   - Go 工具链固定在 E:\software\go（不装 C 盘、不改 PATH）
-rem   - 构建缓存也放 E 盘，避免占用 C 盘空间
-rem   - %~dp0 是本脚本所在目录（scripts\），项目根是它的上一级
+rem  Notes:
+rem   - Go toolchain is fixed at E:\software\go (no C: install, no PATH change).
+rem   - Build cache also lives on E: to avoid filling C:.
+rem   - %~dp0 is this script's dir (scripts\); root is its parent.
+rem   - IMPORTANT: keep .bat files ASCII-only + CRLF. cmd.exe on a
+rem     Chinese Windows reads .bat as GBK; UTF-8 Chinese comments
+rem     corrupt parsing and break the script (this actually happened).
 rem ============================================================
 setlocal
 
-rem 项目根 = scripts\ 的上一级
+rem project root = parent of scripts\
 set "ROOT=%~dp0.."
 cd /d "%ROOT%" || (
-  echo [ERROR] 无法进入项目根目录: %ROOT%
+  echo [ERROR] cannot enter project root: %ROOT%
   pause
   exit /b 1
 )
@@ -29,26 +32,22 @@ if not exist "%GO%" (
   exit /b 1
 )
 
-rem 缓存放 E 盘（不写 C 盘）
 set "GOCACHE=E:\software\go-cache"
 set "GOPATH=E:\software\go-path"
 if not exist "%GOCACHE%" mkdir "%GOCACHE%"
 if not exist "%GOPATH%" mkdir "%GOPATH%"
-
-rem 产物统一输出到 bin\
 if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"
 
-echo [1/3] 构建中… 首次编译约 1-2 分钟
+echo [1/2] Building... first run may take 1-2 minutes.
 "%GO%" build -trimpath -ldflags "-s -w -H=windowsgui" -o "%ROOT%\bin\workbuddy-hub.exe" .
-if not errorlevel 1 goto ok
+if errorlevel 1 (
+  echo.
+  echo [ERROR] Build FAILED. See errors above.
+  pause
+  exit /b 1
+)
 
+echo [2/2] Build OK: %ROOT%\bin\workbuddy-hub.exe
 echo.
-echo [ERROR] 构建失败，请查看上面的错误信息。
-pause
-exit /b 1
-
-:ok
-echo [2/3] 构建成功: %ROOT%\bin\workbuddy-hub.exe
-echo [3/3] 提示：把 bin\workbuddy-hub.exe 放回 hub-go\ 即可直接替换正在使用的版本。
-echo.
+echo To start the console, run the launcher script in this folder.
 pause

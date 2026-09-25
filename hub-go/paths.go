@@ -49,9 +49,20 @@ func resolveHubRoot() string {
 	}
 	exeDir := filepath.Dir(exe)
 
-	// 候选按「更可能是数据根」排序。
-	parent := filepath.Dir(exeDir)
-	candidates := []string{parent, exeDir}
+	// 从 exe 所在目录开始【逐级向上】查找真正的数据根，最多 4 级。
+	// 需要向上多级是因为 exe 可能被放在 bin\ 这类子目录里：
+	//   <root>\hub-go\bin\workbuddy-hub.exe  -> 数据根在 <root>（向上 3 级）
+	// 先近后远，保证「数据就在 exe 旁边」的部署仍然优先命中。
+	candidates := []string{exeDir}
+	dir := exeDir
+	for i := 0; i < 4; i++ {
+		dir = filepath.Dir(dir)
+		if dir == "" || dir == "." || dir == filepath.Dir(dir) {
+			break // 到根了
+		}
+		candidates = append(candidates, dir)
+	}
+	// 最后再考虑当前工作目录（例如 go run）。
 	if wd, err := os.Getwd(); err == nil {
 		candidates = append(candidates, wd)
 	}
@@ -62,17 +73,20 @@ func resolveHubRoot() string {
 		}
 	}
 	// 都不像时，保持历史行为：exe 的上一级。
-	return parent
+	return filepath.Dir(exeDir)
 }
 
 // looksLikeDataRoot 判断目录是否像本项目的数据根。
-// 依据是数据根里的标志性内容（任一命中即可）：
-//   - state.json（hub 偏好）
-//   - 任一已知凭证目录（<凭证目录A> / <凭证目录B> / <凭证目录C>）
-//   - 任一已知代理日志
 //
-// 这样在 exe 被移动到 bin\ 之后，仍能自动指回真正的数据根，
-// 而不是把日志写进 bin\。
+// 只用「权威标志」——即 hub 自己不会在源码目录里生成的东西：
+//   - state.json（hub 偏好，只在数据根写入）
+//   - 任一已知凭证目录（<凭证目录A> / <凭证目录B> / <凭证目录C>，由用户放置）
+//
+// 刻意【不】把 converter-*.log / hub.log 当作标志：
+// 它们是 hub 自己写出来的，一旦某次把日志写进了某个目录，
+// 该目录下次就会被误判成数据根，错误会自我固化、再也回不到真正的根。
+// （这是实际发生过的 bug：exe 在 bin\ 时，候选 hub-go\ 因残留日志被误判为数据根，
+//   于是日志一直写在 hub-go\ 而不是仓库根。）
 func looksLikeDataRoot(dir string) bool {
 	if dir == "" {
 		return false
@@ -80,7 +94,6 @@ func looksLikeDataRoot(dir string) bool {
 	markers := []string{
 		"state.json",
 		"<凭证目录A>", "<凭证目录B>", "<凭证目录C>",
-		"converter-cn.log", "converter-intl.log",
 	}
 	for _, m := range markers {
 		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {

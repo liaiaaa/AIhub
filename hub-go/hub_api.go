@@ -74,6 +74,46 @@ func (h *Hub) apiQoderStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
 
+func (h *Hub) apiZcodeStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "请求格式错误"})
+		return
+	}
+	
+	ok, msg := h.startZcode(req.APIKey)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
+func (h *Hub) apiZcodeStop(w http.ResponseWriter, r *http.Request) {
+	ok, msg := h.stopZcode()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
+func (h *Hub) apiZcodeKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "请求格式错误"})
+		return
+	}
+	
+	if req.APIKey == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "API Key 不能为空"})
+		return
+	}
+	
+	if err := SaveAPIKey(req.APIKey); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "保存失败：" + err.Error()})
+		return
+	}
+	
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "API Key 已保存"})
+}
+
 func (h *Hub) apiIntlCred(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cred string `json:"cred"`
@@ -118,13 +158,14 @@ func (h *Hub) apiStopAll(w http.ResponseWriter, r *http.Request) {
 	b, _ := h.stopIntl()
 	c, _ := h.stopMimo()
 	d, _ := h.stopQoder()
+	e, _ := h.stopZcode()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":  a && b && c && d,
-		"msg": fmt.Sprintf("全部停止：国内=%s，国际=%s，MiMo=%s，Qoder=%s", okStr(a), okStr(b), okStr(c), okStr(d)),
+		"ok":  a && b && c && d && e,
+		"msg": fmt.Sprintf("全部停止：国内=%s，国际=%s，MiMo=%s，Qoder=%s，Zcode=%s", okStr(a), okStr(b), okStr(c), okStr(d), okStr(e)),
 	})
 }
 
-// apiExit 停掉两个代理后退出进程。
+// apiExit 停掉所有代理后退出进程。
 // 用带超时的 stop：即使某个代理有请求卡住，也保证进程一定退得掉。
 func (h *Hub) apiExit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "正在退出…"})
@@ -135,6 +176,7 @@ func (h *Hub) apiExit(w http.ResponseWriter, r *http.Request) {
 			h.stopIntl()
 			h.stopMimo()
 			h.stopQoder()
+			h.stopZcode()
 			close(done)
 		}()
 		select {

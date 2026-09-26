@@ -20,6 +20,7 @@ type Hub struct {
 	intl     *Proxy
 	mimo     *Proxy
 	qoder    *QoderProxy
+	zcode    *ZcodeProxy
 	intlCred string
 }
 
@@ -215,6 +216,49 @@ func (h *Hub) stopQoder() (bool, string) {
 	return false, "Qoder 停止失败"
 }
 
+// startZcode 启动 Zcode 代理。需要设置 API Key。
+// API Key 可以通过环境变量 ZCODE_API_KEY 或数据目录的 zcode_api_key.txt 文件设置。
+func (h *Hub) startZcode(apiKey string) (bool, string) {
+	h.mu.Lock()
+	if h.zcode != nil && h.zcode.Running() {
+		h.mu.Unlock()
+		return true, "已在运行"
+	}
+	h.mu.Unlock()
+
+	p := NewZcodeProxy()
+	if apiKey != "" {
+		p.APIKey = apiKey
+	}
+	ok, msg := p.Start()
+	if !ok {
+		return false, msg
+	}
+	h.mu.Lock()
+	if h.zcode != nil && h.zcode.Running() {
+		h.mu.Unlock()
+		p.Stop()
+		return true, "已在运行"
+	}
+	h.zcode = p
+	h.mu.Unlock()
+	return true, msg
+}
+
+func (h *Hub) stopZcode() (bool, string) {
+	h.mu.Lock()
+	p := h.zcode
+	h.zcode = nil
+	h.mu.Unlock()
+	if p == nil {
+		return true, "Zcode 已停止"
+	}
+	if p.Stop() {
+		return true, "Zcode 已停止"
+	}
+	return false, "Zcode 停止失败"
+}
+
 // ---------- 状态 ----------
 
 // statusMap 只读内存中的启停状态，不做任何可能阻塞的调用（尤其不读凭据文件）。
@@ -222,7 +266,7 @@ func (h *Hub) stopQoder() (bool, string) {
 // 导致「停止 / 退出」全部点不动——这正是「启动后关不掉」的根因。
 func (h *Hub) statusMap() map[string]any {
 	h.mu.Lock()
-	domP, intlP, mimoP, qoderP, cred := h.dom, h.intl, h.mimo, h.qoder, h.intlCred
+	domP, intlP, mimoP, qoderP, zcodeP, cred := h.dom, h.intl, h.mimo, h.qoder, h.zcode, h.intlCred
 	h.mu.Unlock()
 
 	dom := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
@@ -253,6 +297,13 @@ func (h *Hub) statusMap() map[string]any {
 		qoder["detail"] = fmt.Sprintf("COSY 直连 · %d 个模型 · 桌面端凭据自动解密", len(catalog))
 		qoder["models"] = len(catalog)
 	}
+	zcode := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
+	if zcodeP != nil && zcodeP.Running() {
+		zcode["up"] = true
+		zcode["ok"] = true
+		zcode["detail"] = fmt.Sprintf("Z.ai Bearer 直连 · %d 个模型 · API Key", len(zcodeP.catalogSnapshot()))
+		zcode["models"] = len(zcodeP.catalogSnapshot())
+	}
 
 	dirs := credDirs()
 	creds := make([]string, 0, len(dirs))
@@ -265,6 +316,7 @@ func (h *Hub) statusMap() map[string]any {
 		"intl":         intl,
 		"mimo":         mimo,
 		"qoder":        qoder,
+		"zcode":        zcode,
 		"intl_cred":    cred,
 		"creds":        creds,
 		"default_cred": defaultIntlCred,

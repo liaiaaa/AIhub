@@ -84,6 +84,17 @@ const webHTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-head"><span>Zcode（Z.ai）· 127.0.0.1:8796</span><span class="status st-off" id="zcode-status">检测中…</span></div>
+    <div class="detail" id="zcode-detail"></div>
+    <div class="btns">
+      <input type="password" id="zcode-apikey" placeholder="可选：留空自动读取桌面端登录凭据" style="flex:1;min-width:200px;padding:6px;border:1px solid #e2e5ea;border-radius:6px;font-size:13px;">
+      <button class="primary" onclick="startZcode()">启动</button>
+      <button onclick="act('zcode/stop')">停止</button>
+      <span class="spacer"></span><span class="hint">GLM-5.3 / GLM-5.3-Flash · 桌面端凭据自动解密 · Coding Plan 额度</span>
+    </div>
+  </div>
+
   <div class="foot">
     <button onclick="act('stop_all')">全部停止</button>
     <button onclick="refresh()">立即刷新</button>
@@ -106,6 +117,7 @@ function render(s) {
   renderSide('intl', s.intl);
   renderSide('mimo', s.mimo);
   renderSide('qoder', s.qoder);
+  renderSide('zcode', s.zcode);
   // 凭证单选
   const row = document.getElementById('cred-row');
   if (row.dataset.cred !== s.intl_cred) {
@@ -144,6 +156,86 @@ function renderSide(key, d) {
     st.textContent = '● 端口占用 /health 异常';
     st.className = 'status st-warn';
     dt.textContent = '';
+  }
+}
+
+// Zcode 专用启动函数（带 API Key）
+async function startZcode() {
+  const apiKey = document.getElementById('zcode-apikey').value.trim();
+  if (!apiKey) {
+    showMsg('请输入 Zcode API Key', true);
+    return;
+  }
+  
+  try {
+    const r = await fetch('/api/zcode/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: apiKey }),
+      signal: AbortSignal.timeout(20000)
+    });
+    const d = await r.json();
+    showMsg(d.msg, !d.ok);
+    
+    // 保存 API Key
+    if (d.ok) {
+      await saveZcodeKey(apiKey);
+    }
+  } catch (e) {
+    showMsg('请求失败：' + e, true);
+  }
+  refresh();
+}
+
+async function saveZcodeKey(apiKey) {
+  try {
+    await fetch('/api/zcode/key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: apiKey })
+    });
+  } catch (e) {
+    // 忽略保存失败
+  }
+}
+
+// Zcode 专用启动函数（带 API Key）
+async function startZcode() {
+  const apiKey = document.getElementById('zcode-apikey').value.trim();
+  if (!apiKey) {
+    showMsg('请输入 Zcode API Key', true);
+    return;
+  }
+  
+  try {
+    const r = await fetch('/api/zcode/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: apiKey }),
+      signal: AbortSignal.timeout(20000)
+    });
+    const d = await r.json();
+    showMsg(d.msg, !d.ok);
+    
+    // 保存 API Key
+    if (d.ok) {
+      await saveZcodeKey(apiKey);
+    }
+  } catch (e) {
+    showMsg('请求失败：' + e, true);
+  }
+  refresh();
+}
+
+async function saveZcodeKey(apiKey) {
+  try {
+    await fetch('/api/zcode/key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: apiKey })
+    });
+  } catch (e) {
+    // 忽略保存失败
   }
 }
 
@@ -205,6 +297,13 @@ async function refreshNick() {
       const base = state[k].detail ? state[k].detail : '';
       el.textContent = '账号 ' + (n[k] || '?') + (base ? '  ·  ' + base : '');
     });
+    // Zcode 不需要昵称，但需要刷新状态
+    if (state && state.zcode && state.zcode.up) {
+      const el = document.getElementById('zcode-detail');
+      if (el) {
+        el.textContent = 'Zcode · GLM-5.3';
+      }
+    }
   } catch (e) { /* 忽略：下一次轮询再试 */ }
 }
 

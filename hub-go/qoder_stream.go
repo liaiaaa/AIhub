@@ -11,24 +11,49 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"os"
 )
 
-// ---------- 思考/正文分流（<think> → reasoning_content） ----------
+// ---------- 思考/正文分流（<think>/<thinking> → reasoning_content） ----------
+
+// qoderThinkTagPairs 支持的思考标签对（官方 CLI 两种都出现；<think> 是
+// <thinking> 的前缀，匹配时同位置须取更长者）。
+var qoderThinkTagPairs = [][2]string{
+	{"<think>", "</think>"},
+	{"<thinking>", "</thinking>"},
+}
 
 // qoderThinkState 流式分流的会话状态（每个请求一个）。
 type qoderThinkState struct {
-	inThink bool
-	buf     string // 跨帧缓冲：可能一个 chunk 里只有 "<thi"，要等下一帧才能判定
+	inThink  bool
+	closeTag string // 与开标签配对的闭合标签
+	buf      string // 跨帧缓冲：可能一个 chunk 里只有 "<thi"，要等下一帧才能判定
 }
 
-// qoderMaxTagLen 标签最大长度（"<think>"/"</think>" 均 9 字节内）。
+// qoderMaxTagLen 标签最大长度（"<thinking>"/"</thinking>" 均 14 字节内）。
 const qoderMaxTagLen = 16
 
-func newQoderThinkState() *qoderThinkState { return &qoderThinkState{} }
+func newQoderThinkState() *qoderThinkState { return &qoderThinkState{closeTag: qoderThinkTagPairs[0][1]} }
+
+// qoderEarliestOpen 找 buf 中最早出现的开标签。
+// 同位置命中时取更长的开标签（<think> 是 <thinking> 的前缀，须整体匹配）。
+func qoderEarliestOpen(buf string) (pos int, open, close string, found bool) {
+	pos, open, close, found = -1, "", "", false
+	for _, pair := range qoderThinkTagPairs {
+		i := strings.Index(buf, pair[0])
+		if i < 0 {
+			continue
+		}
+		if !found || i < pos || (i == pos && len(pair[0]) > len(open)) {
+			pos, open, close, found = i, pair[0], pair[1], true
+		}
+	}
+	return
+}
 
 // split 把一帧的 content 文本拆成 (正文部分, 思考部分)。
 // 标签可能跨帧：不够长无法判定的尾部进 buf，等下一帧。
@@ -37,31 +62,45 @@ func (s *qoderThinkState) split(text string) (out, think string) {
 	s.buf += text
 	for {
 		if s.inThink {
-			end := strings.Index(s.buf, "</think>")
+			end := strings.Index(s.buf, s.closeTag)
 			if end < 0 {
-				// 可能 "</think" 被截断：保留可能构成尾标签的尾部
-				keep := qoderSafeKeep(s.buf, "</think>")
+				// 可能闭合标签被截断：保留可能构成尾标签的尾部
+				keep := qoderSafeKeep(s.buf, s.closeTag)
 				thinkOut := s.buf[:len(s.buf)-keep]
 				s.buf = s.buf[len(s.buf)-keep:]
 				return out, thinkOut
 			}
 			think += s.buf[:end]
-			s.buf = s.buf[end+len("</think>"):]
+			s.buf = s.buf[end+len(s.closeTag):]
 			s.inThink = false
 			continue
 		}
-		start := strings.Index(s.buf, "<think>")
-		if start < 0 {
-			// 可能 "<think" 被截断：保留可能构成头标签的尾部
-			keep := qoderSafeKeep(s.buf, "<think>")
+		start, open, close, found := qoderEarliestOpen(s.buf)
+		if !found {
+			// 可能开标签被截断：保留可能构成头标签的尾部
+			keep := qoderSafeKeepAny(s.buf)
 			outPart := s.buf[:len(s.buf)-keep]
 			s.buf = s.buf[len(s.buf)-keep:]
 			return out + outPart, think
 		}
 		out += s.buf[:start]
-		s.buf = s.buf[start+len("<think>"):]
+		s.buf = s.buf[start+len(open):]
 		s.inThink = true
+		s.closeTag = close
 	}
+}
+
+// qoderSafeKeepAny 返回 buf 尾部可能构成任一标签前缀的最长长度。
+func qoderSafeKeepAny(buf string) int {
+	best := 0
+	for _, pair := range qoderThinkTagPairs {
+		for _, tag := range pair {
+			if k := qoderSafeKeep(buf, tag); k > best {
+				best = k
+			}
+		}
+	}
+	return best
 }
 
 // qoderSafeKeep 返回 buf 尾部可能构成 tag 前缀的最长长度。
@@ -156,7 +195,18 @@ func qoderRewriteStreamForThinking(sse string) string {
 	var out strings.Builder
 	for _, line := range strings.Split(sse, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "data:") || trimmed == "data: [DONE]" {
+		if trimmed == "data: [DONE]" {
+			// 残留缓冲必须在 [DONE] 之前并入：聚合器收到 DONE 即停止
+			if rest, think := st.flush(); rest != "" || think != "" {
+				out.WriteString("data: " + jsonMust(map[string]any{"choices": []any{map[string]any{
+					"index": 0, "delta": map[string]any{"content": rest, "reasoning_content": think},
+				}}}) + "\n")
+			}
+			out.WriteString(line)
+			out.WriteString("\n")
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "data:") {
 			out.WriteString(line)
 			out.WriteString("\n")
 			continue
@@ -164,7 +214,7 @@ func qoderRewriteStreamForThinking(sse string) string {
 		raw := strings.TrimSpace(trimmed[5:])
 		out.WriteString("data: " + qoderRewriteChunk(raw, st, false) + "\n")
 	}
-	// 残留缓冲并入最后一个 content 帧
+	// 上游没发 [DONE] 就断流时兜底（flush 后缓冲为空，重复调用无副作用）
 	if rest, think := st.flush(); rest != "" || think != "" {
 		out.WriteString("data: " + jsonMust(map[string]any{"choices": []any{map[string]any{
 			"index": 0, "delta": map[string]any{"content": rest, "reasoning_content": think},
@@ -178,7 +228,11 @@ func jsonMust(v any) string {
 	return string(b)
 }
 
-// qoderNormalizeMessages：developer → system（对齐其他代理的行为）。
+// qoderNormalizeMessages：developer → system；剔除空内容 system 消息。
+//
+// 后者有真实事故（2026-09-26 二分定位）：DSH 在会话中途切换模型时插入
+// {"role":"system","content":[]}，Qoder 网关对它返回 provider_error
+// （Error in upstream response），且重试无效——整条会话从此打不通。
 func qoderNormalizeMessages(msgs []any) []any {
 	out := make([]any, 0, len(msgs))
 	changed := false
@@ -188,10 +242,15 @@ func qoderNormalizeMessages(msgs []any) []any {
 			out = append(out, m)
 			continue
 		}
-		if role, _ := mm["role"].(string); role == "developer" {
+		role, _ := mm["role"].(string)
+		if role == "developer" {
 			nm := cloneMap(mm)
 			nm["role"] = "system"
 			out = append(out, nm)
+			changed = true
+			continue
+		}
+		if role == "system" && qoderMsgContentEmpty(mm["content"]) {
 			changed = true
 			continue
 		}
@@ -201,6 +260,28 @@ func qoderNormalizeMessages(msgs []any) []any {
 		return msgs
 	}
 	return out
+}
+
+// qoderMsgContentEmpty 判断消息 content 是否实际为空（""/空数组/全空 text 段）。
+func qoderMsgContentEmpty(v any) bool {
+	switch c := v.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(c) == ""
+	case []any:
+		for _, part := range c {
+			pm, ok := part.(map[string]any)
+			if !ok {
+				return false // 非文本段（图等）：视为非空
+			}
+			if t, ok := pm["text"].(string); !ok || strings.TrimSpace(t) != "" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // openInfer 签名并调用上游，带自愈重试：
@@ -261,6 +342,17 @@ func (p *QoderProxy) openInfer(ctx context.Context, payload []byte) (*http.Respo
 
 // firstFrameUpstreamError 检查首帧是否为上游错误帧（如配额瞬时抽风的
 // provider_error，HTTP 状态仍是 200，只能从内容识别）。
+//
+// 兼容两种形态（2026-09-26 教训：此前只认裸错误帧，包装形态
+// {"headers":...,"body":"{\"code\":\"provider_error\"...}"} 被漏判，
+// 导致「首帧错误自动重试」从未在包装路径上生效——用户看到的每次
+// provider_error 失败其实都没走到重试）：
+//
+//	裸帧:   {"code":"provider_error","message":"Error in upstream response"}
+//	包装帧: {"headers":{...},"body":"{\"code\":\"provider_error\",...}"}
+//
+// 从第一个 data 行向后扫描，直到出现决定性帧（错误帧 → true；正常
+// choices 帧 → false）；不可解析的行（心跳等）跳过。
 func firstFrameUpstreamError(head []byte) bool {
 	for _, line := range strings.Split(string(head), "\n") {
 		line = strings.TrimSpace(line)
@@ -268,25 +360,39 @@ func firstFrameUpstreamError(head []byte) bool {
 			continue
 		}
 		data := strings.TrimSpace(line[5:])
+		if data == "" {
+			continue
+		}
+		var wrapper qoderSSEWrapper
+		if json.Unmarshal([]byte(data), &wrapper) == nil && wrapper.Body != "" {
+			data = strings.TrimSpace(wrapper.Body)
+		}
+		if data == "" || data == "[DONE]" {
+			return false
+		}
 		var probe struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
 			Choices []any  `json:"choices"`
 		}
 		if json.Unmarshal([]byte(data), &probe) != nil {
-			return false
+			continue // 非JSON/心跳类行：看下一行
 		}
 		// 上游错误帧：有 code/message、没有 choices；正常帧要么是包装帧（有 body），要么有 choices
 		if probe.Code != "" && probe.Message != "" && probe.Choices == nil {
 			return true
 		}
-		return false
+		if probe.Choices != nil {
+			return false // 正常内容帧先行，不算错误
+		}
 	}
 	return false
 }
 
 // openInferValidated 在 openInfer 之上多做一层首帧错误检测：
-// HTTP 200 但首帧是 provider_error（如配额瞬时抽风）时整体重试一次。
+// HTTP 200 但首帧是 provider_error（如配额瞬时抽风）时整体重试，
+// 最多 2 次（700ms 间隔；2026-09-26 实测单次重试不够，且此前包装错误帧
+// 根本没触发过重试，见 firstFrameUpstreamError 注释）。
 // Peek(1) 只等到上游第一个字节到达（通常 ~300ms），不会人为增加首包延迟。
 //
 // ⚠️ 关键：bufio.Peek **不消费**缓冲区，Peek 过的字节仍留在 br 里——
@@ -310,10 +416,10 @@ func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log
 			return resp, nil
 		}
 		head, _ := br.Peek(br.Buffered()) // 只用于错误帧探测，不消费
-		if attempt == 0 && len(head) > 0 && firstFrameUpstreamError(head) {
+		if attempt < 2 && len(head) > 0 && firstFrameUpstreamError(head) {
 			resp.Body.Close()
 			if log != nil {
-				log.Log("[%s] ⚠ 上游首帧 provider_error，700ms 后重试", rid)
+				log.Log("[%s] ⚠ 上游首帧 provider_error，重试 %d/2", rid, attempt+1)
 			}
 			time.Sleep(700 * time.Millisecond)
 			continue
@@ -430,6 +536,33 @@ func mustJSON(v any) string {
 	return string(b)
 }
 
+// qoderWriteTailFrame 把分流残留作为最后一个 delta 帧写出。
+// 必须在 data: [DONE] 之前调用——客户端收到 DONE 即停止解析。
+func qoderWriteTailFrame(w http.ResponseWriter, flusher http.Flusher, out, think string) {
+	if out == "" && think == "" {
+		return
+	}
+	tail := map[string]any{"choices": []any{map[string]any{
+		"index": 0, "finish_reason": nil,
+		"delta": func() map[string]any {
+			d := map[string]any{}
+			if think != "" {
+				d["reasoning_content"] = think
+			}
+			if out != "" {
+				d["content"] = out
+			}
+			return d
+		}(),
+	}}}
+	if b, err := json.Marshal(tail); err == nil {
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
 func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payload []byte, t0 time.Time, rid string) {
 	thinkFrames := 0 // 诊断：含 reasoning_content 的帧数
 	// 临时诊断（QODER_DIAG_STREAM=1）：累计 reasoning / content / tool_calls 的实际内容，
@@ -478,6 +611,13 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			continue
 		}
 		raw := strings.TrimSpace(line[5:])
+		// 诊断（QODER_DIAG_STREAM=1）：先于一切转换打印网关原始帧全文。
+		// 2026-09-26 事故：DSH 大载荷重放必现 provider_error，错误详情此前
+		// 只被 upstreamErrorFrame 抽成 code+message，包装帧 headers 全部丢失；
+		// 此开关用于拿回完整原始错误帧（requestId/node/额度信息都在里面）。
+		if diagOn {
+			p.log.Log("[%s] ▶ SSE原帧 | %s", rid, raw)
+		}
 		var wrapper qoderSSEWrapper
 		if json.Unmarshal([]byte(raw), &wrapper) == nil && wrapper.Body != "" {
 			raw = wrapper.Body
@@ -501,6 +641,11 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			continue
 		}
 		if raw == "[DONE]" {
+			// 残留缓冲必须在 [DONE] 之前吐出：DONE 之后的帧会被客户端忽略
+			// （旧实现把残留写在 DONE 之后，尾部分片永远丢失）。
+			if out, think := st.flush(); out != "" || think != "" {
+				qoderWriteTailFrame(w, flusher, out, think)
+			}
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 		} else {
 			rw := qoderRewriteChunk(raw, st, false)
@@ -532,27 +677,10 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			flusher.Flush()
 		}
 	}
-	// 流结束：吐出分流缓冲的残留（缓冲里的内容已无法归帧，直接并入正文）
+	// 流结束：吐出分流缓冲的残留（正常路径已在 [DONE] 前吐过，这里兜底
+	// 处理上游没发 [DONE] 就断流的情况；flush 后缓冲为空，重复调用无副作用）。
 	if out, think := st.flush(); out != "" || think != "" {
-		tail := map[string]any{"choices": []any{map[string]any{
-			"index": 0, "finish_reason": nil,
-			"delta": func() map[string]any {
-				d := map[string]any{}
-				if think != "" {
-					d["reasoning_content"] = think
-				}
-				if out != "" {
-					d["content"] = out
-				}
-				return d
-			}(),
-		}}}
-		if b, err := json.Marshal(tail); err == nil {
-			fmt.Fprintf(w, "data: %s\n\n", b)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
+		qoderWriteTailFrame(w, flusher, out, think)
 	}
 	if p.log != nil {
 		p.log.Log("[%s] ◀ RESPONSE | %.1fs | stream | think=%d帧", rid, time.Since(t0).Seconds(), thinkFrames)
@@ -627,6 +755,140 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 	res["model"] = model
 	writeJSON(w, http.StatusOK, res)
 }
+// ---------- 网关流式工具消息 bug 自动降级（2026-09-26 实测定案） ----------
+//
+// 根因：Qoder 网关的 DeepSeek 系（dfmodel/dmodel）与 Kimi 系（kmodel）在
+// stream=true 且历史含 assistant(tool_calls) 或 role=tool 消息时，100% 返回
+// provider_error（"Error in upstream response" / "Unknown sse issue"）；
+// 同一载荷 stream=false 100% 成功；Qwen/GLM 系流式完全正常（多模型矩阵实测）。
+// 这不是代理格式问题（转发的是标准 OpenAI 格式，网关自身即此语义）。
+//
+// 自动降级：命中该组合时，上游请求改 stream=false 走聚合路径（已验证对
+// dfmodel+工具历史 100% 成功），再把聚合结果以 SSE 帧流回给客户端——
+// 客户端接口无感知（仍是 data: {...} + data: [DONE]）。
+// 关闭开关：环境变量 QODER_AUTO_NOSTREAM=0。
 
+// qoderStreamToolBugModels 受网关流式工具 bug 影响的模型内部 key。
+var qoderStreamToolBugModels = map[string]bool{
+	"dfmodel": true,
+	"dmodel":  true,
+	"kmodel":  true,
+}
 
+// qoderHistoryHasToolMsgs 判断历史里是否存在 assistant.tool_calls 或 role=tool 消息。
+func qoderHistoryHasToolMsgs(msgs []any) bool {
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch mm["role"] {
+		case "tool":
+			return true
+		case "assistant":
+			if mm["tool_calls"] != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
 
+// qoderAutoNoStreamEnabled 默认开启；QODER_AUTO_NOSTREAM=0 显式关闭。
+func qoderAutoNoStreamEnabled() bool {
+	return os.Getenv("QODER_AUTO_NOSTREAM") != "0"
+}
+
+// degradedStreamToClient：上游 stream=false 聚合完整响应后，以 SSE 帧流回给客户端。
+func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Request, payload []byte, model string, t0 time.Time, rid string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
+	defer cancel()
+	resp, err := p.openInferValidated(ctx, payload, p.log, rid)
+	if err != nil {
+		if p.log != nil {
+			p.log.Log("[%s] ✗ 网络错误 | %v", rid, err)
+		}
+		sseError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if p.log != nil {
+			p.log.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
+		}
+		sseError(w, resp.StatusCode, truncate(string(b), 500))
+		return
+	}
+
+	var inner bytes.Buffer
+	if ferr := qoderUnwrapFrames(resp.Body, &inner); ferr != "" {
+		if p.log != nil {
+			p.log.Log("[%s] ✗ 上游错误帧（降级后仍失败）| %s", rid, truncate(ferr, 300))
+		}
+		sseError(w, http.StatusBadGateway, ferr)
+		return
+	}
+	innerStr := qoderRewriteStreamForThinking(inner.String())
+	col := collectStream(strings.NewReader(innerStr))
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+
+	// 聚合结果 → 标准 OpenAI 流式帧（客户端接口无感知）
+	writeSSE := func(v any) {
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(v))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if rc := strings.Join(col.reasoning, ""); rc != "" {
+		writeSSE(map[string]any{"choices": []any{map[string]any{
+			"index": 0, "delta": map[string]any{"role": "assistant", "reasoning_content": rc},
+		}}})
+	}
+	if ct := strings.Join(col.contentParts, ""); ct != "" {
+		writeSSE(map[string]any{"choices": []any{map[string]any{
+			"index": 0, "delta": map[string]any{"role": "assistant", "content": ct},
+		}}})
+	}
+	if len(col.toolCalls) > 0 {
+		idx := make([]int, 0, len(col.toolCalls))
+		for k := range col.toolCalls {
+			idx = append(idx, k)
+		}
+		sort.Ints(idx)
+		for _, k := range idx {
+			v := col.toolCalls[k]
+			id := v.id
+			if id == "" {
+				id = fmt.Sprintf("call_%d", k)
+			}
+			writeSSE(map[string]any{"choices": []any{map[string]any{
+				"index": 0,
+				"delta": map[string]any{
+					"tool_calls": []any{map[string]any{
+						"index": k, "id": id, "type": "function",
+						"function": map[string]any{"name": v.name, "arguments": v.arguments},
+					}},
+				},
+			}}})
+		}
+	}
+	finish := col.finish
+	if finish == "" {
+		finish = "stop"
+	}
+	writeSSE(map[string]any{"choices": []any{map[string]any{
+		"index": 0, "delta": map[string]any{}, "finish_reason": finish,
+	}}})
+	writeSSE("[DONE]")
+
+	elapsed := time.Since(t0)
+	if p.log != nil {
+		p.log.Log("[%s] ◀ RESPONSE | %.1fs | degrade-stream | finish=%s | think=%d段", rid, elapsed.Seconds(), finish, len(col.reasoning))
+	}
+}

@@ -38,6 +38,11 @@ func TestThinkSplitBasic(t *testing.T) {
 		{"标签跨帧", []string{"<thi", "nk>深", "度</th", "ink>好"}, "好", "深度"},
 		{"未闭合标签", []string{"<think>一路想到底"}, "", "一路想到底"},
 		{"尾标签截断", []string{"<think>abc</th", "ink>ok"}, "ok", "abc"},
+		// <thinking> 长标签（官方 CLI 亦用此形态；<think> 是其前缀，须整体匹配）
+		{"thinking完整标签", []string{"<thinking>推演</thinking>答复"}, "答复", "推演"},
+		{"thinking跨帧", []string{"<thinki", "ng>深度", "分析</thi", "nking>好"}, "好", "深度分析"},
+		{"thinking未闭合", []string{"<thinking>一直想"}, "", "一直想"},
+		{"两种标签混用", []string{"<think>短</think>中<thinking>长</thinking>尾"}, "中尾", "短长"},
 	}
 	for _, c := range cases {
 		gotC, gotR := splitAll(c.chunks, true)
@@ -112,5 +117,62 @@ func TestRewriteStreamForThinking(t *testing.T) {
 	}
 	if got := msg["content"].(string); got != "最终答案。" {
 		t.Errorf("content = %q, want 最终答案。", got)
+	}
+}
+
+// 残留缓冲必须并入 [DONE] 之前的帧：DONE 之后的帧会被客户端/聚合器忽略
+// （旧实现把残留写在 DONE 之后，尾部分片永远丢失）。
+func TestRewriteStreamResidualBeforeDone(t *testing.T) {
+	frame := func(content string) string {
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+			"delta": map[string]any{"content": content},
+		}}})
+		return "data: " + string(b) + "\n\n"
+	}
+	// 流在半个开标签处戛然而止："<thi" 进缓冲，随 [DONE] 前的残留帧吐出
+	sse := frame("答案开头") + frame("<thi") + "data: [DONE]\n\n"
+	rewritten := qoderRewriteStreamForThinking(sse)
+
+	lines := strings.Split(rewritten, "\n")
+	doneIdx := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "data: [DONE]" {
+			doneIdx = i
+			break
+		}
+	}
+	if doneIdx < 0 {
+		t.Fatalf("转写输出缺少 [DONE]:\n%s", rewritten)
+	}
+	// [DONE] 之前必须有一帧 content 恰为残留 "<thi"
+	found := false
+	for i := 0; i < doneIdx; i++ {
+		l := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(l, "data: ") {
+			continue
+		}
+		var fr struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(strings.TrimPrefix(l, "data: ")), &fr) != nil {
+			continue
+		}
+		if len(fr.Choices) > 0 && fr.Choices[0].Delta.Content == "<thi" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("残留帧应出现在 [DONE] 之前:\n%s", rewritten)
+	}
+
+	col := collectStream(strings.NewReader(rewritten))
+	res := col.build()
+	msg := res["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if got := msg["content"].(string); got != "答案开头<thi" {
+		t.Errorf("content = %q, want 答案开头<thi（残留不得丢失）", got)
 	}
 }

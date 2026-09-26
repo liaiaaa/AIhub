@@ -44,8 +44,9 @@ func TestLiveFetchQoderCatalog(t *testing.T) {
 	byKey := map[string]qoderModelEntry{}
 	for _, e := range entries {
 		byKey[e.Key] = e
-		t.Logf("  %-15s %-22s vendor=%-9s reasoning=%-5v vision=%-5v free=%v",
-			e.Key, e.DisplayName, e.Vendor, e.IsReasoning, e.IsVision, e.IsFree)
+		t.Logf("  %-15s %-22s vision=%-5v reasoning=%-5v in=%d out=%d efforts=%v default=%s",
+			e.Key, e.DisplayName, e.IsVision, e.IsReasoning,
+			e.MaxInputTokens, e.MaxOutputTokens, e.Efforts, e.DefaultEffort)
 	}
 
 	// 用户明确关心的 GLM / DeepSeek 系列必须存在

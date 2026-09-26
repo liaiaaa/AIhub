@@ -155,7 +155,9 @@ func TestHandleChatMissingModelFallsBackToDefault(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotModel, _ = body["model"].(string)
+		if mc, ok := body["model_config"].(map[string]any); ok {
+			gotModel, _ = mc["key"].(string)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"headers\":{},\"body\":\"[DONE]\"}\n\n"))
 	}))
@@ -182,7 +184,7 @@ func TestHandleChatMissingModelFallsBackToDefault(t *testing.T) {
 			t.Errorf("payload %s 把缺失的 model 变成了字面量 <nil>", payload)
 		}
 		if gotModel != QoderDefaultMd {
-			t.Errorf("payload %s → 上游 model = %q, want %q", payload, gotModel, QoderDefaultMd)
+			t.Errorf("payload %s → 上游 model_config.key = %q, want %q", payload, gotModel, QoderDefaultMd)
 		}
 	}
 }
@@ -408,8 +410,9 @@ func TestFetchQoderCatalogErrors(t *testing.T) {
 	}
 }
 
-// 端到端：默认情况下发到上游的请求必须带真实思考参数（parameters.reasoning_effort，
-// 取目录默认档），且不得注入任何提示词 hack。
+// 端到端：默认情况下发到上游的必须是 qodercli 信封，带真实思考字段
+// （model_config.is_reasoning + parameters.reasoning_effort），且默认不注入
+// 任何提示词 hack（提示词兜底仅 QODER_THINK_PROMPT=on 时启用）。
 func TestHandleChatSendsThinkingParamsUpstream(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -433,15 +436,23 @@ func TestHandleChatSendsThinkingParamsUpstream(t *testing.T) {
 		strings.NewReader(`{"model":"GLM-5.3","messages":[{"role":"user","content":"hi"}],"stream":true}`))
 	p.handleChat(httptest.NewRecorder(), req)
 
-	if gotBody["model"] != "gmodel" {
-		t.Errorf("上游 model = %v, want gmodel", gotBody["model"])
+	// 官方信封：模型在 model_config.key，思考开关在 model_config.is_reasoning
+	mc, _ := gotBody["model_config"].(map[string]any)
+	if mc["key"] != "gmodel" {
+		t.Errorf("上游 model_config.key = %v, want gmodel", mc["key"])
+	}
+	if mc["is_reasoning"] != true {
+		t.Errorf("上游 model_config.is_reasoning = %v, want true", mc["is_reasoning"])
 	}
 	// 真实思考旋钮：parameters.reasoning_effort（gmodel 目录默认档 = max）
 	params, _ := gotBody["parameters"].(map[string]any)
 	if got := params["reasoning_effort"]; got != "max" {
 		t.Errorf("上游 parameters.reasoning_effort = %v, want max（目录默认档）", got)
 	}
-	// system 只允许温和思考提示（保护输出格式），严禁刚性措辞
+	if _, exists := params["enable_thinking"]; exists {
+		t.Errorf("enable_thinking 已废弃（官方 wire 无此字段），不应发送")
+	}
+	// 默认不注入提示词；且严禁刚性措辞
 	msgs := gotBody["messages"].([]any)
 	all := ""
 	for _, m := range msgs {
@@ -452,14 +463,123 @@ func TestHandleChatSendsThinkingParamsUpstream(t *testing.T) {
 	if strings.Contains(all, "缺一不可") || strings.Contains(all, "严格按以下两部分") {
 		t.Errorf("禁止刚性思考措辞上行，实际 %q", all)
 	}
-	if !strings.Contains(all, "不要把思考内容混入其中") {
-		t.Errorf("应注入温和思考提示（含“不要把思考内容混入其中”），实际 %q", all)
+	if strings.Contains(all, "不要把思考内容混入其中") {
+		t.Errorf("默认不应注入思考提示词（原生推理才是正道），实际 %q", all)
 	}
-	// 无效的 thinking 字段不应发给上游（翻译进 parameters 后从顶层删除）
+	// 无效的 thinking 字段不应发给上游（翻译进信封后不透传）
 	if _, exists := gotBody["thinking"]; exists {
 		t.Errorf("不应向上游透传 thinking 字段")
 	}
 	if _, exists := gotBody["reasoning_effort"]; exists {
-		t.Errorf("顶层 reasoning_effort 应翻译进 parameters 后删除")
+		t.Errorf("顶层 reasoning_effort 应翻译进信封后删除")
+	}
+	// 信封必备字段
+	if got := gotBody["agent_id"]; got != "agent_common" {
+		t.Errorf("上游 agent_id = %v, want agent_common", got)
+	}
+}
+
+// 上下文档位选择：默认取最大档（1M，用户 2026-09-26 拍板不降档），
+// QODER_CONTEXT_TIER 显式覆盖，none 回退旧行为（不发）。
+func TestQoderPickContextTier(t *testing.T) {
+	entry := &qoderModelEntry{
+		ContextConfig: map[string]qoderContextTier{
+			"200K": {TokenCount: 200000, IsDefault: true},
+			"400K": {TokenCount: 400000},
+			"1M":   {TokenCount: 1000000},
+		},
+	}
+
+	// 默认：选 token 数最大的档（1M），且只有它是 is_default
+	t.Setenv("QODER_CONTEXT_TIER", "")
+	cc := qoderPickContextTier(entry)
+	if cc == nil {
+		t.Fatal("默认应返回 context_config")
+	}
+	mc, _ := cc["1M"].(map[string]any)
+	if mc["is_default"] != true || mc["token_count"] != 1000000 {
+		t.Errorf("默认档应为 1M/is_default，实际 %v", cc)
+	}
+	if d, _ := cc["200K"].(map[string]any); d["is_default"] == true {
+		t.Errorf("200K 不应是默认档：%v", cc)
+	}
+
+	// 显式指定 400K
+	t.Setenv("QODER_CONTEXT_TIER", "400K")
+	cc = qoderPickContextTier(entry)
+	if d, _ := cc["400K"].(map[string]any); d["is_default"] != true {
+		t.Errorf("指定 400K 后应为其 is_default=true：%v", cc)
+	}
+	if d, _ := cc["1M"].(map[string]any); d["is_default"] == true {
+		t.Errorf("指定 400K 后 1M 不应是默认档：%v", cc)
+	}
+
+	// none = 不发（旧行为，诊断用）
+	t.Setenv("QODER_CONTEXT_TIER", "none")
+	if cc := qoderPickContextTier(entry); cc != nil {
+		t.Errorf("none 应返回 nil，实际 %v", cc)
+	}
+
+	// 指定该模型没有的档：宁可不发，不发非法值
+	t.Setenv("QODER_CONTEXT_TIER", "8K")
+	if cc := qoderPickContextTier(entry); cc != nil {
+		t.Errorf("非法档应返回 nil，实际 %v", cc)
+	}
+
+	// 模型无档位信息：nil
+	if cc := qoderPickContextTier(&qoderModelEntry{}); cc != nil {
+		t.Errorf("无档位模型应返回 nil，实际 %v", cc)
+	}
+	if cc := qoderPickContextTier(nil); cc != nil {
+		t.Errorf("nil 条目应返回 nil，实际 %v", cc)
+	}
+}
+
+// 内置快照路径也必须产出 context_config（动态刷新前就能按 1M 档发送）。
+func TestDefaultCatalogCarriesContextConfig(t *testing.T) {
+	for _, m := range defaultQoderCatalog() {
+		if len(m.ContextWindows) > 0 && len(m.ContextConfig) == 0 {
+			t.Errorf("内置快照 %s 有档位标签但无 ContextConfig", m.Key)
+		}
+		for name, tier := range m.ContextConfig {
+			if tier.TokenCount <= 0 {
+				t.Errorf("%s 档 %s 的 token_count=%d 非法", m.Key, name, tier.TokenCount)
+			}
+		}
+	}
+}
+
+// 端到端：信封 model_config 必须带 context_config，默认选最大档 1M。
+func TestHandleChatSendsContextConfigUpstream(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"headers\":{},\"body\":\"[DONE]\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	p := NewQoderProxy()
+	p.inferURL = srv.URL
+	p.client = srv.Client()
+	a, err := NewQoderAuth()
+	if err != nil {
+		t.Fatalf("NewQoderAuth: %v", err)
+	}
+	a.creds = qoderCreds{Token: "dt-test", User: qoderUser{ID: "u1", Name: "tester"}}
+	p.auth = a
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"GLM-5.3-Flash","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	p.handleChat(httptest.NewRecorder(), req)
+
+	mc, _ := gotBody["model_config"].(map[string]any)
+	cc, ok := mc["context_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_config.context_config 缺失：%v", gotBody["model_config"])
+	}
+	one, _ := cc["1M"].(map[string]any)
+	if one["is_default"] != true {
+		t.Errorf("gfmodel 默认应选 1M 档，实际 %v", cc)
 	}
 }

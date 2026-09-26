@@ -38,7 +38,7 @@ type QoderProxy struct {
 }
 
 func NewQoderProxy() *QoderProxy {
-	catalog := defaultQoderCatalog()
+	catalog := defaultQoderCatalog() // 内置快照已含 context_config（见 defaultQoderCatalog）
 	return &QoderProxy{
 		Port:     QoderPort,
 		inferURL: QoderInferURL,
@@ -227,6 +227,26 @@ func (p *QoderProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		if id != m.Key {
 			entry["resolves_to"] = m.Key // 透出真实 key，便于排查
 		}
+		// 服务端拉取的思考强度档（thinking_config），客户端可据此渲染 effort 选项
+		if len(m.Efforts) > 0 {
+			entry["efforts"] = m.Efforts
+			if m.DefaultEffort != "" {
+				entry["default_effort"] = m.DefaultEffort
+			}
+		}
+		// 能力元数据：视觉输入 / 上下文与输出上限（代理自身也按此钳制 max_tokens）
+		entry["vision"] = m.IsVision
+		if m.MaxInputTokens > 0 {
+			entry["max_input_tokens"] = m.MaxInputTokens
+		}
+		if m.MaxOutputTokens > 0 {
+			entry["max_output_tokens"] = m.MaxOutputTokens
+		} else {
+			entry["max_output_tokens"] = qoderChatMaxTokens
+		}
+		if len(m.ContextWindows) > 0 {
+			entry["context_windows"] = m.ContextWindows
+		}
 		data = append(data, entry)
 	}
 	defKey := qoderDefaultKey(catalog)
@@ -338,32 +358,52 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	clientStream, _ := raw["stream"].(bool)
 
-	body := map[string]any{}
-	for k, v := range raw {
-		body[k] = v
-	}
 	// 模型名可能缺失或不是字符串：显式处理，避免 fmt 把 nil 变成字面量 "<nil>"
 	// （那会是一个非法模型名，白白触发上游兜底）。
 	requestedModel := ""
 	if mv, ok := raw["model"].(string); ok {
 		requestedModel = mv
 	}
-	body["model"] = p.resolveModel(requestedModel)
-	body["messages"] = qoderNormalizeMessages(msgs)
-	body["stream"] = true // 上游一律流式，非流式由本地聚合
-	markedNoThink := qoderNoThinkMarked(body)
-	entry := p.entryFor(fmt.Sprintf("%v", body["model"]))
-	qoderApplyThinking(body, entry)
-	payload, _ := json.Marshal(body)
+
+	// 模型解析 + 思考意图解析 → qodercli 信封（裸 OpenAI 体走网关兜底，
+	// 思考链路整体失效，2026-09-25 根因定论，见 qoder_envelope.go）。
+	modelKey := p.resolveModel(requestedModel)
+	normMsgs := qoderNormalizeMessages(msgs)
+	markedNoThink := qoderNoThinkMarked(normMsgs)
+	if markedNoThink {
+		qoderStripNoThinkMarker(normMsgs)
+	}
+	entry := p.entryFor(modelKey)
+	// 消息内标记 = 本次明确不要思考（最具体，优先级最高）
+	spec := qoderThinkingSpec{Effort: "none"}
+	if !markedNoThink {
+		spec = qoderResolveThinking(raw, normMsgs, entry)
+	}
+	uid, _, _, _ := p.auth.Snapshot()
+	env := qoderEnvelope(normMsgs, raw["tools"], modelKey, uid, spec, entry, raw)
+	// 可见思考提示兜底：默认关闭，QODER_THINK_PROMPT=on 显式开启
+	if qoderThinkPromptEnabled() && spec.Effort != "none" {
+		qoderInjectPrompt(env, qoderThinkingPrompt)
+	}
+	// 网关流式工具 bug 自动降级：DeepSeek/Kimi 系 stream=true + 工具历史 → 上游改非流式
+	// （详见 qoder_stream.go 降级注释；QODER_AUTO_NOSTREAM=0 关闭）。
+	degrade := false
+	if clientStream && qoderAutoNoStreamEnabled() && qoderStreamToolBugModels[modelKey] && qoderHistoryHasToolMsgs(normMsgs) {
+		degrade = true
+		env["stream"] = false
+	}
+	payload, _ := json.Marshal(env)
 
 	rid := randHex(4)
-	modelName := fmt.Sprintf("%v", body["model"])
+	modelName := modelKey
 	if p.log != nil {
 		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d%s", rid, modelName, clientStream, len(msgs),
 			lastUserSuffix(msgs))
-		p.log.Log("[%s] ▶ THINK %s", rid, qoderThinkDiag(raw, body, entry, markedNoThink))
-		// 临时诊断：记录客户端请求形态（tools / 思考字段），用于核对 DSH 实际发了什么
-		if os.Getenv("QODER_DIAG_STREAM") == "1" {
+		p.log.Log("[%s] ▶ THINK %s", rid, qoderWireDiag(raw, normMsgs, entry, markedNoThink, env))
+		// 诊断：记录客户端请求形态。触发方式 = 环境变量 QODER_DIAG_STREAM=1
+		// 或在数据目录放标记文件 qoder-dump-on（存在即抓，含完整请求转储）。
+		diagOn := os.Getenv("QODER_DIAG_STREAM") == "1" || fileExists(dataPath("qoder-dump-on"))
+		if diagOn {
 			nTools := 0
 			if t, ok := raw["tools"].([]any); ok {
 				nTools = len(t)
@@ -381,26 +421,31 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			p.log.Log("[%s] ▶ DIAG client | tools=%d(%v) tool_choice=%v stream=%v topEffort=%v thinking=%v enable_thinking=%v",
+			p.log.Log("[%s] ▶ DIAG client | tools=%d(%v) tool_choice=%v stream=%v topEffort=%v thinking=%v enable_thinking=%v | payload=%dKB msgs=%d",
 				rid, nTools, strings.Join(names, ","), raw["tool_choice"], raw["stream"],
-				raw["reasoning_effort"], raw["thinking"], raw["enable_thinking"])
+				raw["reasoning_effort"], raw["thinking"], raw["enable_thinking"], len(payload)/1024, len(msgs))
 			if sysMsg, ok := firstSystemSnippet(msgs); ok {
 				p.log.Log("[%s] ▶ DIAG system提示词(前300字) | %s", rid, truncate(sysMsg, 300))
 				p.log.Log("[%s] ▶ DIAG system提示词长度=%d字", rid, len(sysMsg))
 			}
-			// 完整请求体 dump（仅诊断模式，写独立文件，便于精确复现）
-			if os.Getenv("QODER_DIAG_DUMP") == "1" {
-				if fb, err := json.MarshalIndent(raw, "", " "); err == nil {
-					dumpPath := dataPath("qoder-dump-" + rid + ".json")
-					os.WriteFile(dumpPath, fb, 0644)
-					p.log.Log("[%s] ▶ DIAG 已 dump 完整请求: %s (%d 字节)", rid, dumpPath, len(fb))
-				}
+			// 完整客户端请求 dump（原始 OpenAI 形态，可直接重放）
+			if fb, err := json.MarshalIndent(raw, "", " "); err == nil {
+				dumpPath := dataPath("qoder-dump-" + rid + ".json")
+				os.WriteFile(dumpPath, fb, 0644)
+				p.log.Log("[%s] ▶ DIAG 已 dump 完整请求: %s (%d 字节)", rid, dumpPath, len(fb))
 			}
 		}
 	}
 	t0 := time.Now()
 
 	if clientStream {
+		if degrade {
+			if p.log != nil {
+				p.log.Log("[%s] ⚠ 网关流式工具bug命中(%s|stream=true|工具历史)：自动降级为非流式聚合后回灌SSE", rid, modelKey)
+			}
+			p.degradedStreamToClient(w, r, payload, modelName, t0, rid)
+			return
+		}
 		p.streamToClient(w, r, payload, t0, rid)
 		return
 	}

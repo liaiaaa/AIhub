@@ -373,7 +373,9 @@ func (p *Proxy) mapModel(name string) string {
 	return name
 }
 
-// normalizeMessages：developer→system；intl 在首条非 system 时补一条 system。
+// normalizeMessages：developer→system；剔除空内容 system 消息（DSH 切模型时
+// 会插入 {"role":"system","content":[]}，部分上游对此报 provider_error，
+// 2026-09-26 在 Qoder 网关实测复现）；intl 在首条非 system 时补一条 system。
 func (p *Proxy) normalizeMessages(msgs []any) []any {
 	out := make([]any, 0, len(msgs))
 	changed := false
@@ -383,10 +385,15 @@ func (p *Proxy) normalizeMessages(msgs []any) []any {
 			out = append(out, m)
 			continue
 		}
-		if role, _ := mm["role"].(string); role == "developer" {
+		role, _ := mm["role"].(string)
+		if role == "developer" {
 			nm := cloneMap(mm)
 			nm["role"] = "system"
 			out = append(out, nm)
+			changed = true
+			continue
+		}
+		if role == "system" && qoderMsgContentEmpty(mm["content"]) {
 			changed = true
 			continue
 		}

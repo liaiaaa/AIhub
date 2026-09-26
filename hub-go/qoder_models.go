@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -45,19 +46,33 @@ type qoderModelEntry struct {
 	MaxInputTokens int      `json:"max_input_tokens"`
 	ContextWindows []string `json:"context_windows,omitempty"`
 
+	// 单次回复的输出 token 上限（官方目录 max_output_tokens；缺省按 32768 处理）。
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+
 	// 思考强度（thinking_config）：官方 UI“思考强度”入口的真实数据源。
 	// Efforts 为该模型支持的强度档（none/low/medium/high/xhigh/max 子集，规范序），
 	// DefaultEffort 为默认档，SupportsDisabled 表示能否整体关闭思考。
 	Efforts          []string `json:"efforts,omitempty"`
 	DefaultEffort    string   `json:"default_effort,omitempty"`
 	SupportsDisabled bool     `json:"supports_disabled,omitempty"`
+
+	// ContextConfig 上下文档位（官方 context_config）：{档名: {token_count, is_default}}。
+	// 请求侧用它选择上下文档（默认取最大档，见 qoderPickContextTier）。
+	ContextConfig map[string]qoderContextTier `json:"context_config,omitempty"`
+}
+
+// qoderContextTier 一个上下文档位。
+type qoderContextTier struct {
+	TokenCount int  `json:"token_count"`
+	IsDefault  bool `json:"is_default"`
 }
 
 // defaultQoderCatalog 内置快照（2026-09-23 实测；思考强度字段 2026-09-24 补录，
-// 来自官方 /algo/api/v2/model/list 的 thinking_config）。
+// 来自官方 /algo/api/v2/model/list 的 thinking_config；2026-09-26 补上下文档位
+// context_config，档位标签按官方体系 200K/400K/1M 换算成 token 数）。
 // 启动时若无法从官方接口刷新，则用这份数据兜底。
 func defaultQoderCatalog() []qoderModelEntry {
-	return []qoderModelEntry{
+	out := []qoderModelEntry{
 		{Key: "auto", DisplayName: "Auto", Vendor: "qoder-cn", PriceFactor: 0.5,
 			IsReasoning: true, IsVision: true, IsDefault: true, MaxInputTokens: 200000},
 		{Key: "qmodel_38max", DisplayName: "Qwen3.8-Max", Vendor: "alibaba", PriceFactor: 0.5,
@@ -108,6 +123,13 @@ func defaultQoderCatalog() []qoderModelEntry {
 		{Key: "mmodel", DisplayName: "MiniMax-M2.7", Vendor: "minimax", PriceFactor: 0.2,
 			MaxInputTokens: 180000, ContextWindows: []string{"200K"}},
 	}
+	// 内置快照统一补上下文档位（动态刷新后会用官方真值覆盖）
+	for i := range out {
+		if len(out[i].ContextConfig) == 0 && len(out[i].ContextWindows) > 0 {
+			out[i].ContextConfig = qoderContextConfigFromWindows(out[i].ContextWindows)
+		}
+	}
+	return out
 }
 
 // qoderVendorFor 从显示名推断厂商（动态拉取时官方不返回厂商字段）。
@@ -142,6 +164,7 @@ type qoderRemoteModel struct {
 	IsFree      bool    `json:"is_free"`
 	PriceFactor float64 `json:"price_factor"`
 	MaxInput    int     `json:"max_input_tokens"`
+	MaxOutput   int     `json:"max_output_tokens"`
 	ContextCfg  map[string]struct {
 		TokenCount int  `json:"token_count"`
 		IsDefault  bool `json:"is_default"`
@@ -243,6 +266,15 @@ func parseQoderModelList(raw []byte) ([]qoderModelEntry, error) {
 		sort.Strings(windows)
 		efforts, defaultEffort, supportsDisabled := qoderParseThinkingConfig(m.ThinkingConfig)
 
+		// 上下文档位：官方 context_config 优先；缺失时从档位标签推（内置快照路径）
+		ctxCfg := make(map[string]qoderContextTier, len(m.ContextCfg))
+		for name, t := range m.ContextCfg {
+			ctxCfg[name] = qoderContextTier{TokenCount: t.TokenCount, IsDefault: t.IsDefault}
+		}
+		if len(ctxCfg) == 0 {
+			ctxCfg = qoderContextConfigFromWindows(windows)
+		}
+
 		out = append(out, qoderModelEntry{
 			Key:              key,
 			DisplayName:      display,
@@ -253,7 +285,9 @@ func parseQoderModelList(raw []byte) ([]qoderModelEntry, error) {
 			IsVision:         m.IsVL,
 			IsDefault:        m.IsDefault,
 			MaxInputTokens:   m.MaxInput,
+			MaxOutputTokens:  m.MaxOutput,
 			ContextWindows:   windows,
+			ContextConfig:    ctxCfg,
 			Efforts:          efforts,
 			DefaultEffort:    defaultEffort,
 			SupportsDisabled: supportsDisabled,
@@ -335,6 +369,59 @@ func qoderDefaultKey(catalog []qoderModelEntry) string {
 		return catalog[0].Key
 	}
 	return "qfmodel"
+}
+
+// qoderContextConfigFromWindows 从档位标签推 ContextConfig（内置快照兜底）。
+// 只认已知标签：200K/400K/1M（官方目录的档位体系）。
+func qoderContextConfigFromWindows(windows []string) map[string]qoderContextTier {
+	known := map[string]int{"200K": 200000, "400K": 400000, "1M": 1000000}
+	out := make(map[string]qoderContextTier, len(windows))
+	for _, w := range windows {
+		if n, ok := known[w]; ok {
+			out[w] = qoderContextTier{TokenCount: n}
+		}
+	}
+	return out
+}
+
+// qoderPickContextTier 选定请求使用的上下文档：QODER_CONTEXT_TIER 显式指定
+// （"none" = 不发 context_config，旧行为）；默认取该模型可用的最大档
+// （用户 2026-09-26 拍板：DSH 会话按 1M 配，代理不降档）。
+// 返回完整 context_config 对象（选定档 is_default=true，其余 false）；
+// 模型无档位信息时返回 nil（不发送）。
+func qoderPickContextTier(entry *qoderModelEntry) map[string]any {
+	if entry == nil || len(entry.ContextConfig) == 0 {
+		return nil
+	}
+	if v := strings.TrimSpace(os.Getenv("QODER_CONTEXT_TIER")); v != "" {
+		if strings.EqualFold(v, "none") {
+			return nil
+		}
+		if _, ok := entry.ContextConfig[v]; !ok {
+			return nil // 指定了该模型没有的档：宁可不发，不发非法值
+		}
+		out := make(map[string]any, len(entry.ContextConfig))
+		for name, t := range entry.ContextConfig {
+			out[name] = map[string]any{"token_count": t.TokenCount, "is_default": name == v}
+		}
+		return out
+	}
+	// 默认：token 数最大的档
+	best := ""
+	bestN := -1
+	for name, t := range entry.ContextConfig {
+		if t.TokenCount > bestN {
+			best, bestN = name, t.TokenCount
+		}
+	}
+	if best == "" {
+		return nil
+	}
+	out := make(map[string]any, len(entry.ContextConfig))
+	for name, t := range entry.ContextConfig {
+		out[name] = map[string]any{"token_count": t.TokenCount, "is_default": name == best}
+	}
+	return out
 }
 
 // ---------- 动态拉取 ----------

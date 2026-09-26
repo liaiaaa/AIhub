@@ -83,6 +83,32 @@ Qoder 的 COSY 签名**每个请求都不同**（绑定 payload + 时间戳 + bo
 套不进 `AuthProvider` 的「静态请求头」模型，所以是独立的 `QoderProxy` 类型，
 对 Hub 只暴露同款的 `Start/Stop/Running`。
 
+### 3.6 Qoder 必须用 qodercli 信封（原生思考的开关）
+
+网关 `agent_chat_generation` 对裸 OpenAI 体会走**容错解析**：chat/model 能认，
+但思考链路整体被忽略（日志常年 `think=0帧`）。必须经 `qoderEnvelope()` 转成
+qodercli 形态——思考开关在**顶层 `model_config.is_reasoning`**，强度在
+`parameters.reasoning_effort`，消息转 content-block 数组，`tools[].function.
+parameters` 改名 `input_schema`，assistant 历史消息的 `content` 必须为字符串。
+参考实现：`github.com/mo-n/dsh-provider-qoder`。改这块前先看
+`qoder_envelope.go` 头注释与 `qoder_stream_test.go`。
+
+### 3.7 Zcode：订阅额度不可反代，只有充值余额可走 API（2026-09-26 定论）
+
+逆向 `E:\software\Zcode\resources\glm\zcode.cjs` + 真实网关探测的结论：
+
+- 凭据解密**已打通**：`~\.zcode\v2\credentials.json` 是 `enc:v1:` AES-256-GCM，
+  密钥 = `sha256("zcode-credential-fallback:win32:{homedir}:{username}")`，
+  取 `*:coding-plan:*:api-key` 条目即可作 `api.z.ai` 的 Bearer（已验证 key 有效）。
+- 但 **ZCode Start Plan 的每日 token 额度**走 `zcode.z.ai/api/v1/zcode-plan/*`
+  私有中继，强制三个请求头：`x-aliyun-captcha-verify-param`（阿里云验证码，
+  一次性）、`x-client-sig`、`x-client-pow`（设备签名/工作量证明）。
+  裸 POST 该路径回 `3007 captcha verify failed`。**第三方无法合法复现，别再试。**
+- 所以本代理走 `api.z.ai/api/coding/paas/v4`（官方 API Key 直连，充值余额计费）。
+  key 有效但无余额时上游回 `1113 Insufficient balance`——代理会把它转成
+  带指引的 OpenAI error（见 `zcodeHintError`）。
+- 探测用的临时脚本与载荷样本在 `archive\probes-zcode-20260926\`。
+
 ## 4. 测试约定
 
 - 需要真实凭证/网络的测试要**可跳过**（`t.Skip`），不要用 `t.Fatal` 让离线环境红一片。

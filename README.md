@@ -1,6 +1,6 @@
 # WorkBuddy Hub
 
-把 WorkBuddy 系列的四个后端（国内 / 国际 / MiMo / Qoder）统一转成本地 **OpenAI 兼容**
+把 WorkBuddy 系列的五个后端（国内 / 国际 / MiMo / Qoder / Zcode）统一转成本地 **OpenAI 兼容**
 接口的 Go 单文件程序。桌面控制台一键启停，代理全部跑在同一个进程里。
 
 ```
@@ -10,7 +10,8 @@
            ├─ 国内  127.0.0.1:8787 → codebuddy 国内
            ├─ 国际  127.0.0.1:8799 → www.workbuddy.ai
            ├─ MiMo  127.0.0.1:8798 → 小米 SSO
-           └─ Qoder 127.0.0.1:8797 → gateway.qoder.com.cn
+           ├─ Qoder 127.0.0.1:8797 → gateway.qoder.com.cn
+           └─ Zcode 127.0.0.1:8796 → api.z.ai（GLM 系列）
 ```
 
 ## 快速开始
@@ -26,13 +27,13 @@
 
 编译需要用 `E:\software\go\bin\go.exe`（缓存也放 E 盘，不占 C 盘）。
 
-> 启动默认**全部停止**：程序会先清扫 8787/8797/8798/8799 的残留监听，
+> 启动默认**全部停止**：程序会先清扫 8787/8796/8797/8798/8799 的残留监听，
 > 再由你手动选择开启哪一个。
 >
 > 重复启动不会把正在跑的代理打掉：第二个实例发现 8801 被占用时，
 > 只打开浏览器就退出。
 
-## 四个代理
+## 五个代理
 
 | 代理 | 端口 | 后端 | 认证方式 |
 |------|------|------|----------|
@@ -40,6 +41,7 @@
 | 国际 | 8799 | `www.workbuddy.ai` | 凭证目录（读系统代理，需 VPN） |
 | MiMo | 8798 | 小米 MiMo | 小米账号 SSO（直连） |
 | Qoder | 8797 | `gateway.qoder.com.cn` | 桌面端凭据 DPAPI 自动解密（直连） |
+| Zcode | 8796 | `api.z.ai`（GLM 系列） | 桌面端凭据自动解密 / 手动 API Key（直连） |
 
 DSH 里填：
 
@@ -47,15 +49,22 @@ DSH 里填：
 - 国际 `http://127.0.0.1:8799/v1`（默认模型 `deepseek-v4.1-flash`）
 - MiMo `http://127.0.0.1:8798/v1`（**必须带 `http://` 前缀**）
 - Qoder `http://127.0.0.1:8797/v1`
+- Zcode `http://127.0.0.1:8796/v1`（默认模型 `glm-5.3`）
 
-> 国内 / MiMo / Qoder **直连后端**，不读系统代理 —— 切换网络、关掉代理软件都能用。
+> 国内 / MiMo / Qoder / Zcode **直连后端**，不读系统代理 —— 切换网络、关掉代理软件都能用。
 > 只有国际 `www.workbuddy.ai` 需要代理 / VPN 开启。
+
+> **Zcode 计费说明**：本代理走 Z.ai 官方 API Key 直连（充值余额 / 资源包计费）。
+> ZCode 订阅计划（Start Plan）的每日额度只能由桌面端自身消费（网关强制阿里云
+> 验证码 + 设备签名，第三方无法复现）。无余额时上游返回 1113，代理会给出明确指引。
 
 ## 凭证
 
 - 控制台里单选「<凭证目录A> / <凭证目录B> / <凭证目录C>」，或点「换凭证并重启」；偏好写入 `state.json`。
   （三个目录都由 `credDirs()` 提供并在网页上列出；`state.json` 里的 `intl_cred` 记录上次选择。）
 - Qoder 与 MiMo **零配置**：分别从桌面端登录态自动取用，无需手工放文件。
+- Zcode 同样零配置：自动解密 `%USERPROFILE%\.zcode\v2\credentials.json`（AES-256-GCM
+  信封）取 Coding Plan API Key；也可用环境变量 `ZCODE_API_KEY` 或控制台手动粘贴。
 - 目录里没有可用 `.info` 文件时，启动国际代理会明确报错，而不是静默失败。
 
 ## 数据放在哪（重要）
@@ -109,6 +118,9 @@ hub-go\
 | `proxy_qoder.go` | Qoder 凭据与 COSY 签名 |
 | `qoder_proxy.go` / `qoder_thinking.go` / `qoder_stream.go` | Qoder 服务、思考控制、流改写 |
 | `qoder_models.go` | Qoder 模型目录 |
+| `qoder_envelope.go` | Qoder 请求信封（对齐官方客户端 wire 形态，思考开关所在） |
+| `proxy_zcode.go` / `zcode_*.go` | Zcode（Z.ai）代理：服务 / 目录 / 思考映射 / 流改写 |
+| `auth_zcode.go` | Zcode 桌面端凭据解密（enc:v1 AES-256-GCM 信封） |
 | `auth.go` / `auth_mimo.go` | 凭证读取与刷新 |
 | `sqlite_min.go` | 读取桌面端 SQLite（cookie 等） |
 | `webui.go` | 控制台网页（内嵌进二进制） |
@@ -123,6 +135,7 @@ hub-go\
 | `converter-intl.log` | 国际代理一行摘要 |
 | `converter-mimo.log` | MiMo 代理一行摘要 |
 | `converter-qoder.log` | Qoder 代理一行摘要 |
+| `converter-zcode.log` | Zcode 代理一行摘要 |
 
 默认只记一行请求/响应摘要。
 

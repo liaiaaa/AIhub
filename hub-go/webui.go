@@ -415,6 +415,12 @@ function shortCheckin(s) {
     const m = s.match(/\+\s*([\d,]+)/);
     return '✓' + (m ? ' ' + m[1] : '');
   }
+  // 国际版是「活跃上报」（积分次日到账），文案里没有「签到成功」字样，
+  // 单独认一下，否则会落到末尾兜底被截断成「活跃已上报（+30 积分次日…」。
+  if (s.indexOf('活跃已上报') >= 0) {
+    const m = s.match(/\+\s*([\d,]+)/);
+    return '✓ 活跃' + (m ? ' ' + m[1] : '');
+  }
   if (s.indexOf('已停用') >= 0) return '停用';
   if (s.indexOf('未开放') >= 0) return '未开放';
   if (s.indexOf('未启用') >= 0) return '停用';

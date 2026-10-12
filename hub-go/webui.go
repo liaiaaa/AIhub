@@ -155,6 +155,12 @@ const webHTML = `<!DOCTYPE html>
   .ratio { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px;
            background:#eef0f4; color:var(--muted); flex:none; }
   .ratio.free { background:#e8f7ee; color:#0b7a43; }
+  /* 依赖线路没启动的白名单行：整行弱化 + 明确标注，避免选到必失败的模型 */
+  .agg-item.down { background:#f7f8fa; border-style:dashed; }
+  .agg-item.down .slug, .agg-item.down > span { color:var(--faint); }
+  .agg-item.down .ratio { opacity:.55; }
+  .off-tag { font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:999px;
+             background:#fdf4e3; color:#a35a00; border:1px solid #f6e2bd; flex:none; }
 
   .usage-cols { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:10px; }
   .usage-cols > div { min-width:0; }
@@ -194,6 +200,8 @@ const webHTML = `<!DOCTYPE html>
     .chip.warn { background:#33260f; color:#e0a54a; border-color:#4a3818; }
     .ratio { background:#222831; color:#9aa3ad; }
     .ratio.free { background:#12301f; color:#5fd493; }
+    .agg-item.down { background:#13161b; }
+    .off-tag { background:#33260f; color:#e0a54a; border-color:#4a3818; }
     .tile.on { border-color:#1f3a2a; }
     .tile.warn { border-color:#3a2f18; }
     button.danger { border-color:#4a2622; }
@@ -207,8 +215,8 @@ const webHTML = `<!DOCTYPE html>
     <div class="brand">AIHub<span class="tag">本地模型网关 · Go</span></div>
     <div id="msg"></div>
     <div class="top-actions">
-      <button onclick="refreshAll(true)">刷新</button>
-      <button onclick="act('stop_all')">全部停止</button>
+      <button onclick="refreshAll()">刷新</button>
+      <button onclick="stopAll()">全部停止</button>
       <button class="danger" onclick="exitHub()">退出</button>
     </div>
   </div>
@@ -349,7 +357,7 @@ function updateTiles() {
     if (!el) return;
     const c = credits && credits[s.key];
     if (!c || !c.text) {
-      el.textContent = '额度 —';
+      el.textContent = '额度未查询';
       el.className = 'stale';
     } else if (!c.ok) {
       el.textContent = c.text;
@@ -429,6 +437,7 @@ function ratioBadge(txt) {
 // 只在翻转时补拉（而不是每轮都拉）：否则线路没起来时会每 2 秒重试一次，
 // 下拉反复闪「加载中…」。
 let aggLineSig = null;
+let aggUpSig = null;
 
 function aggSig() {
   const line = document.getElementById('agg-line').value;
@@ -449,6 +458,15 @@ function renderAgg() {
   if (sig !== aggLineSig) {
     aggLineSig = sig;
     aggLoadLineModels();
+  }
+
+  // 任一条线路启停都要更新白名单的灰显（纯本地重渲染，不打接口）
+  const upSig = ['dom', 'intl', 'qoder', 'trae'].map(function (k) {
+    return k + ((state[k] && state[k].up) ? '1' : '0');
+  }).join(',');
+  if (upSig !== aggUpSig) {
+    aggUpSig = upSig;
+    renderAggList();
   }
 }
 let aggLoadSeq = 0;
@@ -471,18 +489,49 @@ async function aggLoadLineModels() {
     if (keep) sel.value = keep;
   } catch (e) { if (seq === aggLoadSeq) sel.innerHTML = '<option value="">加载失败</option>'; }
 }
+// 白名单数据（模型 + 倍率）只在增删/加载时变；而「依赖线路在不在跑」随状态变。
+// 所以把数据缓存下来，渲染拆成两步：拉数据后存缓存，再按当前 state 本地重渲染。
+// 这样状态轮询发现线路启停时，能立刻更新灰显而不必重新打接口。
+let aggModelsCache = null;
+
+// 白名单行：依赖线路没启动的置灰并标注——否则用户会选到必失败的模型，
+// 直到请求报 line_not_running 才发现（2026-10-12 实测 4 个里 3 个是这种）。
+function renderAggList() {
+  const box = document.getElementById('agg-list');
+  if (!box) return;
+  if (!aggModelsCache) {
+    box.innerHTML = '<div class="agg-item">加载中…</div>';
+    return;
+  }
+  const models = aggModelsCache.models || [];
+  const ratios = aggModelsCache.ratios || {};
+  box.innerHTML = models.map(function (m) {
+    const up = !!(state && state[m.line] && state[m.line].up);
+    return '<div class="agg-item' + (up ? '' : ' down') + '"' +
+      (up ? '' : ' title="该模型所在线路（' + (aggLineLabel(m.line)) + '）未启动，现在用它会被拒绝。先在上方启动那条线路。"') + '>' +
+      '<span class="slug">' + m.slug + '</span>' +
+      '<span>' + (m.display || '') + '</span>' + ratioBadge(ratios[m.slug]) +
+      (up ? '' : '<span class="off-tag">线路未启动</span>') +
+      '<span style="flex:1"></span>' +
+      '<button onclick="aggRemove(\'' + m.slug + '\')">删除</button></div>';
+  }).join('') || '<div class="agg-item">还没有模型：选好线路点「添加到 Codex」（Codex 端重开会话生效）</div>';
+}
+
+function aggLineLabel(line) {
+  const sel = document.getElementById('agg-line');
+  if (sel) {
+    for (const o of sel.options) {
+      if (o.value === line) return o.textContent;
+    }
+  }
+  return line;
+}
+
 async function aggRefresh() {
   try {
     const r = await fetch('/api/agg/models', { signal: AbortSignal.timeout(5000) });
-    const d = await r.json();
-    const box = document.getElementById('agg-list');
-    const ratios = d.ratios || {};
-    box.innerHTML = (d.models || []).map(function (m) {
-      return '<div class="agg-item"><span class="slug">' + m.slug + '</span>' +
-        '<span>' + (m.display || '') + '</span>' + ratioBadge(ratios[m.slug]) +
-        '<span style="flex:1"></span>' +
-        '<button onclick="aggRemove(\'' + m.slug + '\')">删除</button></div>';
-    }).join('') || '<div class="agg-item">还没有模型：选好线路点「添加到 Codex」（Codex 端重开会话生效）</div>';
+    aggModelsCache = await r.json();
+    renderAggList();
   } catch (e) { /* 忽略 */ }
 }
 async function aggAdd() {
@@ -514,6 +563,13 @@ async function post(path, body) {
 }
 
 function act(path) { post(path, {}); }
+
+// 全部停止会连 Codex 聚合口一起停掉（聚合口正给 Codex 供流时会当场断流），
+// 破坏力与「退出」相当，所以和退出一样加二次确认。
+function stopAll() {
+  if (!confirm('确定停止全部代理？\n\n会同时停掉 Codex 聚合口（:8790）——如果 Codex 正在通过它对话，会立刻断流。')) return;
+  post('stop_all', {});
+}
 function setCred(name) { post('intl/cred', { cred: name }); }
 
 async function doCheckin() {
@@ -614,8 +670,15 @@ async function loadCredits(force, key) {
   } catch (e) { /* 忽略 */ }
 }
 
-function refreshAll(force) {
-  refresh(); // 额度不随顶部刷新全量拉取，改由各瓦片独立刷新
+// 顶部「刷新」= 全刷：状态 + 昵称 + 额度 + 用量 + 白名单。
+// 额度仍不自动轮询（风控，2026-10-08），只有这里和各瓦片按钮会主动查。
+function refreshAll() {
+  refresh();
+  refreshNick();
+  loadCredits(true);
+  usageRefresh();
+  aggRefresh();
+  aggLoadLineModels();
 }
 
 function fmtTok(n) {
@@ -658,7 +721,7 @@ async function usageRefresh() {
 }
 
 ensureTiles();
-refresh();
+refresh().then(function () { renderAggList(); });   // state 到位后再渲染一次白名单
 refreshNick();
 aggRefresh();
 aggLoadLineModels();

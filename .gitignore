@@ -81,3 +81,12 @@ tools/zcode-relay/zcode-relay-linux
 
 # ---- 未引用的备份产物 ----
 hub-go/assets/icon-old.png
+
+# ---- 抓凭证工具的本地工作区：绝不能入库 ----
+# work/ 里含 ck.sqlite（整个浏览器的 Cookie 库：Google/ChatGPT/Claude/飞书/
+# GitHub 等全部登录态）、disk_jwts.json（落盘的 JWT）、以及 29M 网页资源。
+# 这些是「整台机器的身份」，不是项目产物。2026-10-12 差点被 git add 带进去。
+tools/grab-workbuddy/work/
+tools/grab-workbuddy/__pycache__/
+__pycache__/
+*.pyc

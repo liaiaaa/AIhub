@@ -125,6 +125,9 @@ const webHTML = `<!DOCTYPE html>
   .tile-credit span.stale { color:var(--faint); }
   .tile-credit span.bad { color:var(--err); }
   .credit-ref { padding:3px 9px; font-size:11px; flex:none; border-radius:7px; }
+  .credit-diff { font-weight:600; }
+  .credit-diff.up { color:var(--ok); }
+  .credit-diff.down { color:var(--err); }
   .tile-btns { display:flex; gap:6px; margin-top:2px; flex-wrap:wrap; align-items:center; }
   .tile-btns .spacer { flex:1; }
   .tile-btns button { padding:6px 12px; }
@@ -384,7 +387,16 @@ function updateTiles() {
       el.textContent = c.text;
       el.className = c.text === '查询中…' ? 'stale' : 'bad';
     } else {
-      el.textContent = c.text + (c.fetched_at ? '（' + c.fetched_at + '）' : '');
+      // 国际版带 diff：「较 10-11 +30」——直接回答「昨天上报的活跃到账了吗」，
+      // 不必去官网翻积分明细。用 innerHTML 是为了给差额上色。
+      var diffHtml = '';
+      if (c.diff) {
+        var up = c.diff.indexOf('+') >= 0;
+        var flat = c.diff.indexOf('持平') >= 0;
+        diffHtml = ' <span class="credit-diff' + (up ? ' up' : (flat ? '' : ' down')) + '">' +
+          c.diff + '</span>';
+      }
+      el.innerHTML = c.text + (c.fetched_at ? '（' + c.fetched_at + '）' : '') + diffHtml;
       el.className = '';
     }
   });

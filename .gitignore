@@ -36,6 +36,8 @@ archive/
 # ---- 运行时状态与日志 ----
 *.log
 state.json
+# 每日积分快照（含账号 uid 与余额，运行时状态）
+credit_history.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

@@ -37,6 +37,9 @@ type creditInfo struct {
 	OK        bool   `json:"ok"`
 	Text      string `json:"text"`
 	FetchedAt string `json:"fetched_at,omitempty"`
+	// Diff 是「较前一日」的余额变化文案（仅国际版填，见 credit_history.go）。
+	// 用于回答「昨天上报的活跃，30 分到账了吗」——不必去官网翻积分明细。
+	Diff string `json:"diff,omitempty"`
 }
 
 type creditEntry struct {
@@ -199,6 +202,15 @@ func wbCredits(h *Hub, intl bool) *creditInfo {
 	if err != nil {
 		return &creditInfo{OK: false, Text: name + "凭据读取失败"}
 	}
+	// 国际版要按 uid 记每日快照（凭证目录名会变，uid 才是稳定主键）。
+	// 昵称一并取上，快照里存昵称才认得出哪个账号是哪个。
+	uid, nick := "", ""
+	if intl {
+		if sum, serr := cm.Summary(); serr == nil {
+			uid, _ = sum["uid"].(string)
+			nick, _ = sum["nickname"].(string)
+		}
+	}
 	headers["User-Agent"] = ua
 	headers["X-Product"] = "SaaS"
 	headers["X-IDE-Type"] = "WorkBuddy"
@@ -207,7 +219,7 @@ func wbCredits(h *Hub, intl bool) *creditInfo {
 	body, status, err := httpPostJSON(base+"/billing/meter/get-user-resource-summary", headers, []byte("{}"))
 	if err == nil && status == http.StatusOK {
 		if remain, total, ok := wbSummaryParse(body); ok {
-			return &creditInfo{OK: true, Text: "余额 " + fmtCN(remain) + " / " + fmtCN(total) + " 积分", FetchedAt: time.Now().Format("15:04")}
+			return wbCreditResult(intl, uid, nick, remain, total)
 		}
 	}
 	// 备用老接口：get-user-resource（国内走 /v2；国际无 /v2 首选、/v2 兜底）
@@ -230,7 +242,7 @@ func wbCredits(h *Hub, intl bool) *creditInfo {
 			continue
 		}
 		if remain, total, ok := wbResourceParse(body); ok {
-			return &creditInfo{OK: true, Text: "余额 " + fmtCN(remain) + " / " + fmtCN(total) + " 积分", FetchedAt: time.Now().Format("15:04")}
+			return wbCreditResult(intl, uid, nick, remain, total)
 		}
 	}
 	return &creditInfo{OK: false, Text: name + "额度查询失败（HTTP " + fmt.Sprintf("%d", status) + "，若为 200 则是响应字段变更）"}
@@ -253,6 +265,20 @@ func (n *flexNum) UnmarshalJSON(b []byte) error {
 	}
 	*n = flexNum(f)
 	return nil
+}
+
+// wbCreditResult 组装额度结果；国际版额外记录每日快照并附上差额文案。
+func wbCreditResult(intl bool, uid, name string, remain, total float64) *creditInfo {
+	info := &creditInfo{
+		OK:        true,
+		Text:      "余额 " + fmtCN(remain) + " / " + fmtCN(total) + " 积分",
+		FetchedAt: time.Now().Format("15:04"),
+	}
+	if intl && uid != "" {
+		creditHistoryRecord(uid, name, remain, total)
+		info.Diff = creditHistoryDiffText(uid)
+	}
+	return info
 }
 
 // wbSummaryParse 新接口解析：data.Packages[].CycleRemainCapacity / CycleTotalCapacity

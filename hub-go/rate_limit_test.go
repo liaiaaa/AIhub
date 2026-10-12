@@ -1,7 +1,10 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -207,4 +210,69 @@ type authWithUID struct {
 func (a authWithUID) Headers() (map[string]string, error) { return map[string]string{}, nil }
 func (a authWithUID) Summary() (map[string]any, error) {
 	return map[string]any{"uid": a.uid, "nickname": a.nick}, nil
+}
+
+// 关键回归（2026-10-12 用户报）：**额度查得到 ≠ 能推理**。
+// 实测<凭证目录A>：额度 200、userinfo 200、成长中心 200，但 chat 403 11140。
+// 此前 intlCredStatusOne 只看额度就标 ✓，等于骗用户。
+// 现在必须真探活一次；探到风控要记进台账，且不能标 OK。
+func TestProbeRiskNotMarkedAvailable(t *testing.T) {
+	resetRateLimit(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"code":11140,"msg":"request illegal","displayMsg":{"zh":"内容未通过"}}`))
+	}))
+	defer up.Close()
+
+	res := intlProbeInferWithURL(up.URL)
+	if res != probeRisk {
+		t.Fatalf("403/11140 应判为风控，实际 %v", res)
+	}
+}
+
+// 6004 应判为限流（区别于风控）
+func TestProbeRateLimited(t *testing.T) {
+	resetRateLimit(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"code":6004,"msg":"usage exceeds frequency limit"}`))
+	}))
+	defer up.Close()
+	if res := intlProbeInferWithURL(up.URL); res != probeRateLimited {
+		t.Fatalf("429/6004 应判为限流，实际 %v", res)
+	}
+}
+
+// 200 应判为可用
+func TestProbeOK(t *testing.T) {
+	resetRateLimit(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"h\"}}]}\n\n"))
+	}))
+	defer up.Close()
+	if res := intlProbeInferWithURL(up.URL); res != probeOK {
+		t.Fatalf("200 应判为可用，实际 %v", res)
+	}
+}
+
+// 探活必须真的发请求（不能凭额度就下结论）
+func TestProbeActuallySendsRequest(t *testing.T) {
+	resetRateLimit(t)
+	var hit int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hit, 1)
+		if !strings.Contains(r.URL.Path, "chat/completions") {
+			t.Errorf("应打 chat/completions，实际 %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: {}\n\n"))
+	}))
+	defer up.Close()
+	intlProbeInferWithURL(up.URL)
+	if atomic.LoadInt32(&hit) == 0 {
+		t.Fatal("必须真的发一次推理请求")
+	}
 }

@@ -20,8 +20,12 @@ package main
 // 可能把好账号拖下水；当前只做「如实记录 + 展示」，换号由用户决定。
 
 import (
+"bytes"
 	"encoding/json"
+"io"
+"net/http"
 	"os"
+"strings"
 	"sync"
 	"time"
 )
@@ -325,7 +329,12 @@ func intlCredStatusOne(name, dir string, selected bool) intlCredStatus {
 		st.Nick, _ = sum["nickname"].(string)
 	}
 
-	// 先看本地限流台账（比查上游快，且能给出「限到几点」）
+	// 余额（顺带查，用于判断"是余额没了还是频率限制"）
+	if remain, total, ok := intlCreditsRaw(cm, p); ok {
+		st.Remain, st.Total = remain, total
+	}
+
+	// 先看本地限流台账（比探活快，且能给出「限到几点」）
 	if e, limited := rateLimitFor(st.UID, ""); limited {
 		st.OK = false
 		st.Until = rateLimitShortUntil(e.Until)
@@ -336,22 +345,109 @@ func intlCredStatusOne(name, dir string, selected bool) intlCredStatus {
 		} else {
 			st.State = "限流"
 		}
-		// 限流中也照查额度，方便判断「是余额没了还是频率限制」
-		if remain, total, ok := intlCreditsRaw(cm, p); ok {
-			st.Remain, st.Total = remain, total
-		}
 		return st
 	}
 
-	remain, total, ok := intlCreditsRaw(cm, p)
-	if !ok {
-		st.State = "查询失败"
-		return st
+	// 台账没记录 ≠ 能用。**必须真探一次**：额度查得到只说明 billing 通，
+	// 与推理通道是两回事（2026-10-12 实测<凭证目录A>：额度 200、userinfo 200、
+	// 但 chat 403 11140）。此前这里直接标 ✓ 可用，等于在骗用户。
+	probe := intlProbeInfer(cm, p)
+	switch probe {
+	case probeOK:
+		st.OK = true
+		st.State = "可用"
+	case probeRisk:
+		st.OK = false
+		st.State = "风控"
+		st.Reason = "账号级风控(11140)"
+		st.Until = ""
+		// 探活发现的风控也记进台账，后续查询就不必反复探
+		rateLimitRecord(st.UID, st.Nick, rlKindAccount, "", 11140, st.Reason, time.Time{})
+	case probeRateLimited:
+		st.OK = false
+		st.State = "限流"
+		st.Reason = "用量限流(6004)"
+	default:
+		st.OK = false
+		st.State = "探活失败"
 	}
-	st.Remain, st.Total = remain, total
-	st.OK = true
-	st.State = "可用"
 	return st
+}
+
+// 探活结果
+type probeResult int
+
+const (
+	probeOK probeResult = iota
+	probeRisk
+	probeRateLimited
+	probeUnknown
+)
+
+// intlProbeInfer 发一个最小推理请求，判断该凭证的**推理通道**是否可用。
+//
+// 为什么必须探活：额度接口（billing）与推理接口（chat）是两条通道，
+// 额度 200 不代表能推理。2026-10-12 实测<凭证目录A>就是这种（额度/userinfo/
+// 成长中心全 200，chat 却 403 11140）。只看额度会把坏号标成"可用"。
+//
+// 成本控制：max_tokens=1、prompt 极短、只读到第一帧就断开——不消耗实质额度
+// （实测免费模型本来就不计费）。国际版只支持流式，故用 stream=true。
+func intlProbeInfer(cm *CredentialManager, p *Proxy) probeResult {
+	headers, err := cm.Headers()
+	if err != nil {
+		return probeUnknown
+	}
+	headers["User-Agent"] = p.UserAgent
+	headers["Content-Type"] = "application/json"
+	body, _ := json.Marshal(map[string]any{
+		"model": "hy4-preview", // 免费模型，探活不花钱
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are a helpful assistant."},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+		"max_tokens": 1,
+		"stream":     true,
+	})
+
+	req, err := http.NewRequest("POST", p.Backend+"/v2/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return probeUnknown
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return probeUnknown
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		// 读到第一帧即可判定通道可用（避免等完整生成）
+		buf := make([]byte, 512)
+		if _, err := resp.Body.Read(buf); err == nil {
+			return probeOK
+		}
+		return probeOK // 200 且已建立流式连接
+	}
+	// 非 200：读错误体判类型
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	var em map[string]any
+	if json.Unmarshal(b, &em) == nil {
+		if c, ok := em["code"].(float64); ok {
+			switch int(c) {
+			case 11140:
+				return probeRisk
+			case 6004:
+				return probeRateLimited
+			}
+		}
+		if msg, _ := em["msg"].(string); strings.Contains(msg, "frequency limit") {
+			return probeRateLimited
+		}
+	}
+	return probeUnknown
 }
 
 // intlCreditsRaw 查一个国际凭证的余额（复用 wbCredits 的接口与头）。
@@ -377,4 +473,49 @@ func sortStrings(a []string) {
 			a[j], a[j-1] = a[j-1], a[j]
 		}
 	}
+}
+
+
+// intlProbeInferWithURL 测试用：直接打指定 base URL 探活（生产走 intlProbeInfer）。
+func intlProbeInferWithURL(base string) probeResult {
+	body, _ := json.Marshal(map[string]any{
+		"model": "hy4-preview",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are a helpful assistant."},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+		"max_tokens": 1, "stream": true,
+	})
+	req, err := http.NewRequest("POST", base+"/v2/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return probeUnknown
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return probeUnknown
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		buf := make([]byte, 512)
+		resp.Body.Read(buf)
+		return probeOK
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	var em map[string]any
+	if json.Unmarshal(b, &em) == nil {
+		if c, ok := em["code"].(float64); ok {
+			switch int(c) {
+			case 11140:
+				return probeRisk
+			case 6004:
+				return probeRateLimited
+			}
+		}
+		if msg, _ := em["msg"].(string); strings.Contains(msg, "frequency limit") {
+			return probeRateLimited
+		}
+	}
+	return probeUnknown
 }

@@ -305,26 +305,52 @@ function ratioBadge(txt) {
   if (!txt) return '';
   return '<span class="ratio' + (txt === '免费' ? ' free' : '') + '">' + txt + '</span>';
 }
+// 模型下拉（#agg-model）只在「页面加载」和「切换线路」时取过一次，而
+// /api/agg/line_models 的答案会随线路启停改变（线路没起来时只回一句提示）。
+// 于是启动线路后下拉仍停在旧提示上，必须手动刷新页面才恢复——2026-10-12 用户报的
+// 就是这个。这里记住上次取数时的「线路 + 该线路是否在跑」，轮询发现翻转就补拉。
+// 只在翻转时补拉（而不是每轮都拉）：否则线路没起来时会每 2 秒重试一次，
+// 下拉反复闪「加载中…」。
+let aggLineSig = null;
+
+function aggSig() {
+  const line = document.getElementById('agg-line').value;
+  const up = !!(state && state[line] && state[line].up);
+  return line + '|' + (up ? '1' : '0');
+}
+
 function renderAgg() {
   if (!state) return;
   const a = state.agg || { up: false, models: 0 };
   const dot = document.getElementById('agg-dot');
   dot.className = a.up ? 'dot on' : 'dot';
   document.getElementById('agg-count').textContent = a.up ? (a.models + ' 个模型') : '';
+
+  const sig = aggSig();
+  if (sig !== aggLineSig) {
+    aggLineSig = sig;
+    aggLoadLineModels();
+  }
 }
+let aggLoadSeq = 0;
+
 async function aggLoadLineModels() {
   const line = document.getElementById('agg-line').value;
   const sel = document.getElementById('agg-model');
+  const keep = sel.value;   // 重取时保住用户当前选中的模型
+  const seq = ++aggLoadSeq;
   sel.innerHTML = '<option value="">加载中…</option>';
   try {
     const r = await fetch('/api/agg/line_models?line=' + line, { signal: AbortSignal.timeout(8000) });
     const d = await r.json();
+    if (seq !== aggLoadSeq) return;   // 期间又切了线路/又补拉了一轮，丢弃过期结果
     if (!d.ok) { sel.innerHTML = '<option value="">' + (d.msg || '暂无模型') + '</option>'; return; }
     const ratios = d.ratios || {};
     sel.innerHTML = (d.models || []).map(function (m) {
       return '<option value="' + m + '">' + m + (ratios[m] ? ' · ' + ratios[m] : '') + '</option>';
     }).join('') || '<option value="">该线路无模型</option>';
-  } catch (e) { sel.innerHTML = '<option value="">加载失败</option>'; }
+    if (keep) sel.value = keep;
+  } catch (e) { if (seq === aggLoadSeq) sel.innerHTML = '<option value="">加载失败</option>'; }
 }
 async function aggRefresh() {
   try {

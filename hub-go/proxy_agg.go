@@ -379,10 +379,27 @@ func aggCall(w http.ResponseWriter, r *http.Request, path string, body []byte, h
 }
 
 // aggToChatOnly 只有 chat 协议的线路：chat 请求直调，responses 请求先转换。
-func aggToChatOnly(w http.ResponseWriter, r *http.Request, kind string, nb []byte, chat func(http.ResponseWriter, *http.Request)) {
+// aggToChatOnly 处理「只有 chat/completions 协议的线路」（qoder/trae）的聚合请求。
+//
+// 两条路径都要做双向翻译，缺一不可：
+//   - kind=chat：客户端本来就要 chat，直通即可；
+//   - kind=responses：客户端（Codex，wire_api=responses）只认 Responses 形态，
+//     而 qoder/trae 只会吐 chat 形态，所以请求侧要 Responses→chat、
+//     **响应侧还要 chat→Responses 转回来**。
+//
+// 2026-10-12 修复：此前只做了请求侧转换，响应原样返回 chat 格式
+// （{"object":"chat.completion","choices":[...]}）。Codex 解析不到 output[]
+// 就认为没有内容——实测同一句话经 :8790 返回正文为空，直连 :8797 却正常。
+// 转换复用 dom/intl 路径已有的 responsesStream（它本就吃标准 chat SSE）。
+func aggToChatOnly(w http.ResponseWriter, r *http.Request, kind string, nb []byte, am aggModel, chat func(http.ResponseWriter, *http.Request), rid string, t0 time.Time) {
 	if kind == "chat" {
 		aggCall(w, r, "/v1/chat/completions", nb, chat)
 		return
+	}
+	var rawReq map[string]any
+	clientStream := false
+	if json.Unmarshal(nb, &rawReq) == nil {
+		clientStream, _ = rawReq["stream"].(bool)
 	}
 	cb, err := responsesBodyToChatBody(nb)
 	if err != nil {
@@ -391,8 +408,68 @@ func aggToChatOnly(w http.ResponseWriter, r *http.Request, kind string, nb []byt
 		})
 		return
 	}
+	// 上游一律用流式：responsesStream 逐帧转成 Responses 事件，
+	// 这样流式/非流式客户端都能得到正确的 output[]。
+	cb["stream"] = true
+	if _, ok := cb["stream_options"]; !ok {
+		cb["stream_options"] = map[string]any{"include_usage": true}
+	}
 	b, _ := json.Marshal(cb)
-	aggCall(w, r, "/v1/chat/completions", b, chat)
+
+	// 用 recorder 截住 handleChat 的 chat 格式输出，再转写成 Responses。
+	rec := &chatCapture{header: http.Header{}}
+	aggCall(rec, r, "/v1/chat/completions", b, chat)
+
+	if rec.status >= 400 || !strings.HasPrefix(rec.header.Get("Content-Type"), "text/event-stream") {
+		// 出错时 handleChat 写的是 JSON 错误体，原样透传（保留状态码）
+		for k, vs := range rec.header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+		w.WriteHeader(rec.status)
+		w.Write(rec.body.Bytes())
+		return
+	}
+
+	// 与 dom/intl 路径保持同一语义：客户端要流式就给 SSE，否则给一次性 JSON。
+	// （此前这里无条件走 responsesStream，导致非流式客户端拿到 SSE——
+	// 与 handleResponses 的行为不一致。）
+	// logger 传 nil：responsesStream 只用它记一行完成日志，聚合口这一层的
+	// 用量统计已由 usageTap 覆盖，不必重复记。
+	body := bytes.NewReader(rec.body.Bytes())
+	if clientStream {
+		responsesStream(w, body, nil, rid, t0)
+		return
+	}
+	col := collectStream(body)
+	writeJSON(w, http.StatusOK, buildResponseObject(col, am.Backend))
+}
+
+// chatCapture 是一个只收集不发送的 ResponseWriter：用于把 handleChat 的
+// chat 格式输出截下来，再转成 Responses 形态写给真正的客户端。
+// 不实现 Flusher 是刻意的——handleChat 见到非 Flusher 就不会逐帧 flush，
+// 所有帧都会落在 buf 里，转换阶段一次读全。
+type chatCapture struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (c *chatCapture) Header() http.Header { return c.header }
+func (c *chatCapture) WriteHeader(code int) {
+	if c.status == 0 {
+		c.status = code
+	}
+}
+func (c *chatCapture) Write(p []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	return c.body.Write(p)
 }
 
 // aggDispatch 解析模型前缀 → 找到线路代理 → 改写 model 后按线路协议分发。
@@ -423,6 +500,7 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 	// 用量取样：四条线路的 Codex 请求都必经这里，包一层即全覆盖，不用改各线路流式实现。
 	tap := &usageTap{w: w}
 	w = tap
+	rid := randHex(4)
 	t0 := time.Now()
 	defer func() { recordTap(tap, am, kind, time.Since(t0).Milliseconds()) }()
 	switch am.Line {
@@ -443,14 +521,14 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 			aggLineOff(w, am)
 			return
 		}
-		aggToChatOnly(w, r, kind, nb, p.handleChat)
+		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
 	case "trae":
 		p := h.traeForAgg()
 		if p == nil || !p.Running() {
 			aggLineOff(w, am)
 			return
 		}
-		aggToChatOnly(w, r, kind, nb, p.handleChat)
+		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]any{"message": "未知线路：" + am.Line, "type": "invalid_request_error"},

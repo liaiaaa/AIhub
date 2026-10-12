@@ -228,14 +228,14 @@ func responsesInputToMessages(raw map[string]any) []any {
 				if role == "" {
 					role = "user"
 				}
-				text := responsesContentText(item["content"])
-				if strings.TrimSpace(text) == "" {
+				content := responsesContentChat(item["content"])
+				if isEmptyChatContent(content) {
 					continue
 				}
 				if role == "developer" || role == "system" {
-					text = sanitizeHarnessPrompt(text)
+					content = sanitizeHarnessPromptAny(content)
 				}
-				msgs = append(msgs, map[string]any{"role": role, "content": text})
+				msgs = append(msgs, map[string]any{"role": role, "content": content})
 			case "function_call":
 				name, _ := item["name"].(string)
 				callID, _ := item["call_id"].(string)
@@ -304,6 +304,142 @@ func responsesContentText(v any) string {
 		return strings.Join(parts, "")
 	}
 	return ""
+}
+
+// responsesContentChat 把 Responses 的 content 转成 chat 协议可用的 content。
+//
+// 纯文本时返回 string（保持既有形态，绝大多数请求走这条，不影响上游解析）；
+// 含图片时返回 parts 数组，元素为 {"type":"text"} 与 {"type":"image_url"} 交替。
+//
+// 背景（2026-10-12 修复）：此前只有 responsesContentText，它只认文本片段，
+// Codex 传的 {"type":"input_image"} 被静默跳过；更糟的是纯图片消息在
+// responsesInputToMessages 里因「文本为空」被整条丢弃，模型从未收到图片。
+// 实测同一张图直发 chat 格式能被正确识别，经本层翻译后变成「没有收到图片」。
+func responsesContentChat(v any) any {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		parts := make([]any, 0, len(c))
+		var textBuf []string
+		flush := func() {
+			if len(textBuf) > 0 {
+				parts = append(parts, map[string]any{
+					"type": "text", "text": strings.Join(textBuf, ""),
+				})
+				textBuf = nil
+			}
+		}
+		for _, p := range c {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch pm["type"] {
+			case "input_text", "output_text", "text":
+				if t, ok := pm["text"].(string); ok {
+					textBuf = append(textBuf, t)
+				}
+			case "input_image", "image_url":
+				url := chatImageURL(pm)
+				if url == "" {
+					continue
+				}
+				flush()
+				parts = append(parts, map[string]any{
+					"type": "image_url",
+					"image_url": map[string]any{
+						"url":    url,
+						"detail": chatImageDetail(pm),
+					},
+				})
+			case "refusal":
+				if t, ok := pm["refusal"].(string); ok {
+					textBuf = append(textBuf, t)
+				}
+			}
+		}
+		if len(parts) == 0 {
+			return strings.Join(textBuf, "")
+		}
+		flush() // 收尾：把最后一段文本补在图片之后
+		return parts
+	}
+	return ""
+}
+
+// chatImageURL 从图片片段里取 URL。Responses 用 {"image_url":"data:..."}（字符串），
+// chat 用 {"image_url":{"url":"data:..."}}，两种形态都认。
+func chatImageURL(pm map[string]any) string {
+	switch u := pm["image_url"].(type) {
+	case string:
+		return u
+	case map[string]any:
+		s, _ := u["url"].(string)
+		return s
+	}
+	return ""
+}
+
+// chatImageDetail 取 detail 档位。两种位置都认：Responses 形态放在片段顶层
+// （{"type":"input_image","detail":"low"}），chat 形态放在 image_url 对象里
+// （{"image_url":{"url":...,"detail":"low"}}）。
+// 上游不认 "original"（Codex 在 supports_image_detail_original=false 时本来也
+// 不会发），统一退到 high，避免把非法档位原样透传给上游报错。
+func chatImageDetail(pm map[string]any) string {
+	d, _ := pm["detail"].(string)
+	if d == "" {
+		if im, ok := pm["image_url"].(map[string]any); ok {
+			d, _ = im["detail"].(string)
+		}
+	}
+	if d == "" || d == "original" {
+		return "high"
+	}
+	return d
+}
+
+// isEmptyChatContent 判断 chat content 是否「空」。
+// 纯文本按 trim 后判空；数组只要非空即视为有效（纯图片消息的文本是空的，
+// 但它必须留下，否则整条消息会被丢掉——这正是原 bug 的第二个成因）。
+func isEmptyChatContent(v any) bool {
+	switch c := v.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(c) == ""
+	case []any:
+		return len(c) == 0
+	}
+	return false
+}
+
+// sanitizeHarnessPromptAny 是 sanitizeHarnessPrompt 的多形态版本：
+// content 可能是 string，也可能是 parts 数组（含图时必须按 part 处理，
+// 只降敏其中的文本，图片原样保留）。
+func sanitizeHarnessPromptAny(v any) any {
+	switch c := v.(type) {
+	case string:
+		return sanitizeHarnessPrompt(c)
+	case []any:
+		out := make([]any, 0, len(c))
+		for _, p := range c {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				out = append(out, p)
+				continue
+			}
+			if t, ok := pm["text"].(string); ok {
+				nm := cloneMap(pm)
+				nm["text"] = sanitizeHarnessPrompt(t)
+				out = append(out, nm)
+				continue
+			}
+			out = append(out, p)
+		}
+		return out
+	}
+	return v
 }
 
 // responsesItemOutput 兼容 string 与数组两种 function_call_output 形态。

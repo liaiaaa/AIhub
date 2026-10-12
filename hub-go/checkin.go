@@ -32,6 +32,9 @@ import (
 
 const qoderOpenAPIBase = "https://openapi.qoder.com.cn"
 
+// intlReportURL 国际版活跃上报端点。独立成变量，测试里替换为桩服务地址。
+var intlReportURL = "https://www.workbuddy.ai/v2/report"
+
 // checkinResult 一次签到动作的结果（展示用）。
 type checkinResult struct {
 	OK     bool   `json:"ok"`
@@ -76,6 +79,94 @@ func domCheckin() checkinResult {
 		return checkinResult{OK: false, Detail: fmt.Sprintf("HTTP %d：%s", status, truncate(msg, 160))}
 	}
 	return checkinResult{OK: false, Detail: fmt.Sprintf("HTTP %d：%s", status, truncate(string(body), 160))}
+}
+
+// intlCheckin 国际版 WorkBuddy AI 的「每日活跃上报」。
+//
+// 与国内/ Qoder/Trae 的签到不同：国际版没有 daily-checkin 端点，它的 30 积分
+// 是「每日活跃奖励」——由**客户端主动上报 chat_request_send 事件**触发，
+// 而不是服务端看到你发过对话请求。所以光用 Codex 经 hub-go 对话**拿不到**，
+// 必须补这一步上报（2026-10-12 用户实测：次日看不到 30 积分到账）。
+//
+// 证据链：
+//   - 官方文档（www.workbuddy.ai/docs/zh/workbuddy/Subscription）：Free 每天 30 分、
+//     Pro 50 分；「对应积分通常将在次日发放」；**网页端不计入**，须客户端发起。
+//   - 端点与事件形状照抄开源实现 linguo2625469/workbuddy2api-panel
+//     （internal/upstream/report.go、scripts/probe_active.py）：POST /v2/report，
+//     body 为 [chat_request_send 事件]；**事件必须带 userId，缺失则 200 但静默丢弃**。
+//   - 本机实测（2026-10-12，<凭证目录C>）：上报前 growth/streak 的 days=0，
+//     上报后 days=1 → 事件被真实接受，非静默丢弃。
+//
+// 风控口径：每号每天 1 次即可（文档「同一账号每日最多获得一次」；开源实现也注明
+// 「不做多时点高频上报」）。这里只在用户点「一键签到」时触发，不自动定时。
+//
+// 风险已知并已告知用户：文档「活动限制」把「接口调用…刷取活跃」列为违规。
+// 本实现只上报真实发生过的对话行为、不批量、不多账号轮刷。
+func intlCheckin(cred string) checkinResult {
+	dir := credDirs()[cred]
+	if dir == "" || !dirHasCredential(dir) {
+		return checkinResult{OK: false, Detail: "未找到国际版凭据：" + cred}
+	}
+	p := NewIntlProxy(dir)
+	path := p.AuthFilePath()
+	if path == "" || !fileExists(path) {
+		return checkinResult{OK: false, Detail: "未找到国际版凭据文件"}
+	}
+	cm := NewCredentialManager(path, p.Backend, p.DefaultDomain, p.UserAgent)
+	sum, err := cm.Summary()
+	if err != nil {
+		return checkinResult{OK: false, Detail: "读取凭据失败：" + err.Error()}
+	}
+	uid, _ := sum["uid"].(string)
+	if uid == "" {
+		return checkinResult{OK: false, Detail: "凭据缺少 uid，无法上报活跃"}
+	}
+	headers, err := cm.Headers()
+	if err != nil {
+		return checkinResult{OK: false, Detail: "读取凭据失败：" + err.Error()}
+	}
+	// 事件里也要带 userId（服务端按它归属账号），与请求头 X-User-Id 双保险。
+	ev := intlChatRequestEvent(uid, "deepseek-v4.1-flash", "DeepSeek V4.1 Flash")
+	payload, _ := json.Marshal([]any{ev})
+	body, status, err := httpPostJSON(intlReportURL, headers, payload)
+	if err != nil {
+		return checkinResult{OK: false, Detail: "网络失败：" + err.Error()}
+	}
+	if status == http.StatusOK {
+		var r struct {
+			Code int `json:"code"`
+		}
+		if json.Unmarshal(body, &r) == nil && r.Code == 0 {
+			return checkinResult{OK: true, Detail: "活跃已上报（+30 积分次日到账）"}
+		}
+	}
+	if msg := jsonMsgField(body); msg != "" {
+		return checkinResult{OK: false, Detail: fmt.Sprintf("HTTP %d：%s", status, truncate(msg, 160))}
+	}
+	return checkinResult{OK: false, Detail: fmt.Sprintf("HTTP %d：%s", status, truncate(string(body), 160))}
+}
+
+// intlChatRequestEvent 构造客户端 chat_request_send 事件。
+// 字段形状照抄真实客户端（开源实现 report.go 的 chatRequestEvent），
+// 刻意用全字段而非最小集，防上游后续加严。
+func intlChatRequestEvent(uid, modelID, modelName string) map[string]any {
+	now := time.Now().UnixMilli()
+	cid := fmt.Sprintf("hub-go-active-%d", now)
+	return map[string]any{
+		"eventCode": "chat_request_send", "timestamp": now, "reportDelay": 0,
+		"mode": "craft", "conversationId": cid, "requestId": cid,
+		"inputLength": 12, "requestModelId": modelID, "requestModelName": modelName,
+		"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
+		"codebaseEnable": false, "maxToken": 0, "maxSteps": 0,
+		"temperature": 0, "maxRetries": 0,
+		"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
+		"codebaseId": "", "mentionContextCount": 0, "command": "",
+		"expertId": "", "recommendId": "", "skillId": "", "skillCount": 0,
+		"totalCount": 0, "fileUri": "", "presentAt": now, "traceId": "",
+		"rootRequestId": cid, "parentConversationId": cid,
+		"agentName": "default", "agentType": "conversation",
+		"userId": uid,
+	}
 }
 
 // qoderCheckin Qoder 国内版每日签到：查活动 → 逐个领取。
@@ -361,12 +452,20 @@ func traeRewardField(m map[string]any) string {
 // 2026-10-08 变更：Qoder 签到永久停用——网关活动领取反复失败，且该平台
 // 对自动/定时类操作风控敏感（用户拍板）。仅保留国内 WorkBuddy + Trae。
 func runCheckin(h *Hub) (bool, string) {
+	// 国际版用控制台当前选中的凭证（与 8799 线路一致）
+	h.mu.Lock()
+	intlCred := h.intlCred
+	h.mu.Unlock()
+
 	domCh := make(chan checkinResult, 1)
 	traeCh := make(chan checkinResult, 1)
+	intlCh := make(chan checkinResult, 1)
 	go func() { domCh <- domCheckin() }()
 	go func() { traeCh <- traeCheckin() }()
+	go func() { intlCh <- intlCheckin(intlCred) }()
 	dom := <-domCh
 	trae := <-traeCh
+	intl := <-intlCh
 	const qoderDetail = "已停用"
 
 	h.mu.Lock()
@@ -374,16 +473,17 @@ func runCheckin(h *Hub) (bool, string) {
 		Date:  time.Now().Format("2006-01-02"),
 		Time:  time.Now().Format("15:04:05"),
 		Dom:   dom.Detail,
+		Intl:  intl.Detail,
 		Qoder: qoderDetail,
 		Trae:  trae.Detail,
-		OK:    dom.OK && trae.OK,
+		OK:    dom.OK && trae.OK && intl.OK,
 	}
 	h.saveStateLocked()
 	rec := h.checkin
 	h.mu.Unlock()
 
-	logHub("签到 | 国内=%s | Qoder=%s | Trae=%s", dom.Detail, rec.Qoder, rec.Trae)
-	msg := "国内 WorkBuddy：" + dom.Detail + "；Qoder：" + rec.Qoder + "；Trae：" + rec.Trae
+	logHub("签到 | 国内=%s | 国际=%s | Qoder=%s | Trae=%s", dom.Detail, intl.Detail, rec.Qoder, rec.Trae)
+	msg := "国内：" + dom.Detail + "；国际：" + intl.Detail + "；Qoder：" + rec.Qoder + "；Trae：" + rec.Trae
 	return rec.OK, msg
 }
 

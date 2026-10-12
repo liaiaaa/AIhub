@@ -32,6 +32,7 @@ type checkinRecord struct {
 	Date  string `json:"date"`
 	Time  string `json:"time"`
 	Dom   string `json:"dom"`
+	Intl  string `json:"intl"`
 	Qoder string `json:"qoder"`
 	Trae  string `json:"trae"`
 	OK    bool   `json:"ok"`

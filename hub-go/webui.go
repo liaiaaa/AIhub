@@ -440,11 +440,12 @@ function renderCheckin() {
   // 完整原文挂 title，悬停仍可看全。
   const parts = [];
   if (c.dom) parts.push('国内 ' + shortCheckin(c.dom));
+  if (c.intl) parts.push('国际 ' + shortCheckin(c.intl));
   if (c.qoder) parts.push('Qoder ' + shortCheckin(c.qoder));
   if (c.trae) parts.push('Trae ' + shortCheckin(c.trae));
   sum.textContent = c.date.slice(5) + ' ' + (c.time || '').slice(0, 5) + ' · ' + parts.join(' · ');
   sum.title = c.date + ' ' + (c.time || '') + '：' +
-    [c.dom && '国内 ' + c.dom, c.qoder && 'Qoder ' + c.qoder, c.trae && 'Trae ' + c.trae]
+    [c.dom && '国内 ' + c.dom, c.intl && '国际 ' + c.intl, c.qoder && 'Qoder ' + c.qoder, c.trae && 'Trae ' + c.trae]
       .filter(Boolean).join('；');
   if (c.date === todayStr && c.ok) {
     chip.textContent = '今日已签';

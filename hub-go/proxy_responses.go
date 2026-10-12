@@ -178,6 +178,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		if cb, err := json.Marshal(chatBody); err == nil {
 			_ = os.WriteFile(dataPath("last_r_body.json"), cb, 0644)
 		}
+		recordRateLimitFromBody(auth, payload, b)
 		b = annotateRiskControl(resp.StatusCode, b)
 		writeJSON(w, resp.StatusCode, map[string]any{
 			"error": map[string]any{"message": truncate(string(b), 1200), "type": "upstream_error", "code": resp.StatusCode},

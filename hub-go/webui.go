@@ -125,6 +125,12 @@ const webHTML = `<!DOCTYPE html>
   .tile-credit span.stale { color:var(--faint); }
   .tile-credit span.bad { color:var(--err); }
   .credit-ref { padding:3px 9px; font-size:11px; flex:none; border-radius:7px; }
+  .cred-item { display:inline-flex; align-items:center; gap:3px; }
+  .cred-badge { font-size:10px; font-weight:600; padding:1px 5px; border-radius:999px;
+                background:#eef0f4; color:var(--muted); }
+  .cred-badge.ok { background:#e8f7ee; color:#0b7a43; }
+  .cred-badge.warn { background:#fdf4e3; color:#a35a00; }
+  .cred-badge.bad { background:#fdeceb; color:var(--err); }
   .credit-diff { font-weight:600; }
   .credit-diff.up { color:var(--ok); }
   .credit-diff.down { color:var(--err); }
@@ -316,7 +322,7 @@ const SERVICES = [
   { key:'mimo',  name:'MiMo（小米）', port:8798 },
   { key:'zcode', name:'Zcode（Z.ai）', port:8796, zkey:true },
 ];
-let state = null, credits = null, nicks = {};
+let state = null, credits = null, nicks = {}, credStatus = null;
 const CREDIT_KEYS = ['dom','intl','qoder','trae'];
 const msgEl = document.getElementById('msg');
 
@@ -400,24 +406,56 @@ function updateTiles() {
       el.className = '';
     }
   });
-  // 国际版凭证单选（仅列表/选中变化时重建，避免打断交互）
+  renderCreds();
+}
+
+// 国际版凭证区：单选 + 可用性徽标。
+//
+// 2026-10-12 新增：显示每个账号「能不能用 / 限流到几点 / 余额」。
+// 原先只有单选按钮，被限到几点得靠用户记忆（上游 6004 文案里带恢复时刻，
+// 但只出现在报错那一刻）。数据来自 /api/intl/creds（见 rate_limit.go）。
+//
+// 重建条件用「选中项 + 各账号状态指纹」，任一变化才重建——避免每次
+// 2 秒轮询都重建 DOM 打断用户正在点的单选。
+function credsSig(list) {
+  return (list || []).map(function (c) {
+    return c.name + ':' + c.state + ':' + (c.until || '') + ':' + (c.ok ? '1' : '0');
+  }).join('|');
+}
+
+function renderCreds() {
   const row = document.getElementById('cred-row');
-  if (row && state && row.dataset.cred !== state.intl_cred) {
-    row.dataset.cred = state.intl_cred;
-    row.innerHTML = '<span>凭证：</span>';
-    (state.creds || []).forEach(function (name) {
-      const lab = document.createElement('label');
-      const inp = document.createElement('input');
-      inp.type = 'radio';
-      inp.name = 'cred';
-      inp.value = name;
-      inp.checked = (name === state.intl_cred);
-      inp.onchange = function () { setCred(name); };
-      lab.appendChild(inp);
-      lab.appendChild(document.createTextNode(name));
-      row.appendChild(lab);
-    });
-  }
+  if (!row || !state) return;
+  const list = credStatus || [];
+  if (!list.length) return;
+  const sig = state.intl_cred + '#' + credsSig(list);
+  if (row.dataset.sig === sig) return;   // 无变化，不动 DOM
+  row.dataset.sig = sig;
+  row.innerHTML = '<span>凭证：</span>';
+  list.forEach(function (c) {
+    const lab = document.createElement('label');
+    lab.className = 'cred-item';
+    lab.title = c.nick
+      ? (c.nick + (c.reason ? ' · ' + c.reason : '') + (c.until ? ' · 恢复 ' + c.until + '（' + c.remain_txt + '）' : '')
+         + (c.remain >= 0 ? ' · 余额 ' + Math.round(c.remain) + '/' + Math.round(c.total) : ''))
+      : c.name;
+    const inp = document.createElement('input');
+    inp.type = 'radio';
+    inp.name = 'cred';
+    inp.value = c.name;
+    inp.checked = (c.name === state.intl_cred);
+    inp.onchange = function () { setCred(c.name); };
+    lab.appendChild(inp);
+    lab.appendChild(document.createTextNode(c.name));
+    // 状态徽标：可用(绿) / 限流(黄) / 风控(红) / 未知(灰)
+    const cls = c.ok ? 'ok' : (c.state === '风控' ? 'bad' : (c.state === '限流' ? 'warn' : ''));
+    const txt = c.ok ? '✓' : (c.until ? c.until : c.state);
+    const b = document.createElement('span');
+    b.className = 'cred-badge ' + cls;
+    b.textContent = txt;
+    lab.appendChild(b);
+    row.appendChild(lab);
+  });
 }
 
 // 签到结果压缩：「签到成功，+100 积分」→「✓ +100」，「已停用」→「停用」。
@@ -725,6 +763,17 @@ async function refreshNick() {
   } catch (e) { /* 下次轮询再试 */ }
 }
 
+// 拉全部国际凭证的可用性（哪个能用 / 限流到几点 / 余额）。
+// 上游查询有成本，所以只在「页面加载」和「点刷新额度/右上刷新」时拉，
+// 不跟着 2 秒状态轮询走（与额度本身的风控口径一致，2026-10-08 用户拍板）。
+async function loadCredStatus(force) {
+  try {
+    const r = await fetch('/api/intl/creds' + (force ? '?force=1' : ''), { signal: AbortSignal.timeout(30000) });
+    const d = await r.json();
+    if (d && d.creds) { credStatus = d.creds; renderCreds(); }
+  } catch (e) { /* 忽略：下次刷新再试 */ }
+}
+
 async function loadCredits(force, key) {
   try {
     let url = '/api/credits';
@@ -756,6 +805,7 @@ function refreshAll() {
   refresh();
   refreshNick();
   loadCredits(true);
+  loadCredStatus(true);
   usageRefresh();
   aggRefresh();
   aggLoadLineModels();
@@ -833,7 +883,8 @@ async function usageRefresh() {
 }
 
 ensureTiles();
-refresh().then(function () { renderAggList(); });   // state 到位后再渲染一次白名单
+refresh().then(function () { renderAggList(); });
+loadCredStatus(false);   // 凭证可用性（哪个能用/限流到几点）
 refreshNick();
 aggRefresh();
 aggLoadLineModels();

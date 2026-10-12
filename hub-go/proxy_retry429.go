@@ -194,6 +194,7 @@ func (p *Proxy) doUpstreamRetry429(ctx context.Context, client *http.Client, aut
 		plan := planRetry429(hdr, body, attempt)
 		if !plan.retryable {
 			logger.Log("[%s] ✗ 429 不可重试（配额类）| %s", rid, truncate(string(body), 160))
+			recordRateLimitFromBody(auth, payload, body)
 			return synthResponse(http.StatusTooManyRequests, hdr, annotateRetryGiveUp(body, plan.hint, attempt-1, waited)), nil
 		}
 		if waited+plan.wait > budget {
@@ -284,4 +285,59 @@ func synthResponse(status int, header http.Header, body []byte) *http.Response {
 		ContentLength: int64(len(body)),
 		Uncompressed:  true,
 	}
+}
+
+
+// recordRateLimitFromBody 把上游限流记进台账（供控制台展示「限到几点」）。
+// 从 429 响应体里取业务码、恢复时刻，从 payload 取模型名，从 auth 取 uid/昵称。
+// 任何一步拿不到都安静跳过——记录失败绝不能影响请求本身。
+func recordRateLimitFromBody(auth AuthProvider, payload, body []byte) {
+	if auth == nil {
+		return
+	}
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return
+	}
+	code := 0
+	switch v := m["code"].(type) {
+	case float64:
+		code = int(v)
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			code = int(n)
+		}
+	}
+	msg, _ := m["msg"].(string)
+
+	// 模型名：从请求体里取（上游 429 不带模型信息）
+	model := ""
+	var req map[string]any
+	if json.Unmarshal(payload, &req) == nil {
+		model, _ = req["model"].(string)
+	}
+
+	uid, nick := "", ""
+	if sum, err := auth.Summary(); err == nil {
+		uid, _ = sum["uid"].(string)
+		nick, _ = sum["nickname"].(string)
+	}
+	if uid == "" {
+		return
+	}
+
+	kind, reason := rlKindModel, "限流"
+	if code == 11140 {
+		// 11140 实测是账号级：连 hi/1+1 都被拒（2026-10-12 验证<凭证目录A>），
+		// 与内容无关，故记为账号级（全模型不可用）。
+		kind, reason = rlKindAccount, "账号级风控(11140)"
+	} else if strings.Contains(msg, "frequency limit") {
+		reason = "用量限流(6004)"
+	}
+
+	resetAt := time.Time{}
+	if t, ok := parseResetAt(msg); ok {
+		resetAt = t
+	}
+	rateLimitRecord(uid, nick, kind, model, code, reason, resetAt)
 }

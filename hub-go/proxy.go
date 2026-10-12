@@ -517,6 +517,7 @@ func (p *Proxy) streamToClient(w http.ResponseWriter, r *http.Request, auth Auth
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		logger.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
+		recordRateLimitFromBody(auth, payload, b)
 		b = annotateRiskControl(resp.StatusCode, b)
 		sseError(w, resp.StatusCode, truncate(string(b), 1200))
 		return
@@ -561,6 +562,7 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		logger.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
+		recordRateLimitFromBody(auth, payload, b)
 		b = annotateRiskControl(resp.StatusCode, b)
 		var detail any
 		if json.Unmarshal(b, &detail) == nil {

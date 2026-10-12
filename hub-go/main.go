@@ -75,6 +75,7 @@ func main() {
 	mux.HandleFunc("/api/intl/switch", hub.apiIntlSwitch)
 	mux.HandleFunc("/api/checkin", hub.apiCheckin)
 	mux.HandleFunc("/api/intl/checkin", hub.apiIntlCheckin)
+	mux.HandleFunc("/api/intl/creds", hub.apiIntlCreds)
 	mux.HandleFunc("/api/credits", hub.apiCredits)
 	mux.HandleFunc("/api/usage", hub.apiUsage)
 	mux.HandleFunc("/api/stop_all", hub.apiStopAll)

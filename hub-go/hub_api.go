@@ -168,6 +168,13 @@ func (h *Hub) apiCheckin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
 
+// apiIntlCreds 汇总全部国际凭证的可用性（哪个能用 / 限流到几点 / 余额多少）。
+// 这是「限流看板」的数据源：让用户不必记「被限到几点」。
+func (h *Hub) apiIntlCreds(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("force") == "1"
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "creds": intlCredsStatus(h, force)})
+}
+
 // apiIntlCheckin 单独给全部国际凭证做活跃上报（不碰国内/Trae）。
 func (h *Hub) apiIntlCheckin(w http.ResponseWriter, r *http.Request) {
 	ok, msg := runIntlCheckin(h)

@@ -266,7 +266,7 @@ func responsesInputToMessages(raw map[string]any) []any {
 				msgs = append(msgs, map[string]any{
 					"role":         "tool",
 					"tool_call_id": callID,
-					"content":      responsesItemOutput(item["output"]),
+					"content":      responsesItemOutputChat(item["output"]),
 				})
 			case "reasoning":
 				// chat 协议没有可回放的结构化 reasoning，丢弃即可，
@@ -280,6 +280,10 @@ func responsesInputToMessages(raw map[string]any) []any {
 }
 
 // responsesContentText 拼接 content 数组里的文本片段。
+//
+// 注意：图片路径已改走 responsesContentChat / responsesItemOutputChat
+// （见下方 2026-10-12 两次修复的说明），本函数现在只用于「确定只要文本」的
+// 场合，不要再拿它去处理可能含图的 content——它会静默丢掉图片。
 func responsesContentText(v any) string {
 	switch c := v.(type) {
 	case string:
@@ -443,13 +447,34 @@ func sanitizeHarnessPromptAny(v any) any {
 	return v
 }
 
-// responsesItemOutput 兼容 string 与数组两种 function_call_output 形态。
-func responsesItemOutput(v any) string {
+// responsesItemOutputChat 把 function_call_output 的 output 转成 chat 协议可用的 content。
+//
+// 背景（2026-10-12 第二次修复）：Codex 的 view_image / 截图类工具把图片放在
+// **工具结果**里（function_call_output 的 output 是 [{input_image}, ...]），
+// 而不是放在用户消息里。此前这里直接调 responsesContentText 取纯文本，图片
+// 被静默丢弃 → 工具结果变成空字符串 → 模型看到的是「view_image 返回了空结果」，
+// 于是回一句「工具没有返回任何图像内容，我看不到」，再开始凭文件名/上下文瞎猜。
+// 这与用户报的「同一张图 DSH 能找到邮箱、Codex 找不到还胡扯」完全吻合：
+// DSH 走 chat 协议直发（工具消息里 image_url 原样保留），Codex 走 Responses
+// 翻译层被吃掉。
+//
+// 形态约定与消息侧一致：纯文本返回 string（绝大多数工具结果走这条，形态不变）；
+// 含图片时返回 parts 数组，text/image_url 交替，顺序保持。纯图片（无文本）也
+// 必须留下——上游实测接受 role=tool 的 content 为 parts 数组。
+func responsesItemOutputChat(v any) any {
 	switch o := v.(type) {
 	case string:
 		return o
 	case []any:
-		return responsesContentText(o)
+		content := responsesContentChat(o)
+		if isEmptyChatContent(content) {
+			// 图片取不到 URL 且无文本：给上游一个空串，保持与旧行为一致，
+			// 避免把 null content 塞进 tool 消息触发上游参数校验错误。
+			return ""
+		}
+		return content
+	case nil:
+		return ""
 	default:
 		b, _ := json.Marshal(v)
 		return string(b)

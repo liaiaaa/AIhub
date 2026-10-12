@@ -15,9 +15,14 @@ _backups_disabled/
 
 # ---- 凭据：绝不入库（含 accessToken / refreshToken）----
 *.info
+*_api_key.txt
 <凭证目录A>/
 <凭证目录B>/
 <凭证目录C>/
+# WorkBuddy 桌面端 5.7.6 字段加密的本地解密密钥（从桌面端主进程取，见 hub-go/workbuddy_atrest.go）
+wbatrest.key
+# Trae 桌面端 storage.json（tc 信封里的登录态，跨平台可解）
+Trae CN/
 
 # ---- 归档区（保留在磁盘，但不进版本库）----
 archive/
@@ -36,6 +41,9 @@ _*.txt
 # ---- 与 Go 代理无关的实验沙箱（0.44GB，独立 scratch 工作区）----
 qoder-sandbox/
 
+# ---- 对外发布版（独立 git 仓库，推送 Gitee，勿嵌套进本仓库）----
+hub-go-publish/
+
 # ---- 编辑器/系统 ----
 .vscode/
 .idea/
@@ -44,3 +52,32 @@ desktop.ini
 
 # ---- Go ----
 # vendor/ 视需要再决定是否入库
+
+# ---- zcode-relay 本地部署（含密钥与日志，不入库）----
+tools/zcode-relay/config.yaml
+tools/zcode-relay/relay.log
+tools/zcode-relay/*.log
+tools/zcode-relay/engine/
+
+# ---- 构建产物（无扩展名的可执行文件；bin/ 已在上面忽略）----
+hub-go/aihub
+
+# ---- 数据根游离文件：运行时状态与调试转储（不是源码）----
+agg_models.json
+usage.jsonl
+last_r_body.json
+qoder-dump-*.json
+
+# ---- 第三方参考源码缓存 / 生成图（本地留用，不入库）----
+.ref-zcode-api/
+vibe_images/
+tools/zcode-cli/zcode.cjs
+
+# ---- zcode-relay 本地部署：浏览器配置（含 Cookies / Login Data）、
+#      node_modules、崩溃转储、自包含二进制，一律不入库 ----
+tools/zcode-relay/mint/
+tools/zcode-relay/zcode-relay.exe
+tools/zcode-relay/zcode-relay-linux
+
+# ---- 未引用的备份产物 ----
+hub-go/assets/icon-old.png

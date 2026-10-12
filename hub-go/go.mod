@@ -1,3 +1,3 @@
-module workbuddy-hub
+module aihub
 
 go 1.27

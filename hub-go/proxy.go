@@ -85,6 +85,10 @@ type Proxy struct {
 	LogPath       string
 	DirectOnly    bool // 直连后端，不读系统代理（国内 / 小米服务器，避免依赖代理软件）
 
+	// ThinkingDefault：客户端没指定思考档位时补的默认档（见 default_thinking.go）。
+	// 空串 = 不注入，完全透传。
+	ThinkingDefault string
+
 	mu     sync.Mutex
 	auth   AuthProvider
 	log    *FileLogger
@@ -208,7 +212,7 @@ func (p *Proxy) buildAuth() (AuthProvider, string) {
 	}
 	af := p.AuthFilePath()
 	if af == "" || !fileExists(af) {
-		return nil, "未找到登录凭据文件，请先在桌面端登录"
+		return nil, fmt.Sprintf("未找到登录凭据文件（预期位置：%s）。桌面端登录后可把它的 auth 目录整体拷到数据根，或用 WORKBUDDY_AUTH_DIR 指到放凭据的目录", af)
 	}
 	cred := NewCredentialManager(af, p.Backend, p.DefaultDomain, p.UserAgent)
 	if _, err := cred.Summary(); err != nil {
@@ -217,44 +221,79 @@ func (p *Proxy) buildAuth() (AuthProvider, string) {
 	return cred, ""
 }
 
+// pickAuthFile 在一个目录里挑凭据文件：先要标准名，再退到目录内任意 *.info。
+// 国内线路绝不捡走国际线路那份 -ai.info（两套后端、两套 token）。
+func (p *Proxy) pickAuthFile(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	exact := filepath.Join(dir, p.AuthFileName)
+	if fileExists(exact) {
+		return exact
+	}
+	m, _ := filepath.Glob(filepath.Join(dir, "*.info"))
+	if len(m) == 0 {
+		return ""
+	}
+	sort.Strings(m)
+	for _, e := range m {
+		base := filepath.Base(e)
+		if base == p.AuthFileName {
+			return e
+		}
+		if p.AuthFileName == "workbuddy-desktop.info" && strings.HasSuffix(base, "-ai.info") {
+			continue
+		}
+		return e
+	}
+	return ""
+}
+
 func (p *Proxy) AuthFilePath() string {
 	if p.Kind == "mimo" {
 		return mimoCookiePath() // MiMo 没有 JSON 凭证，认证数据在桌面端 cookie 库里
 	}
 	if p.AuthDir != "" {
-		exact := filepath.Join(p.AuthDir, p.AuthFileName)
-		if fileExists(exact) {
-			return exact
+		if got := p.pickAuthFile(p.AuthDir); got != "" {
+			return got
 		}
-		// 文件名不固定（如「<凭证目录C>」的 ai-<uuid>.info）：扫目录回退。
-		// 优先标准名，其次按文件名字典序取第一个，保证结果稳定。
-		if m, _ := filepath.Glob(filepath.Join(p.AuthDir, "*.info")); len(m) > 0 {
-			sort.Strings(m)
-			for _, e := range m {
-				if filepath.Base(e) == p.AuthFileName {
-					return e
-				}
-			}
-			return m[0]
-		}
-		return exact // 保持原行为：返回预期路径，让上层报「未找到」
+		return filepath.Join(p.AuthDir, p.AuthFileName) // 保持原行为：返回预期路径，让上层报「未找到」
 	}
+	// 桌面端安装目录（Windows 才有 %LOCALAPPDATA%）。
+	domAuthRel := []string{"CodeBuddyExtension", "Data", "Public", "auth"}
 	if local := os.Getenv("LOCALAPPDATA"); local != "" {
-		d := filepath.Join(local, "CodeBuddyExtension", "Data", "Public", "auth")
-		pref := filepath.Join(d, p.AuthFileName)
-		if fileExists(pref) {
-			return pref
+		if got := p.pickAuthFile(filepath.Join(local, filepath.Join(domAuthRel...))); got != "" {
+			return got
 		}
-		entries, _ := filepath.Glob(filepath.Join(d, "*.info"))
+	}
+	// 非 Windows（或不想装桌面端）时的兜底：环境变量指定目录 > 数据根下的镜像目录 > 数据根本身。
+	// 镜像目录的规则是「把 Windows 上那个目录原样拷过来」：
+	//   %LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth  →  <数据根>/CodeBuddyExtension/Data/Public/auth
+	// 只拷一个文件也行：<数据根>/workbuddy-desktop.info
+	for _, dir := range []string{
+		os.Getenv("WORKBUDDY_AUTH_DIR"),
+		dataPath(domAuthRel...),
+		hubRoot,
+	} {
+		if got := p.pickAuthFile(dir); got != "" {
+			return got
+		}
+	}
+	// 数据根下的子目录：用户习惯把凭据放成「国内workbuddy凭证」这类命名的目录
+	// （和「<凭证目录A> / <凭证目录C>」给国际线路用是同一种组织方式）。
+	// 这里只认**标准文件名**，不走任意 *.info 回退，避免误捡无关目录里的杂文件。
+	if entries, err := os.ReadDir(hubRoot); err == nil {
 		for _, e := range entries {
-			base := filepath.Base(e)
-			if p.AuthFileName == "workbuddy-desktop.info" && strings.HasSuffix(base, "-ai.info") {
+			if !e.IsDir() {
 				continue
 			}
-			return e
+			candidate := filepath.Join(hubRoot, e.Name(), p.AuthFileName)
+			if fileExists(candidate) {
+				return candidate
+			}
 		}
 	}
-	return ""
+	return dataPath(p.AuthFileName)
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -265,6 +304,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleModels(w, r)
 	case "/v1/chat/completions":
 		p.handleChat(w, r)
+	case "/v1/responses":
+		p.handleResponses(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -291,9 +332,20 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
+	// codex 的 models manager 带 client_version 查询参数，且只认自家的
+	// ModelsEndpointResponse 格式；dsh 等标准 OpenAI 客户端无该参数，维持原格式。
+	if r.URL.Query().Get("client_version") != "" {
+		writeJSON(w, http.StatusOK, codexModelsResponse(p.Models))
+		return
+	}
 	data := make([]map[string]any, 0, len(p.Models))
 	for _, m := range p.Models {
-		data = append(data, map[string]any{"id": m, "object": "model", "created": 1700000000, "owned_by": p.Owner})
+		entry := map[string]any{"id": m, "object": "model", "created": 1700000000, "owned_by": p.Owner}
+		// dsh 等客户端读 name 作为悬停提示/显示名；无倍率数据则不写，回退用 id
+		if name := ratioName(p.Name, m); name != "" {
+			entry["name"] = name
+		}
+		data = append(data, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -337,6 +389,8 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	if _, ok := body["stream_options"]; !ok {
 		body["stream_options"] = map[string]any{"include_usage": true}
 	}
+	// 客户端没指定思考档位 → 用该线路的默认档（2026-10-08 用户要求：默认最高）。
+	applyDefaultThinking(body, raw, msgs, p.ThinkingDefault)
 
 	rid := randHex(4)
 	modelName := fmt.Sprintf("%v", body["model"])
@@ -462,7 +516,8 @@ func (p *Proxy) streamToClient(w http.ResponseWriter, r *http.Request, auth Auth
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		logger.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
-		sseError(w, resp.StatusCode, truncate(string(b), 500))
+		b = annotateRiskControl(resp.StatusCode, b)
+		sseError(w, resp.StatusCode, truncate(string(b), 1200))
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -505,6 +560,7 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		logger.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
+		b = annotateRiskControl(resp.StatusCode, b)
 		var detail any
 		if json.Unmarshal(b, &detail) == nil {
 			writeJSON(w, resp.StatusCode, detail)
@@ -526,7 +582,3 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	logger.Log("[%s] ◀ RESPONSE | %.1fs | finish=%s | tokens=%s", rid, elapsed.Seconds(), col.finish, tokens)
 	writeJSON(w, http.StatusOK, col.build())
 }
-
-
-
-

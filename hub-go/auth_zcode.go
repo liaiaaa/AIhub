@@ -125,6 +125,7 @@ type ZcodeAuth struct {
 	mu           sync.RWMutex
 	credsPath    string
 	apiKey       string // Coding Plan API Key（id.secret）
+	jwt          string // zcodejwttoken（start-plan 中继身份，billing 查询用）
 	accessToken  string // oauth:zai:access_token（诊断用，不外发）
 	userID       string
 	userEmail    string
@@ -162,12 +163,25 @@ func (a *ZcodeAuth) Reload() error {
 		plain[k] = p
 	}
 
-	// Coding Plan API Key：键名含 :coding-plan: 且以 :api-key 结尾
+	// Coding Plan API Key：键名含 :coding-plan: 且以 :api-key 结尾。
+	// 候选有两族（官方内置规则原文）：zai-individual-coding-plan（API Key
+	// 直连计费）与 zai-start-plan（订阅中继身份）。Go map 遍历无序，必须
+	// 确定性选择：优先 individual-coding-plan，否则取首个。
 	apiKey := ""
 	for k, v := range plain {
-		if strings.Contains(k, ":coding-plan:") && strings.HasSuffix(k, ":api-key") && strings.TrimSpace(v) != "" {
-			apiKey = strings.TrimSpace(v)
+		if !strings.Contains(k, ":coding-plan:") || !strings.HasSuffix(k, ":api-key") {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if strings.Contains(k, "individual-coding-plan") {
+			apiKey = v
 			break
+		}
+		if apiKey == "" {
+			apiKey = v
 		}
 	}
 	if apiKey == "" {
@@ -176,6 +190,7 @@ func (a *ZcodeAuth) Reload() error {
 
 	a.mu.Lock()
 	a.apiKey = apiKey
+	a.jwt = strings.TrimSpace(plain["zcodejwttoken"])
 	a.accessToken = plain["oauth:zai:access_token"]
 	a.activeProver = plain["oauth:active_provider"]
 	// user_info: {"user_id": "...", "email": "...", ...}
@@ -199,6 +214,13 @@ func (a *ZcodeAuth) Key() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.apiKey
+}
+
+// JWT 返回 zcodejwttoken（start-plan 中继身份；billing 查询用，不外发日志）。
+func (a *ZcodeAuth) JWT() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.jwt
 }
 
 // Summary 返回给 health/控制台用的账号摘要（脱敏）。

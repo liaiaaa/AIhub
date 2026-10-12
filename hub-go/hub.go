@@ -21,7 +21,20 @@ type Hub struct {
 	mimo     *Proxy
 	qoder    *QoderProxy
 	zcode    *ZcodeProxy
+	trae     *TraeProxy
 	intlCred string
+	checkin  checkinRecord
+}
+
+// checkinRecord 最近一次签到结果（逻辑见 checkin.go），随 state.json 持久化，
+// 控制台据此展示「今日已签/未签」。
+type checkinRecord struct {
+	Date  string `json:"date"`
+	Time  string `json:"time"`
+	Dom   string `json:"dom"`
+	Qoder string `json:"qoder"`
+	Trae  string `json:"trae"`
+	OK    bool   `json:"ok"`
 }
 
 func NewHub() *Hub {
@@ -36,15 +49,21 @@ func (h *Hub) loadState() {
 		return
 	}
 	var st struct {
-		IntlCred string `json:"intl_cred"`
+		IntlCred string         `json:"intl_cred"`
+		Checkin  *checkinRecord `json:"checkin"`
 	}
-	if json.Unmarshal(b, &st) == nil && st.IntlCred != "" {
-		h.intlCred = st.IntlCred
+	if json.Unmarshal(b, &st) == nil {
+		if st.IntlCred != "" {
+			h.intlCred = st.IntlCred
+		}
+		if st.Checkin != nil {
+			h.checkin = *st.Checkin
+		}
 	}
 }
 
 func (h *Hub) saveStateLocked() {
-	b, _ := json.Marshal(map[string]any{"intl_cred": h.intlCred})
+	b, _ := json.Marshal(map[string]any{"intl_cred": h.intlCred, "checkin": h.checkin})
 	os.WriteFile(dataPath("state.json"), b, 0644)
 }
 
@@ -202,6 +221,44 @@ func (h *Hub) startQoder() (bool, string) {
 	return true, msg
 }
 
+func (h *Hub) startTrae() (bool, string) {
+	h.mu.Lock()
+	if h.trae != nil && h.trae.Running() {
+		h.mu.Unlock()
+		return true, "已在运行"
+	}
+	h.mu.Unlock()
+
+	p := NewTraeProxy()
+	ok, msg := p.Start()
+	if !ok {
+		return false, msg
+	}
+	h.mu.Lock()
+	if h.trae != nil && h.trae.Running() {
+		h.mu.Unlock()
+		p.Stop()
+		return true, "已在运行"
+	}
+	h.trae = p
+	h.mu.Unlock()
+	return true, msg
+}
+
+func (h *Hub) stopTrae() (bool, string) {
+	h.mu.Lock()
+	p := h.trae
+	h.trae = nil
+	h.mu.Unlock()
+	if p == nil {
+		return true, "Trae 已停止"
+	}
+	if p.Stop() {
+		return true, "Trae 已停止"
+	}
+	return false, "Trae 停止失败"
+}
+
 func (h *Hub) stopQoder() (bool, string) {
 	h.mu.Lock()
 	p := h.qoder
@@ -267,6 +324,7 @@ func (h *Hub) stopZcode() (bool, string) {
 func (h *Hub) statusMap() map[string]any {
 	h.mu.Lock()
 	domP, intlP, mimoP, qoderP, zcodeP, cred := h.dom, h.intl, h.mimo, h.qoder, h.zcode, h.intlCred
+	traeP := h.trae
 	h.mu.Unlock()
 
 	dom := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
@@ -301,8 +359,15 @@ func (h *Hub) statusMap() map[string]any {
 	if zcodeP != nil && zcodeP.Running() {
 		zcode["up"] = true
 		zcode["ok"] = true
-		zcode["detail"] = fmt.Sprintf("Z.ai Bearer 直连 · %d 个模型 · API Key", len(zcodeP.catalogSnapshot()))
+		zcode["detail"] = zcodeStatusDetail(zcodeP)
 		zcode["models"] = len(zcodeP.catalogSnapshot())
+	}
+	trae := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
+	if traeP != nil && traeP.Running() {
+		trae["up"] = true
+		trae["ok"] = true
+		trae["detail"] = fmt.Sprintf("SOLO 免费通道 · %d 个模型 · 桌面端凭据自动解密", len(TraeModels))
+		trae["models"] = len(TraeModels)
 	}
 
 	dirs := credDirs()
@@ -317,10 +382,20 @@ func (h *Hub) statusMap() map[string]any {
 		"mimo":         mimo,
 		"qoder":        qoder,
 		"zcode":        zcode,
+		"trae":         trae,
 		"intl_cred":    cred,
 		"creds":        creds,
 		"default_cred": defaultIntlCred,
+		"checkin":      h.checkinSnapshot(),
+		"agg":          aggStatusEntry(),
 	}
+}
+
+// checkinSnapshot 最近签到结果的只读副本（checkin.go 写入）。
+func (h *Hub) checkinSnapshot() checkinRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.checkin
 }
 
 // enrichStatus 异步补充账号昵称，供前端下一次轮询取用。

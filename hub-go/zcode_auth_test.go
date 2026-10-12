@@ -49,8 +49,7 @@ func TestZcodeCredentialDecryptAndPick(t *testing.T) {
 	creds := map[string]string{
 		"oauth:zai:access_token": zcodeTestEncrypt(t, key, "jwt-access-token"),
 		"oauth:active_provider":  zcodeTestEncrypt(t, key, "zai"),
-		"account-provider:coding-plan:account:zai-individual-coding-plan:account:uuid-1:api-key":
-			zcodeTestEncrypt(t, key, "0123abcd.secret1234"),
+		"account-provider:coding-plan:account:zai-individual-coding-plan:account:uuid-1:api-key": zcodeTestEncrypt(t, key, "0123abcd.secret1234"),
 		"oauth:zai:user_info": zcodeTestEncrypt(t, key,
 			`{"user_id":"uuid-1","email":"t@example.com","name":"tester"}`),
 	}

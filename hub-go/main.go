@@ -1,34 +1,17 @@
 package main
 
-// WorkBuddy Hub (Go 版) — 单进程：
+// AIHub (Go 版) — 单进程：
 //   - 控制台（网页，127.0.0.1:8801）：状态 / 启停 / 换凭证 / 退出
 //   - 两个代理（国内 8787 / 国际 8799）在进程内按需启停
 // 启动默认全部停止：先确认控制台端口可用，再清扫 8787/8799 残留监听。
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
-	"syscall"
 	"time"
-	"flag"
 )
-
-// Windows API: 隐藏控制台窗口
-var (
-	user32                  = syscall.NewLazyDLL("user32.dll")
-	procGetForegroundWindow = user32.NewProc("GetForegroundWindow")
-	procShowWindow          = user32.NewProc("ShowWindow")
-)
-
-const SW_HIDE = 0 // 隐藏窗口
-
-func hideConsoleWindow() {
-	hwnd, _, _ := procGetForegroundWindow.Call()
-	if hwnd != 0 {
-		procShowWindow.Call(hwnd, uintptr(SW_HIDE))
-	}
-}
 
 const (
 	DomPort  = 8787
@@ -56,10 +39,15 @@ func main() {
 		return
 	}
 
-	// 默认全部停止：清扫 8787/8799 残留监听（连续约 6 秒，覆盖启动窗口期）
-	sweepPorts()
+	// 清扫代理端口残留：仅当本实例使用默认控制台端口（8801）时执行。
+	// 用 -port 指定其他端口的是测试/第二实例（如预览），绝不能清扫——
+	// 否则会把正在跑的正式实例的代理误杀（2026-10-08 预览事故根因）。
+	if *port == HubPort {
+		sweepPorts()
+	}
 
 	hub := NewHub()
+	aggLoad() // 聚合线路白名单（:8790 默认不监听，控制台里启动）
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", hub.handleRoot)
 	mux.HandleFunc("/api/status", hub.apiStatus)
@@ -72,13 +60,25 @@ func main() {
 	mux.HandleFunc("/api/mimo/stop", hub.apiMimoStop)
 	mux.HandleFunc("/api/qoder/start", hub.apiQoderStart)
 	mux.HandleFunc("/api/qoder/stop", hub.apiQoderStop)
+	mux.HandleFunc("/api/trae/start", hub.apiTraeStart)
+	mux.HandleFunc("/api/trae/stop", hub.apiTraeStop)
 	mux.HandleFunc("/api/zcode/start", hub.apiZcodeStart)
 	mux.HandleFunc("/api/zcode/stop", hub.apiZcodeStop)
 	mux.HandleFunc("/api/zcode/key", hub.apiZcodeKey)
 	mux.HandleFunc("/api/intl/cred", hub.apiIntlCred)
 	mux.HandleFunc("/api/intl/switch", hub.apiIntlSwitch)
+	mux.HandleFunc("/api/checkin", hub.apiCheckin)
+	mux.HandleFunc("/api/credits", hub.apiCredits)
+	mux.HandleFunc("/api/usage", hub.apiUsage)
 	mux.HandleFunc("/api/stop_all", hub.apiStopAll)
 	mux.HandleFunc("/api/exit", hub.apiExit)
+	mux.HandleFunc("/api/agg/state", hub.apiAggState)
+	mux.HandleFunc("/api/agg/start", hub.apiAggStart)
+	mux.HandleFunc("/api/agg/stop", hub.apiAggStop)
+	mux.HandleFunc("/api/agg/models", hub.apiAggModels)
+	mux.HandleFunc("/api/agg/add", hub.apiAggAdd)
+	mux.HandleFunc("/api/agg/remove", hub.apiAggRemove)
+	mux.HandleFunc("/api/agg/line_models", hub.apiAggLineModels)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 20 * time.Second}
 	go func() {
@@ -90,8 +90,7 @@ func main() {
 	if !*noBrowser {
 		openBrowser(*port)
 	}
+	// 自动签到已停用（2026-10-08）：自动定时签到有机器行为风控顾虑，
+	// 签到改由控制台「一键签到」手动触发，详见 checkin.go。
 	select {}
 }
-
-
-

@@ -11,7 +11,9 @@ package main
 // 因此映射规则：
 //   意图 none  → 支持关闭的模型 thinking.type=disabled；5.3 系 → enabled + effort=low
 //   意图档位   → thinking.type=enabled + reasoning_effort=钳制后的档
-//   无意图     → 思考模型取目录默认档（默认最强思考），非思考模型不动 body
+//   无意图     → 思考模型取该模型支持的最高档（2026-10-08 用户要求：客户端
+//                没发表达档位就用最高档，不再用目录默认档）；efforts 为空/
+//                未知回退目录默认档；非思考模型不动 body
 
 import (
 	"fmt"
@@ -67,10 +69,12 @@ func zcodeResolveThinking(raw map[string]any, entry *zcodeModelEntry) zcodeThink
 		spec.Effort = "none"
 	}
 
-	// 默认：思考模型取目录默认档；DefaultEffort 为空表示该模型无文档化
-	// 默认档（如 glm-5.2，Z.ai 默认仅 enabled 不带 effort）→ 不发 effort
+	// 默认（2026-10-08 用户要求）：客户端没发档位就用该模型支持的最高档，
+	// 与 Qoder 线路同语义（不是目录默认档）。Efforts 为空/未知 → 回退目录
+	// 默认档 DefaultEffort；DefaultEffort 也为空 = 不发 effort（如 glm-5.2
+	// 早期快照，Z.ai 默认仅 enabled 不带 effort）。
 	if !explicit && spec.Effort == "" && entry != nil && entry.IsReasoning {
-		spec.Effort = entry.DefaultEffort
+		spec.Effort = zcodeHighestEffort(entry)
 	}
 
 	// 档位不在支持列表时就近钳制（同距取更高档），绝不发非法值
@@ -87,6 +91,28 @@ func zcodeResolveThinking(raw map[string]any, entry *zcodeModelEntry) zcodeThink
 		}
 	}
 	return spec
+}
+
+// zcodeHighestEffort 客户端未表达意图时该模型应使用的档位 = Efforts 里的最高档
+// （2026-10-08：与 Qoder 线路同语义，默认最强，不用目录默认档）。
+// 复用 Qoder 侧的规范序与比较（qoderEffortRank / qoderHighestEffort），不重复实现。
+// 两条护栏：
+//   - "none" 与未登记叫法（rank<0，如 "minimal"）不参与「最高档」判定，
+//     否则 Efforts=["none"] 这类目录会把「未表达意图」翻成「关思考」；
+//   - 无可比档（Efforts 空/全是上面这些）时回退目录默认档 DefaultEffort，
+//     保持旧行为（DefaultEffort 也为空 → 不发 effort）。
+func zcodeHighestEffort(entry *zcodeModelEntry) string {
+	if entry == nil {
+		return ""
+	}
+	cands := make([]string, 0, len(entry.Efforts))
+	for _, e := range entry.Efforts {
+		if e == "none" || qoderEffortRank(e) < 0 {
+			continue
+		}
+		cands = append(cands, e)
+	}
+	return qoderHighestEffort(cands, entry.DefaultEffort)
 }
 
 // zcodeClampEffort 就近钳制：|距离|最小者；同距取更高档。
@@ -168,8 +194,9 @@ func zcodeApplyThinking(body map[string]any, entry *zcodeModelEntry, marked bool
 		// 仅显式开思考（无档位意图）：enabled，不发档
 		thinking["type"] = "enabled"
 	default:
-		// 无任何意图且默认档为空（如 glm-5.2）：把 thinking.type 显式落成
-		// enabled（Z.ai 默认即 enabled，显式化便于诊断）
+		// 无任何意图且算不出档位（Efforts 为空/未知且 DefaultEffort 也为空，
+		// 如 glm-4.6 / glm-5.1 这类没登记档位的条目）：把 thinking.type 显式
+		// 落成 enabled（Z.ai 默认即 enabled，显式化便于诊断），不发 effort
 		if entry.IsReasoning {
 			thinking["type"] = "enabled"
 		}

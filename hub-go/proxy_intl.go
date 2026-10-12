@@ -38,8 +38,10 @@ func NewIntlProxy(authDir string) *Proxy {
 		AuthDir:       authDir,
 		AuthFileName:  "workbuddy-desktop-ai.info",
 		PrependSystem: true,
-		Owner:         "workbuddy-ai",
-		LogPath:       "converter-intl.log",
+		// 同国内线路：客户端没指定思考档位时补最高档（见 default_thinking.go）。
+		ThinkingDefault: wbThinkingDefaultEffort,
+		Owner:           "workbuddy-ai",
+		LogPath:         "converter-intl.log",
 	}
 }
 

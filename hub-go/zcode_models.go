@@ -59,26 +59,47 @@ func zcodeDefaultCatalog() []zcodeModelEntry {
 			MaxInputTokens: 1000000, MaxOutputTokens: 131072, ContextWindows: []string{"1M"}},
 		{Key: "glm-5.1", DisplayName: "GLM-5.1", Vendor: "zai", IsReasoning: true,
 			SupportsDisable: true,
-			MaxInputTokens: 204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
+			MaxInputTokens:  204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
 		{Key: "glm-5-turbo", DisplayName: "GLM-5-Turbo", Vendor: "zai",
 			SupportsDisable: true,
-			MaxInputTokens: 200000, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
+			MaxInputTokens:  200000, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
 		{Key: "glm-5", DisplayName: "GLM-5", Vendor: "zai", IsReasoning: true,
 			SupportsDisable: true,
-			MaxInputTokens: 204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
+			MaxInputTokens:  204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
 		{Key: "glm-4.7", DisplayName: "GLM-4.7", Vendor: "zai", IsReasoning: true,
 			SupportsDisable: true,
-			MaxInputTokens: 204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
+			MaxInputTokens:  204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
 		{Key: "glm-4.6", DisplayName: "GLM-4.6", Vendor: "zai", IsReasoning: true,
 			SupportsDisable: true,
-			MaxInputTokens: 204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
+			MaxInputTokens:  204800, MaxOutputTokens: 131072, ContextWindows: []string{"200K"}},
 		{Key: "glm-4.5", DisplayName: "GLM-4.5", Vendor: "zai", IsReasoning: true,
 			SupportsDisable: true,
-			MaxInputTokens: 131072, MaxOutputTokens: 131072, ContextWindows: []string{"131K"}},
+			MaxInputTokens:  131072, MaxOutputTokens: 131072, ContextWindows: []string{"131K"}},
 		{Key: "glm-4.5-air", DisplayName: "GLM-4.5-Air", Vendor: "zai", IsReasoning: true,
 			SupportsDisable: true,
-			MaxInputTokens: 131072, MaxOutputTokens: 131072, ContextWindows: []string{"131K"}},
+			MaxInputTokens:  131072, MaxOutputTokens: 131072, ContextWindows: []string{"131K"}},
 	}
+}
+
+// zcodeModelAllowlist 对外目录白名单：当前所有套餐（Start Plan / 活动赠送）
+// 的 entitlement 只覆盖 glm-5.3 与 glm-5.3-flash，其余模型没有可用额度，
+// 挂出来只会误导客户端选择。换套餐（如 Individual Coding Plan）后按需增删。
+// 注意：仅约束 /v1/models 列表与计数；目录内部保留全量快照，
+// 显式请求未收录模型仍原样透传上游（thinking 元数据照常生效）。
+var zcodeModelAllowlist = map[string]bool{
+	"glm-5.3":       true,
+	"glm-5.3-flash": true,
+}
+
+// zcodeFilterCatalog 按白名单过滤（保持原有顺序）。
+func zcodeFilterCatalog(entries []zcodeModelEntry) []zcodeModelEntry {
+	out := make([]zcodeModelEntry, 0, 2)
+	for _, e := range entries {
+		if zcodeModelAllowlist[e.Key] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // zcodeDefaultKey 默认模型：glm-5.3。

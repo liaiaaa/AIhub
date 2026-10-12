@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -74,6 +73,16 @@ func (h *Hub) apiQoderStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
 
+func (h *Hub) apiTraeStart(w http.ResponseWriter, r *http.Request) {
+	ok, msg := h.startTrae()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
+func (h *Hub) apiTraeStop(w http.ResponseWriter, r *http.Request) {
+	ok, msg := h.stopTrae()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
 func (h *Hub) apiZcodeStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		APIKey string `json:"apiKey"`
@@ -82,7 +91,7 @@ func (h *Hub) apiZcodeStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "请求格式错误"})
 		return
 	}
-	
+
 	ok, msg := h.startZcode(req.APIKey)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
@@ -100,17 +109,17 @@ func (h *Hub) apiZcodeKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "请求格式错误"})
 		return
 	}
-	
+
 	if req.APIKey == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "API Key 不能为空"})
 		return
 	}
-	
+
 	if err := SaveAPIKey(req.APIKey); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "保存失败：" + err.Error()})
 		return
 	}
-	
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "API Key 已保存"})
 }
 
@@ -153,15 +162,42 @@ func (h *Hub) apiIntlSwitch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
 
+// apiCheckin 一键签到：国内 WorkBuddy + Qoder 并发执行，结果落 state.json。
+func (h *Hub) apiCheckin(w http.ResponseWriter, r *http.Request) {
+	ok, msg := runCheckin(h)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
+// apiCredits 各平台剩余额度（5 分钟缓存，?force=1 作废缓存后台补拉）。
+// 带 ?key=<平台> 时只返回该平台（瓦片独立刷新），形如 {"intl":{...}}。
+func (h *Hub) apiCredits(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("force") == "1"
+	key := r.URL.Query().Get("key")
+	if key != "" {
+		info, ok := creditsOne(h, key, force)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"error": map[string]any{"message": "未知平台：" + key, "type": "invalid_request_error"},
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]creditInfo{key: info})
+		return
+	}
+	writeJSON(w, http.StatusOK, creditsSnapshot(h, force))
+}
+
 func (h *Hub) apiStopAll(w http.ResponseWriter, r *http.Request) {
 	a, _ := h.stopDom()
 	b, _ := h.stopIntl()
 	c, _ := h.stopMimo()
 	d, _ := h.stopQoder()
 	e, _ := h.stopZcode()
+	f, _ := h.stopTrae()
+	g, _ := h.stopAggLine()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":  a && b && c && d && e,
-		"msg": fmt.Sprintf("全部停止：国内=%s，国际=%s，MiMo=%s，Qoder=%s，Zcode=%s", okStr(a), okStr(b), okStr(c), okStr(d), okStr(e)),
+		"ok":  a && b && c && d && e && f && g,
+		"msg": fmt.Sprintf("全部停止：国内=%s，国际=%s，MiMo=%s，Qoder=%s，Zcode=%s，Trae=%s，聚合=%s", okStr(a), okStr(b), okStr(c), okStr(d), okStr(e), okStr(f), okStr(g)),
 	})
 }
 
@@ -177,6 +213,8 @@ func (h *Hub) apiExit(w http.ResponseWriter, r *http.Request) {
 			h.stopMimo()
 			h.stopQoder()
 			h.stopZcode()
+			h.stopTrae()
+			h.stopAggLine()
 			close(done)
 		}()
 		select {

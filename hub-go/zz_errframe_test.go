@@ -122,4 +122,3 @@ func TestUpstreamErrorFrameDetector(t *testing.T) {
 		}
 	}
 }
-

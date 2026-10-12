@@ -1,9 +1,9 @@
 @echo off
 rem ============================================================
-rem  WorkBuddy Hub (Go) - build script
+rem  AIHub (Go) - build script
 rem
 rem  Usage: double-click, or run scripts\build.bat from anywhere.
-rem  Output: <project root>\bin\workbuddy-hub.exe
+rem  Output: <project root>\bin\aihub.exe
 rem
 rem  Notes:
 rem   - Go toolchain is fixed at E:\software\go (no C: install, no PATH change).
@@ -39,7 +39,7 @@ if not exist "%GOPATH%" mkdir "%GOPATH%"
 if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"
 
 echo [1/2] Building... first run may take 1-2 minutes.
-"%GO%" build -trimpath -ldflags "-s -w -H=windowsgui" -o "%ROOT%\bin\workbuddy-hub.exe" .
+"%GO%" build -trimpath -ldflags "-s -w -H=windowsgui" -o "%ROOT%\bin\aihub.exe" .
 if errorlevel 1 (
   echo.
   echo [ERROR] Build FAILED. See errors above.
@@ -47,7 +47,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [2/2] Build OK: %ROOT%\bin\workbuddy-hub.exe
+echo [2/2] Build OK: %ROOT%\bin\aihub.exe
 echo.
 echo To start the console, run the launcher script in this folder.
 pause

@@ -107,7 +107,7 @@ func TestResolveHubRootFindsRootAboveBin(t *testing.T) {
 	}
 }
 
-// TestResolveHubRootHonoursEnv 确认 WORKBUDDY_HUB_ROOT 能显式覆盖，
+// TestResolveHubRootHonoursEnv 确认 AIHUB_ROOT 能显式覆盖，
 // 这是「exe 与数据分离部署」的正式开关。
 func TestResolveHubRootHonoursEnv(t *testing.T) {
 	dir := t.TempDir()

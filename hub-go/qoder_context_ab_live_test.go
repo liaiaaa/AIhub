@@ -37,8 +37,8 @@ func buildContextProbe(model string, fillChars int) []byte {
 		fill = fill[:fillChars]
 	}
 	payload := map[string]any{
-		"model":    model,
-		"stream":   true,
+		"model":  model,
+		"stream": true,
 		"messages": []any{
 			map[string]any{"role": "user", "content": "口令是 " + passphrase + "。以下内容不需要回复：" + fill},
 			map[string]any{"role": "user", "content": "第一条消息里的口令是什么？只输出口令本身。"},

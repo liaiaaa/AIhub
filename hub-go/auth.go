@@ -56,6 +56,11 @@ type CredentialManager struct {
 
 	// refreshMu 串行化刷新，避免并发请求同时刷新同一个 token。
 	refreshMu sync.Mutex
+
+	// wbMeta 记录 auth 文件里哪些字段是 WorkBuddy 5.7.6 的加密信封
+	// （见 workbuddy_atrest.go）。刷新回写时按原样再封回去，
+	// 免得把桌面端的文件写成明文。
+	wbMeta map[string]wbFieldMeta
 }
 
 func NewCredentialManager(path, backend, defaultDomain, userAgent string) *CredentialManager {
@@ -74,23 +79,41 @@ func (c *CredentialManager) load() (*SessionFile, map[string]any, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		// WorkBuddy 桌面端 5.7.6 起把凭据字段写成 AES-GCM 信封，
+		// 直接 Unmarshal 会报 “cannot unmarshal object into ... nickname of type string”。
+		// 这里先就地解封（国际线路的明文快照会原样返回）。
+		plain, meta, err := wbUnsealBytes(b)
+		if err != nil {
+			return nil, nil, err
+		}
 		var s SessionFile
-		if err := json.Unmarshal(b, &s); err != nil {
+		if err := json.Unmarshal(plain, &s); err != nil {
+			if meta != nil {
+				return nil, nil, fmt.Errorf("auth 文件解密后仍解析失败：%v", err)
+			}
 			return nil, nil, fmt.Errorf("auth 文件解析失败：%v", err)
 		}
 		// UseNumber：expiresAt 是毫秒时间戳，用 float64 解析再写回会变成科学计数法。
+		// 基底用**原始**字节，保住信封，回写时才不会再退回明文。
 		raw := map[string]any{}
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()
 		if err := dec.Decode(&raw); err != nil {
 			raw = map[string]any{}
 		}
-		c.cached, c.raw, c.mtime = &s, raw, st.ModTime()
+		c.cached, c.raw, c.mtime, c.wbMeta = &s, raw, st.ModTime(), meta
 	}
 	if c.cached == nil {
 		return nil, nil, fmt.Errorf("无法读取 auth 文件：%s", c.path)
 	}
 	return c.cached, c.raw, nil
+}
+
+// wbMetaSnapshot 在锁内取信封位置表：refresh() 全程不持有 c.mu，不能直接读字段。
+func (c *CredentialManager) wbMetaSnapshot() map[string]wbFieldMeta {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.wbMeta
 }
 
 // session 是 load 的加锁封装，只在读内存/文件时短暂持锁。
@@ -245,6 +268,16 @@ func (c *CredentialManager) refresh(s *SessionFile, raw map[string]any) error {
 	b, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
+	}
+	// 桌面端 5.7.6 起把凭据加密存放。刷新拿到的是明文 token，
+	// 回写前必须重新封成它的信封格式，否则会把它的文件降级成明文，
+	// 下一版客户端可能拒绝读（它自己的读路径按 fields 策略校验）。
+	if meta := c.wbMetaSnapshot(); len(meta) > 0 {
+		re, err := wbResealBytes(b, meta)
+		if err != nil {
+			return fmt.Errorf("凭据已刷新但回写失败（重新加密失败，内存里的新 token 仍可用）：%v", err)
+		}
+		b = re
 	}
 	tmp := c.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0644); err != nil {

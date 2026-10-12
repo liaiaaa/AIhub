@@ -34,7 +34,136 @@ func TestZcodeDefaultsToMaxEffort(t *testing.T) {
 		t.Errorf("thinking.type = %v, want enabled", th["type"])
 	}
 	if body["reasoning_effort"] != "max" {
-		t.Errorf("reasoning_effort = %v, want max（目录默认档）", body["reasoning_effort"])
+		t.Errorf("reasoning_effort = %v, want max（Efforts 最高档）", body["reasoning_effort"])
+	}
+}
+
+// 2026-10-08 用户要求（原话：「如果我没发送思考等级那就默认最高就行」）：
+// 客户端未表达任何思考意图时，用该模型 Efforts 里的最高档，而不是目录默认档。
+func TestZcodeNoIntentUsesHighestEffortNotCatalogDefault(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry *zcodeModelEntry
+		want  string // 期望注入的 reasoning_effort；"" = 不发档位
+	}{
+		{"默认medium_四档取max",
+			&zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+				Efforts: []string{"low", "medium", "high", "max"}, DefaultEffort: "medium"}, "max"},
+		{"默认high_两档取max",
+			&zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+				Efforts: []string{"high", "max"}, DefaultEffort: "high"}, "max"},
+		{"目录里档位乱序",
+			&zcodeModelEntry{Key: "m", IsReasoning: true,
+				Efforts: []string{"max", "low", "high"}, DefaultEffort: "low"}, "max"},
+		{"无max档时取xhigh",
+			&zcodeModelEntry{Key: "m", IsReasoning: true,
+				Efforts: []string{"low", "medium", "xhigh"}, DefaultEffort: "medium"}, "xhigh"},
+		{"档位含none不误判为关思考",
+			&zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+				Efforts: []string{"none", "high", "max"}, DefaultEffort: ""}, "max"},
+		{"档位含未登记叫法",
+			&zcodeModelEntry{Key: "m", IsReasoning: true,
+				Efforts: []string{"minimal", "low"}, DefaultEffort: ""}, "low"},
+		{"无档位信息回退目录默认档",
+			&zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+				Efforts: nil, DefaultEffort: "medium"}, "medium"},
+		{"无档位无默认档不发",
+			&zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+				Efforts: nil, DefaultEffort: ""}, ""},
+		{"仅none档不发（不关思考）",
+			&zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+				Efforts: []string{"none"}, DefaultEffort: ""}, ""},
+		{"非思考模型不注入",
+			&zcodeModelEntry{Key: "m", IsReasoning: false,
+				Efforts: []string{"low", "max"}, DefaultEffort: ""}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := zcodeResolveThinking(map[string]any{}, c.entry)
+			if spec.Effort != c.want {
+				t.Errorf("resolve: Effort = %q, want %q", spec.Effort, c.want)
+			}
+			body := map[string]any{"messages": []any{}}
+			zcodeApplyThinking(body, c.entry, false)
+			got, exists := body["reasoning_effort"]
+			if c.want == "" {
+				if exists {
+					t.Errorf("wire: 不应注入 reasoning_effort, 实际 %v", got)
+				}
+				return
+			}
+			if got != c.want {
+				t.Errorf("wire: reasoning_effort = %v, want %q", got, c.want)
+			}
+			th, ok := body["thinking"].(map[string]any)
+			if !ok || th["type"] != "enabled" {
+				t.Errorf("wire: thinking = %v, want type=enabled", body["thinking"])
+			}
+		})
+	}
+}
+
+// 显式档位优先于「默认最高」：客户端发 low 就保持 low，绝不被升档。
+func TestZcodeExplicitLowNotUpgraded(t *testing.T) {
+	entry := &zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+		Efforts: []string{"low", "medium", "high", "max"}, DefaultEffort: "medium"}
+	for _, raw := range []map[string]any{
+		{"reasoning_effort": "low"},
+		{"effort": "low"},
+		{"thinking": map[string]any{"type": "enabled"}, "reasoning_effort": "low"},
+	} {
+		body := map[string]any{"messages": []any{}}
+		for k, v := range raw {
+			body[k] = v
+		}
+		zcodeApplyThinking(body, entry, false)
+		if body["reasoning_effort"] != "low" {
+			t.Errorf("raw=%v: reasoning_effort = %v, want low", raw, body["reasoning_effort"])
+		}
+		if body["thinking"].(map[string]any)["type"] != "enabled" {
+			t.Errorf("raw=%v: thinking 应保持 enabled", raw)
+		}
+	}
+}
+
+// 显式关闭的优先级不受「默认最高」影响：可关→disabled 且不effort；不可关→low。
+func TestZcodeExplicitDisableStillWins(t *testing.T) {
+	disableable := &zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: true,
+		Efforts: []string{"low", "high", "max"}, DefaultEffort: "medium"}
+	body := map[string]any{"messages": []any{}, "enable_thinking": false}
+	zcodeApplyThinking(body, disableable, false)
+	if body["thinking"].(map[string]any)["type"] != "disabled" {
+		t.Errorf("可关模型应 thinking.type=disabled, 实际 %v", body["thinking"])
+	}
+	if _, exists := body["reasoning_effort"]; exists {
+		t.Errorf("关闭时不应发 reasoning_effort, 实际 %v", body["reasoning_effort"])
+	}
+
+	fixed := &zcodeModelEntry{Key: "m", IsReasoning: true, SupportsDisable: false,
+		Efforts: []string{"low", "high", "max"}, DefaultEffort: "max"}
+	body = map[string]any{"messages": []any{}, "reasoning_effort": "none"}
+	zcodeApplyThinking(body, fixed, false)
+	if body["thinking"].(map[string]any)["type"] != "enabled" {
+		t.Errorf("不可关模型应 enabled")
+	}
+	if body["reasoning_effort"] != "low" {
+		t.Errorf("不可关模型关闭意图应压到 low, 实际 %v", body["reasoning_effort"])
+	}
+}
+
+// 未知模型（entry=nil）：即便启用「默认最高」也不注入任何思考字段。
+func TestZcodeNoIntentUnknownModelNoInjection(t *testing.T) {
+	spec := zcodeResolveThinking(map[string]any{}, nil)
+	if spec.Effort != "" {
+		t.Errorf("未知模型不应有默认档, 实际 %q", spec.Effort)
+	}
+	body := map[string]any{"messages": []any{}}
+	zcodeApplyThinking(body, nil, false)
+	if _, exists := body["thinking"]; exists {
+		t.Errorf("未知模型无意图不应注入 thinking")
+	}
+	if _, exists := body["reasoning_effort"]; exists {
+		t.Errorf("未知模型无意图不应注入 reasoning_effort")
 	}
 }
 
@@ -109,7 +238,7 @@ func TestZcodeEffortClamp(t *testing.T) {
 	}
 }
 
-// GLM-5.2：思考可关闭；无档位信息不发 reasoning_effort。
+// GLM-5.2：思考可关闭；关闭时不发 reasoning_effort；无意图时取 Efforts 最高档 max。
 func TestZcodeGlm52Toggle(t *testing.T) {
 	entry := helperZcodeEntry(t, "glm-5.2")
 	body := map[string]any{"messages": []any{}, "reasoning_effort": "none"}
@@ -125,8 +254,10 @@ func TestZcodeGlm52Toggle(t *testing.T) {
 	if body["thinking"].(map[string]any)["type"] != "enabled" {
 		t.Errorf("5.2 默认 enabled, 实际 %v", body["thinking"].(map[string]any)["type"])
 	}
-	if body["reasoning_effort"] != nil {
-		t.Errorf("5.2 无档位不应发 reasoning_effort, 实际 %v", body["reasoning_effort"])
+	// 2026-10-08：5.2 的 Efforts=[high max]、DefaultEffort="" —— 未指定档位时
+	// 由「目录默认档（不发）」改为「最高档」，故现在应发 max。
+	if body["reasoning_effort"] != "max" {
+		t.Errorf("5.2 无意图应发最高档 max, 实际 %v", body["reasoning_effort"])
 	}
 }
 

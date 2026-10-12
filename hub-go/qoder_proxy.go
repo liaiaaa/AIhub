@@ -11,10 +11,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
-	"os"
 )
 
 // ---------- 代理服务 ----------
@@ -224,6 +224,12 @@ func (p *QoderProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		entry := map[string]any{
 			"id": id, "object": "model", "created": 1700000000, "owned_by": m.Vendor,
 		}
+		// dsh 等客户端读 name：官方显示名 + 计费倍率（目录 price_factor）
+		if m.IsFree {
+			entry["name"] = id + " · 免费"
+		} else if m.PriceFactor > 0 {
+			entry["name"] = id + " · " + ratioLabel(m.PriceFactor)
+		}
 		if id != m.Key {
 			entry["resolves_to"] = m.Key // 透出真实 key，便于排查
 		}
@@ -397,8 +403,8 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	rid := randHex(4)
 	modelName := modelKey
 	if p.log != nil {
-		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d%s", rid, modelName, clientStream, len(msgs),
-			lastUserSuffix(msgs))
+		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d | payload=%dKB%s", rid, modelName, clientStream, len(msgs),
+			len(payload)/1024, lastUserSuffix(msgs))
 		p.log.Log("[%s] ▶ THINK %s", rid, qoderWireDiag(raw, normMsgs, entry, markedNoThink, env))
 		// 诊断：记录客户端请求形态。触发方式 = 环境变量 QODER_DIAG_STREAM=1
 		// 或在数据目录放标记文件 qoder-dump-on（存在即抓，含完整请求转储）。
@@ -451,5 +457,3 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	p.aggregateToClient(w, r, payload, modelName, t0, rid)
 }
-
-

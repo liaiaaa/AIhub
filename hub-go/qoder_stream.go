@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,7 +38,9 @@ type qoderThinkState struct {
 // qoderMaxTagLen 标签最大长度（"<thinking>"/"</thinking>" 均 14 字节内）。
 const qoderMaxTagLen = 16
 
-func newQoderThinkState() *qoderThinkState { return &qoderThinkState{closeTag: qoderThinkTagPairs[0][1]} }
+func newQoderThinkState() *qoderThinkState {
+	return &qoderThinkState{closeTag: qoderThinkTagPairs[0][1]}
+}
 
 // qoderEarliestOpen 找 buf 中最早出现的开标签。
 // 同位置命中时取更长的开标签（<think> 是 <thinking> 的前缀，须整体匹配）。
@@ -354,6 +357,15 @@ func (p *QoderProxy) openInfer(ctx context.Context, payload []byte) (*http.Respo
 // 从第一个 data 行向后扫描，直到出现决定性帧（错误帧 → true；正常
 // choices 帧 → false）；不可解析的行（心跳等）跳过。
 func firstFrameUpstreamError(head []byte) bool {
+	_, ok := decisiveFirstFrame(head)
+	return ok
+}
+
+// decisiveFirstFrame 返回头几个字节里首个「决定性」帧的文本：错误帧
+// （有 code/message、无 choices）→ (帧文本, true)；正常内容帧或流已正常
+// 结束 → ("", false)；不可解析的行（心跳等）跳过。排队帧也是错误帧的
+// 子集（见 qoder_queue.go），调用方拿到帧文本后可用 parseQueueFrame 细分。
+func decisiveFirstFrame(head []byte) (string, bool) {
 	for _, line := range strings.Split(string(head), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
@@ -368,7 +380,7 @@ func firstFrameUpstreamError(head []byte) bool {
 			data = strings.TrimSpace(wrapper.Body)
 		}
 		if data == "" || data == "[DONE]" {
-			return false
+			return "", false
 		}
 		var probe struct {
 			Code    string `json:"code"`
@@ -380,33 +392,79 @@ func firstFrameUpstreamError(head []byte) bool {
 		}
 		// 上游错误帧：有 code/message、没有 choices；正常帧要么是包装帧（有 body），要么有 choices
 		if probe.Code != "" && probe.Message != "" && probe.Choices == nil {
-			return true
+			return data, true
 		}
 		if probe.Choices != nil {
-			return false // 正常内容帧先行，不算错误
+			return "", false // 正常内容帧先行，不算错误
 		}
 	}
-	return false
+	return "", false
 }
 
-// openInferValidated 在 openInfer 之上多做一层首帧错误检测：
-// HTTP 200 但首帧是 provider_error（如配额瞬时抽风）时整体重试，
-// 最多 2 次（700ms 间隔；2026-09-26 实测单次重试不够，且此前包装错误帧
-// 根本没触发过重试，见 firstFrameUpstreamError 注释）。
+// openInferValidated 在 openInfer 之上多做两层首帧错误处理：
+//   - 首帧是普通上游错误帧（如配额瞬时抽风的 provider_error，HTTP 状态
+//     仍是 200）：整体重试最多 2 次（700ms 间隔；2026-09-26 实测单次重试
+//     不够，且此前包装错误帧根本没触发过重试，见 firstFrameUpstreamError 注释）。
+//   - 首帧是排队帧（业务码 10605，见 qoder_queue.go）：按网关建议间隔
+//     retryAfterSeconds 真实等待后重试，总预算默认 240s
+//     （QODER_QUEUE_MAX_WAIT_SECS 可调，0 关闭）；预算耗尽返回 429 语义的
+//     qoderQueueError。HTTP 403 + 10605 排队体的形态同样兜底处理。
+//     每次等待前回调 onQueueWait（流式路径借此发心跳保活）。
+//
 // Peek(1) 只等到上游第一个字节到达（通常 ~300ms），不会人为增加首包延迟。
 //
 // ⚠️ 关键：bufio.Peek **不消费**缓冲区，Peek 过的字节仍留在 br 里——
 // 所以这里直接把 br 包回 resp.Body，绝不能把预读的 head 再拼回流前面
 // （否则已缓冲字节会被读两遍，客户端 JSON.parse 报
 // "Unexpected non-whitespace character after JSON"）。
-func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log *FileLogger, rid string) (*http.Response, error) {
-	for attempt := 0; ; attempt++ {
+func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log *FileLogger, rid string, onQueueWait func(waitSecs, totalSecs int)) (*http.Response, error) {
+	budget := qoderQueueWaitBudget()
+	var queueWait time.Duration
+	providerErrs := 0
+	// queueRetry 等待后继续重试返回 true；放弃（预算耗尽/服务不可用）返回
+	// false；等待被 ctx 打断返回 err。
+	queueRetry := func(qi qoderQueueInfo) (bool, error) {
+		wait, giveup := qoderQueueNextWait(ctx, qi, queueWait, budget)
+		if giveup {
+			return false, nil
+		}
+		if log != nil {
+			log.Log("[%s] ⚠ 上游排队(%s)：队列 %d 人，等 %ds 后重试（已等 %ds/预算 %ds）",
+				rid, qi.Code, qi.QueueCount, int(wait.Seconds()), int(queueWait.Seconds()), int(budget.Seconds()))
+		}
+		if onQueueWait != nil {
+			onQueueWait(int(wait.Seconds()), int((queueWait + wait).Seconds()))
+		}
+		if err := qoderSleepCtx(ctx, wait); err != nil {
+			return false, err
+		}
+		queueWait += wait
+		return true, nil
+	}
+	for {
 		resp, err := p.openInfer(ctx, payload)
 		if err != nil {
 			return nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
-			return resp, nil // 非 200 交给上层报错
+			// 观测的排队形态是 HTTP 200 + 错误帧，但网关不同入口可能直接回
+			// HTTP 403 + 10605 排队体，这里兜底同样按队列重试。
+			if resp.StatusCode == http.StatusForbidden {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				if qi, isQueue := parseQueueFrame(string(b)); isQueue {
+					ok, qerr := queueRetry(qi)
+					if qerr != nil {
+						return nil, qerr
+					}
+					if ok {
+						continue
+					}
+					return nil, &qoderQueueError{Info: qi, Waited: queueWait}
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(b)) // 非排队 403：原样交回上层
+			}
+			return resp, nil
 		}
 		br := bufio.NewReaderSize(resp.Body, 16*1024)
 		perr := error(nil)
@@ -416,13 +474,30 @@ func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log
 			return resp, nil
 		}
 		head, _ := br.Peek(br.Buffered()) // 只用于错误帧探测，不消费
-		if attempt < 2 && len(head) > 0 && firstFrameUpstreamError(head) {
-			resp.Body.Close()
-			if log != nil {
-				log.Log("[%s] ⚠ 上游首帧 provider_error，重试 %d/2", rid, attempt+1)
+		if data, ok := decisiveFirstFrame(head); ok {
+			if qi, isQueue := parseQueueFrame(data); isQueue {
+				resp.Body.Close()
+				ok2, qerr := queueRetry(qi)
+				if qerr != nil {
+					return nil, qerr
+				}
+				if ok2 {
+					continue
+				}
+				return nil, &qoderQueueError{Info: qi, Waited: queueWait}
 			}
-			time.Sleep(700 * time.Millisecond)
-			continue
+			if providerErrs < 2 {
+				resp.Body.Close()
+				if log != nil {
+					log.Log("[%s] ⚠ 上游首帧错误(%s)，重试 %d/2", rid, truncate(data, 120), providerErrs+1)
+				}
+				if providerErrs == 0 {
+					qoderDumpFailedPayload(rid, payload, log)
+				}
+				time.Sleep(700 * time.Millisecond)
+				providerErrs++
+				continue
+			}
 		}
 		resp.Body = &qBodyReader{r: br, c: resp.Body}
 		return resp, nil
@@ -438,6 +513,42 @@ type qBodyReader struct {
 
 func (b *qBodyReader) Read(p []byte) (int, error) { return b.r.Read(p) }
 func (b *qBodyReader) Close() error               { return b.c.Close() }
+
+// ---------- 大载荷 provider_error 的自动取证与提示（2026-10-07） ----------
+//
+// 观测：dsh 会话临近上下文上限时（msgs≈1000），两个载荷在 qfmodel 上首帧
+// provider_error 确定性失败（各重试 3 次同样错误），同时段小载荷全部正常。
+// 事后合成探针（300k/633k/955k prompt tokens；纯文本与工具历史两种形态、
+// stream=true）在同一账号同一模型上全部成功——说明不是一般性的容量或
+// 形态上限，更可能是该载荷的具体内容触发上游模型后端异常。真凶载荷当时
+// 未留存（dump 开关没开），因此补上三件事：
+//   1) ▶ REQUEST 日志行永久带上 payload 体积（见 qoder_proxy.go handleChat）；
+//   2) 首帧 provider_error 重试前，大载荷自动 dump（数据目录
+//      qoder-dump-<rid>-upstream.json，即发往网关的最终信封，可直接重放）；
+//   3) 客户端可见错误追加 [hub] 提示（见 qoderBigPayloadHint）。
+
+// qoderBigPayloadBytes 视为「大载荷」的门槛（仅用于取证 dump 与提示措辞）。
+const qoderBigPayloadBytes = 512 << 10
+
+// qoderDumpFailedPayload 首帧 provider_error 且载荷较大时，把发往网关的
+// 最终信封原样落盘供重放定位；小载荷/成功路径零开销。
+func qoderDumpFailedPayload(rid string, payload []byte, log *FileLogger) {
+	if len(payload) < qoderBigPayloadBytes || log == nil {
+		return
+	}
+	dumpPath := dataPath("qoder-dump-" + rid + "-upstream.json")
+	if err := os.WriteFile(dumpPath, payload, 0644); err == nil {
+		log.Log("[%s] ⚠ 已 dump 失败载荷: %s (%dKB)，可重放定位", rid, dumpPath, len(payload)/1024)
+	}
+}
+
+// qoderBigPayloadHint 大载荷上游错误的客户端提示（拼在错误 message 尾部）。
+func qoderBigPayloadHint(payloadLen int) string {
+	if payloadLen < qoderBigPayloadBytes {
+		return ""
+	}
+	return fmt.Sprintf("\n\n[hub] 本请求载荷 %.1fMB：上游模型后端拒绝该载荷（重试无效，同账号同时段其他请求正常）。建议在 dsh 压缩上下文或新开会话后重试；失败载荷已自动 dump 供定位。", float64(payloadLen)/(1<<20))
+}
 
 // qoderUnwrapFrames 把上游包装帧流转成内层 OpenAI SSE 文本。
 // 返回首帧错误信息（空串表示正常）；聚合模式整体缓冲使用。
@@ -505,6 +616,11 @@ func upstreamErrorFrame(raw string) (string, bool) {
 	if _, hasErr := probe["error"]; hasErr {
 		return "", false
 	}
+	// 排队帧（10605）：改写成 429 排队语义。照搬原始 code（外层是 403）会把
+	// 客户端误导成「API 密钥无效」（2026-09-26 实测）。
+	if qi, ok := parseQueueFrame(raw); ok {
+		return (&qoderQueueError{Info: qi}).Error(), true
+	}
 	msg, _ := probe["message"].(string)
 	code := ""
 	switch c := probe["code"].(type) {
@@ -570,12 +686,50 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 	var diagReason, diagContent strings.Builder
 	diagTools := 0
 	diagOn := os.Getenv("QODER_DIAG_STREAM") == "1"
-	resp, err := p.openInferValidated(r.Context(), payload, p.log, rid)
+	// SSE 头在首次输出前才写；排队等待期间先发心跳，保证客户端连接活跃
+	// （否则整个等待期零字节，客户端的静默超时会掐掉一个本来能成的请求）。
+	flusher, _ := w.(http.Flusher)
+	headersSent := false
+	ensureHeaders := func() {
+		if headersSent {
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		headersSent = true
+	}
+	writeErrEvent := func(code int, msg string) {
+		ensureHeaders()
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": msg, "type": "upstream_error", "code": code}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	// 排队心跳：空 delta 帧与网关自带的空 usage 帧同形（DSH 已验证容忍），
+	// 间隔 = 网关建议重试间隔（约 30s），远小于常见静默超时。
+	onWait := func(waitSecs, totalSecs int) {
+		ensureHeaders()
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"choices": []any{map[string]any{
+			"index": 0, "finish_reason": nil, "delta": map[string]any{},
+		}}}))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	resp, err := p.openInferValidated(r.Context(), payload, p.log, rid, onWait)
 	if err != nil {
 		if p.log != nil {
 			p.log.Log("[%s] ✗ 网络错误 | %v", rid, err)
 		}
-		sseError(w, http.StatusBadGateway, err.Error())
+		var qe *qoderQueueError
+		if errors.As(err, &qe) {
+			writeErrEvent(qe.HTTPStatus(), qe.Error())
+		} else {
+			writeErrEvent(http.StatusBadGateway, err.Error())
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -584,15 +738,15 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 		if p.log != nil {
 			p.log.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
 		}
-		sseError(w, resp.StatusCode, truncate(string(b), 500))
+		if qi, ok := parseQueueFrame(string(b)); ok {
+			writeErrEvent(http.StatusTooManyRequests, (&qoderQueueError{Info: qi}).Error())
+			return
+		}
+		writeErrEvent(resp.StatusCode, truncate(string(b), 500))
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
+	ensureHeaders()
 
 	// 边解包边转发：包装帧 → 内层 OpenAI chunk，逐帧 flush（首块已由
 	// openInferValidated 拼回 body 最前，不会丢帧）。
@@ -630,7 +784,7 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			}
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{
 				"error": map[string]any{
-					"message": errMsg,
+					"message": errMsg + qoderBigPayloadHint(len(payload)),
 					"type":    "upstream_error",
 					"code":    "upstream_error",
 				},
@@ -699,13 +853,21 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, payload []byte, model string, t0 time.Time, rid string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
-	resp, err := p.openInferValidated(ctx, payload, p.log, rid)
+	// 非流式 JSON 无法发心跳，靠 300s ctx 兜底（预算 240s < 300s 常见静默超时）
+	resp, err := p.openInferValidated(ctx, payload, p.log, rid, nil)
 	if err != nil {
 		if p.log != nil {
 			p.log.Log("[%s] ✗ 网络错误 | %v", rid, err)
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error": map[string]any{"message": "upstream error: " + err.Error(), "type": "upstream_error"},
+		status := http.StatusBadGateway
+		msg := "upstream error: " + err.Error()
+		var qe *qoderQueueError
+		if errors.As(err, &qe) {
+			status = qe.HTTPStatus()
+			msg = qe.Error()
+		}
+		writeJSON(w, status, map[string]any{
+			"error": map[string]any{"message": msg, "type": "upstream_error"},
 		})
 		return
 	}
@@ -714,6 +876,12 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if p.log != nil {
 			p.log.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
+		}
+		if qi, ok := parseQueueFrame(string(b)); ok {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error": map[string]any{"message": (&qoderQueueError{Info: qi}).Error(), "type": "upstream_error"},
+			})
+			return
 		}
 		var detail any
 		if json.Unmarshal(b, &detail) == nil {
@@ -730,9 +898,14 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 	// 思考分流：<think> 内容 → reasoning_content（聚合时合并进 message）。
 	var inner bytes.Buffer
 	if ferr := qoderUnwrapFrames(resp.Body, &inner); ferr != "" {
-		// 首帧即上游错误（重试后仍失败）：透传给客户端
+		// 首帧即上游错误（重试后仍失败）：转写成可读文案透传（裸 JSON 里
+		// 带外层 403 会再次误导客户端分类）
+		msg, isErr := upstreamErrorFrame(ferr)
+		if !isErr {
+			msg = truncate(ferr, 500)
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error": map[string]any{"message": truncate(ferr, 500), "type": "upstream_error"},
+			"error": map[string]any{"message": truncate(msg, 500) + qoderBigPayloadHint(len(payload)), "type": "upstream_error"},
 		})
 		return
 	}
@@ -755,6 +928,7 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 	res["model"] = model
 	writeJSON(w, http.StatusOK, res)
 }
+
 // ---------- 网关流式工具消息 bug 自动降级（2026-09-26 实测定案） ----------
 //
 // 根因：Qoder 网关的 DeepSeek 系（dfmodel/dmodel）与 Kimi 系（kmodel）在
@@ -803,12 +977,47 @@ func qoderAutoNoStreamEnabled() bool {
 func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Request, payload []byte, model string, t0 time.Time, rid string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
-	resp, err := p.openInferValidated(ctx, payload, p.log, rid)
+	// 与 streamToClient 相同的保活策略：排队等待期先发 SSE 头 + 心跳
+	flusher, _ := w.(http.Flusher)
+	headersSent := false
+	ensureHeaders := func() {
+		if headersSent {
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		headersSent = true
+	}
+	writeErrEvent := func(code int, msg string) {
+		ensureHeaders()
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": msg, "type": "upstream_error", "code": code}})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	onWait := func(waitSecs, totalSecs int) {
+		ensureHeaders()
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"choices": []any{map[string]any{
+			"index": 0, "finish_reason": nil, "delta": map[string]any{},
+		}}}))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	resp, err := p.openInferValidated(ctx, payload, p.log, rid, onWait)
 	if err != nil {
 		if p.log != nil {
 			p.log.Log("[%s] ✗ 网络错误 | %v", rid, err)
 		}
-		sseError(w, http.StatusBadGateway, err.Error())
+		var qe *qoderQueueError
+		if errors.As(err, &qe) {
+			writeErrEvent(qe.HTTPStatus(), qe.Error())
+		} else {
+			writeErrEvent(http.StatusBadGateway, err.Error())
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -817,7 +1026,11 @@ func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Reque
 		if p.log != nil {
 			p.log.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
 		}
-		sseError(w, resp.StatusCode, truncate(string(b), 500))
+		if qi, ok := parseQueueFrame(string(b)); ok {
+			writeErrEvent(http.StatusTooManyRequests, (&qoderQueueError{Info: qi}).Error())
+			return
+		}
+		writeErrEvent(resp.StatusCode, truncate(string(b), 500))
 		return
 	}
 
@@ -826,17 +1039,17 @@ func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Reque
 		if p.log != nil {
 			p.log.Log("[%s] ✗ 上游错误帧（降级后仍失败）| %s", rid, truncate(ferr, 300))
 		}
-		sseError(w, http.StatusBadGateway, ferr)
+		msg, isErr := upstreamErrorFrame(ferr)
+		if !isErr {
+			msg = truncate(ferr, 500)
+		}
+		writeErrEvent(http.StatusBadGateway, msg+qoderBigPayloadHint(len(payload)))
 		return
 	}
 	innerStr := qoderRewriteStreamForThinking(inner.String())
 	col := collectStream(strings.NewReader(innerStr))
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
+	ensureHeaders()
 
 	// 聚合结果 → 标准 OpenAI 流式帧（客户端接口无感知）
 	writeSSE := func(v any) {

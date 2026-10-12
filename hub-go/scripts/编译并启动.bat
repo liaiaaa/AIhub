@@ -1,13 +1,13 @@
 @echo off
 rem ============================================================
-rem  WorkBuddy Hub (Go) - build AND start  (desktop shortcut target)
+rem  AIHub (Go) - build AND start  (desktop shortcut target)
 rem
 rem  1) rebuild the binary so you always run the latest code
 rem  2) start it (console opens at http://127.0.0.1:8801)
 rem  3) this window closes itself
 rem
 rem  If you only want to start without rebuilding, use
-rem  bin\workbuddy-hub.exe or the start-only launcher instead.
+rem  bin\aihub.exe or the start-only launcher instead.
 rem
 rem  ASCII-only + CRLF on purpose (see build.bat notes).
 rem ============================================================
@@ -30,7 +30,7 @@ if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"
 
 cd /d "%ROOT%"
 echo Building (first run may take 1-2 minutes)...
-"%GO%" build -trimpath -ldflags "-s -w -H=windowsgui" -o "%ROOT%\bin\workbuddy-hub.exe" .
+"%GO%" build -trimpath -ldflags "-s -w -H=windowsgui" -o "%ROOT%\bin\aihub.exe" .
 if errorlevel 1 (
   echo.
   echo [ERROR] Build FAILED. Not starting. See errors above.
@@ -39,5 +39,5 @@ if errorlevel 1 (
 )
 
 echo Build OK. Starting...
-start "" "%ROOT%\bin\workbuddy-hub.exe"
+start "" "%ROOT%\bin\aihub.exe"
 exit /b 0

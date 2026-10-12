@@ -6,15 +6,19 @@ package main
 //   - COSY 签名每个请求都不同（绑定 payload+时间戳+body），套不进 AuthProvider
 //     的「静态请求头」模型，因此走独立的 QoderProxy 类型，
 //     对 Hub 只暴露同款 Start/Stop/Running。
-//   - 凭据零配置：启动时用 DPAPI 解密桌面端 %APPDATA%\com.qodercn.app.stable\
-//     的 Local State → auth.v1.dat（Chromium safeStorage 格式，AES-256-GCM），
-//     拿到 dt- 设备令牌。桌面端平时会自动刷新该文件，401 时这里重读即可。
-//   - machineToken：优先现跑 runtime-info.exe 取新鲜值；失败时回退
-//     环境变量 QODER_MACHINE_TOKEN，再回退内置的已验证值。
+//   - 凭据零配置：启动时解密桌面端登录态（Windows 在 %APPDATA%、
+//     Linux 在 ~/.config 下的 com.qodercn.app.stable），拿到 dt- 设备令牌。
+//     主密钥走平台各自的机制：Windows=DPAPI，Linux=Electron safeStorage
+//     （密钥环 / peanuts，详见 proxy_qoder_oskey_*.go）。
+//     桌面端平时会自动刷新该文件，401 时这里重读即可。
+//   - machineToken：优先现跑桌面端设备信息工具（runtime-info）取新鲜值；
+//     失败时回退环境变量 QODER_MACHINE_TOKEN，再回退内置的已验证值。
 //   - 上游 SSE 是包装帧 {"headers":...,"body":"<OpenAI chunk JSON>"}，
 //     解包后内层就是标准 OpenAI chunk；body=="[DONE]" 即结束。
 //   - 瞬时故障自愈：401 重读凭据重签；5xx/网络抖动/上游首帧 provider_error
-//     （配额偶发抽风）自动重试一次。不自动换模型，避免静默改变行为。
+//     （配额偶发抽风）自动重试；首帧排队帧（10605，晚高峰观测）按网关
+//     建议间隔真实等待重试（qoder_queue.go）。不自动换模型，避免静默改变
+//     行为。
 
 import (
 	"bytes"
@@ -31,13 +35,11 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 const (
@@ -62,36 +64,10 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 
-// ---------- 凭据（DPAPI + AES-GCM 自动解密） ----------
-
-var qCrypt32 = syscall.NewLazyDLL("crypt32.dll")
-var qProcCryptUnprotectData = qCrypt32.NewProc("CryptUnprotectData")
-
-type qDataBlob struct {
-	cbData uint32
-	pbData *byte
-}
-
-func qCryptUnprotect(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("empty data")
-	}
-	var in qDataBlob
-	in.cbData = uint32(len(data))
-	in.pbData = &data[0]
-	var out qDataBlob
-	r, _, err := qProcCryptUnprotectData.Call(
-		uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(&out)),
-	)
-	if r == 0 {
-		return nil, err
-	}
-	defer syscall.LocalFree(syscall.Handle(unsafe.Pointer(out.pbData)))
-	res := make([]byte, out.cbData)
-	copy(res, unsafe.Slice(out.pbData, out.cbData))
-	return res, nil
-}
+// ---------- 凭据（平台主密钥 + safeStorage 信封自动解密） ----------
+//
+// 解密本身按平台拆分：DPAPI/Windows 见 proxy_qoder_oskey_windows.go，
+// Electron safeStorage/Linux 见 proxy_qoder_oskey_other.go。
 
 type qoderUser struct {
 	ID        string `json:"id"`
@@ -137,49 +113,17 @@ func NewQoderAuth() (*QoderAuth, error) {
 
 // Reload 重新解密桌面端凭据文件（启动与 401 自愈时调用）。
 func (a *QoderAuth) Reload() error {
-	base := filepath.Join(qoderAppDataDir())
+	base := qoderAppDataDir()
 
-	// 1. Local State → DPAPI → 主密钥
-	lsBytes, err := os.ReadFile(filepath.Join(base, "Local State"))
-	if err != nil {
-		return fmt.Errorf("读取 Local State 失败: %w", err)
-	}
-	var ls struct {
-		OsCrypt struct {
-			EncryptedKey string `json:"encrypted_key"`
-		} `json:"os_crypt"`
-	}
-	if err := json.Unmarshal(lsBytes, &ls); err != nil {
-		return fmt.Errorf("解析 Local State 失败: %w", err)
-	}
-	encKey, err := base64.StdEncoding.DecodeString(ls.OsCrypt.EncryptedKey)
-	if err != nil || len(encKey) < 5 {
-		return fmt.Errorf("无效的 encrypted_key")
-	}
-	aesKey, err := qCryptUnprotect(encKey[5:])
-	if err != nil {
-		return fmt.Errorf("DPAPI 解密主密钥失败: %w", err)
-	}
-
-	// 2. auth.v1.dat（Chromium safeStorage：v10 + 12B nonce + GCM 密文+tag）
+	// auth.v1.dat → 凭据 JSON。主密钥来源与信封算法按平台分派，
+	// 见 proxy_qoder_oskey_windows.go / proxy_qoder_oskey_other.go。
 	datBytes, err := os.ReadFile(filepath.Join(base, "auth.v1.dat"))
 	if err != nil {
 		return fmt.Errorf("读取 auth.v1.dat 失败: %w", err)
 	}
-	if len(datBytes) < 3+12+16 || string(datBytes[:3]) != "v10" {
-		return fmt.Errorf("auth.v1.dat 不是有效的 safeStorage 格式")
-	}
-	cb, err := aes.NewCipher(aesKey)
+	plain, method, err := qoderOpenCreds(base, datBytes)
 	if err != nil {
-		return fmt.Errorf("创建 AES Cipher 失败: %w", err)
-	}
-	gcm, err := cipher.NewGCM(cb)
-	if err != nil {
-		return fmt.Errorf("创建 GCM 失败: %w", err)
-	}
-	plain, err := gcm.Open(nil, datBytes[3:15], datBytes[15:], nil)
-	if err != nil {
-		return fmt.Errorf("AES-GCM 解密 auth.v1.dat 失败: %w", err)
+		return err
 	}
 	var creds qoderCreds
 	if err := json.Unmarshal(plain, &creds); err != nil {
@@ -188,8 +132,9 @@ func (a *QoderAuth) Reload() error {
 	if creds.Token == "" {
 		return fmt.Errorf("凭据中 token 为空，请先在 Qoder 桌面端登录")
 	}
+	logHub("qoder 凭据解密方式：%s（%s）", method, base)
 
-	// 3. machine-id + machineToken
+	// machine-id + machineToken
 	mid := ""
 	if b, err := os.ReadFile(filepath.Join(base, "auth.machine-id")); err == nil {
 		mid = strings.TrimSpace(string(b))
@@ -207,12 +152,25 @@ func (a *QoderAuth) Reload() error {
 	return nil
 }
 
+// qoderAppDataDir 桌面端数据目录；QODER_APP_DATA 可显式覆盖。
+// Windows 在 %APPDATA%，Linux/其他在 $XDG_CONFIG_HOME（默认 ~/.config）。
 func qoderAppDataDir() string {
+	const appDirName = "com.qodercn.app.stable"
+	if v := os.Getenv("QODER_APP_DATA"); v != "" {
+		return v
+	}
+	if runtime.GOOS != "windows" {
+		if cfg := os.Getenv("XDG_CONFIG_HOME"); cfg != "" {
+			return filepath.Join(cfg, appDirName)
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".config", appDirName)
+	}
 	if appData := os.Getenv("APPDATA"); appData != "" {
-		return filepath.Join(appData, "com.qodercn.app.stable")
+		return filepath.Join(appData, appDirName)
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "AppData", "Roaming", "com.qodercn.app.stable")
+	return filepath.Join(home, "AppData", "Roaming", appDirName)
 }
 
 // qoderMachineToken 现跑 runtime-info.exe 取新鲜 machineToken。
@@ -224,7 +182,7 @@ func qoderMachineToken() string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, exe).Output()
+	out, err := execCmdContext(ctx, exe).Output()
 	if err != nil {
 		return os.Getenv("QODER_MACHINE_TOKEN")
 	}
@@ -245,9 +203,18 @@ func qoderRuntimeInfoExe() string {
 	if err != nil {
 		return ""
 	}
-	hits, _ := filepath.Glob(filepath.Join(home, ".qoder-cn", ".bin", "umid-win32-x64-*", "runtime-info.exe"))
-	if len(hits) > 0 {
-		return hits[0]
+	// 桌面端把取设备号的工具放在 ~/.qoder-cn/.bin 下，形态两端不同：
+	//   Windows: umid-win32-x64-<hash>/runtime-info.exe（子目录 + .exe）
+	//   Linux:   runtime-info-linux-x64-<hash>（扁平文件，无扩展名）
+	patterns := []string{
+		filepath.Join("umid-win32-x64-*", "runtime-info.exe"),
+		filepath.Join("runtime-info-*"),
+	}
+	for _, p := range patterns {
+		hits, _ := filepath.Glob(filepath.Join(home, ".qoder-cn", ".bin", p))
+		if len(hits) > 0 {
+			return hits[0]
+		}
 	}
 	return ""
 }
@@ -366,6 +333,3 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 	}
 	return headers, nil
 }
-
-
-

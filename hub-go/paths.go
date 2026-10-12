@@ -9,7 +9,7 @@ package main
 // （表现为「国际代理起不来」这类难以定位的问题）。
 //
 // 现在的解析顺序（先命中先用）：
-//  1. 环境变量 WORKBUDDY_HUB_ROOT —— 显式覆盖，便于测试与多环境部署
+//  1. 环境变量 AIHUB_ROOT —— 显式覆盖，便于测试与多环境部署
 //  2. exe 所在目录的上一级 —— 兼容当前部署（exe 在 hub-go\，数据在仓库根）
 //  3. exe 所在目录 —— exe 已挪到 bin\ 等子目录、数据就在同级时
 //  4. 当前工作目录 —— 兜底（例如 go run）
@@ -23,7 +23,7 @@ import (
 )
 
 // dataRootEnv 显式指定数据根目录的环境变量名。
-const dataRootEnv = "WORKBUDDY_HUB_ROOT"
+const dataRootEnv = "AIHUB_ROOT"
 
 // hubRoot 是数据根目录：凭证目录、state.json、各代理日志都相对于它解析。
 // 它是一个变量（而非常量），以便测试与显式配置覆盖。
@@ -51,7 +51,7 @@ func resolveHubRoot() string {
 
 	// 从 exe 所在目录开始【逐级向上】查找真正的数据根，最多 4 级。
 	// 需要向上多级是因为 exe 可能被放在 bin\ 这类子目录里：
-	//   <root>\hub-go\bin\workbuddy-hub.exe  -> 数据根在 <root>（向上 3 级）
+	//   <root>\hub-go\bin\aihub.exe  -> 数据根在 <root>（向上 3 级）
 	// 先近后远，保证「数据就在 exe 旁边」的部署仍然优先命中。
 	candidates := []string{exeDir}
 	dir := exeDir
@@ -86,7 +86,8 @@ func resolveHubRoot() string {
 // 它们是 hub 自己写出来的，一旦某次把日志写进了某个目录，
 // 该目录下次就会被误判成数据根，错误会自我固化、再也回不到真正的根。
 // （这是实际发生过的 bug：exe 在 bin\ 时，候选 hub-go\ 因残留日志被误判为数据根，
-//   于是日志一直写在 hub-go\ 而不是仓库根。）
+//
+//	于是日志一直写在 hub-go\ 而不是仓库根。）
 func looksLikeDataRoot(dir string) bool {
 	if dir == "" {
 		return false

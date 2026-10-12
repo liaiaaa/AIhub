@@ -103,6 +103,7 @@ func qoderClientMaxTokens(raw map[string]any, entry *qoderModelEntry) int {
 //   - effort 为 none/空：不发 reasoning_effort，is_reasoning=false（显式关闭）
 //     或回退目录 IsReasoning（无显式意图、模型无强度档时）。
 //   - 其余：发 parameters.reasoning_effort，is_reasoning=true。
+//
 // 官方 wire 无 parameters.enable_thinking（此前是我方臆测字段，已废弃）。
 func qoderEffortToWire(spec qoderThinkingSpec, entry *qoderModelEntry) (effort string, isReasoning bool) {
 	if spec.Effort != "" && spec.Effort != "none" {
@@ -139,26 +140,26 @@ func qoderEnvelope(messages []any, tools any, modelKey, uid string, spec qoderTh
 	requestID := qoderUUID()
 
 	env := map[string]any{
-		"request_id":      requestID,
-		"request_set_id":  "qoder-request-" + qoderUUID(),
-		"chat_record_id":  requestID,
-		"session_id":      qoderSessionID(uid),
-		"stream":          true,
-		"chat_task":       "FREE_INPUT",
-		"is_reply":        true,
-		"is_retry":        false,
-		"source":          1,
-		"version":         "3",
-		"session_type":    "qodercli",
-		"agent_id":        "agent_common",
-		"task_id":         "common",
-		"code_language":   "",
-		"chat_prompt":     "",
-		"image_urls":      nil,
+		"request_id":       requestID,
+		"request_set_id":   "qoder-request-" + qoderUUID(),
+		"chat_record_id":   requestID,
+		"session_id":       qoderSessionID(uid),
+		"stream":           true,
+		"chat_task":        "FREE_INPUT",
+		"is_reply":         true,
+		"is_retry":         false,
+		"source":           1,
+		"version":          "3",
+		"session_type":     "qodercli",
+		"agent_id":         "agent_common",
+		"task_id":          "common",
+		"code_language":    "",
+		"chat_prompt":      "",
+		"image_urls":       nil,
 		"aliyun_user_type": "",
-		"system":          "",
-		"messages":        messages,
-		"parameters":      params,
+		"system":           "",
+		"messages":         messages,
+		"parameters":       params,
 		"chat_context": map[string]any{
 			"chatPrompt": "",
 			"imageUrls":  nil,

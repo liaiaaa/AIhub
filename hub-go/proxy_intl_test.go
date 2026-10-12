@@ -9,8 +9,10 @@ package main
 // 不再硬编码绝对路径（曾因写死 D:\C\Desktop\workbuddy-hub 而在目录改名后失败）。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,4 +52,36 @@ func TestCredDiscovery(t *testing.T) {
 		t.Fatalf("AuthFilePath 未解析出真实文件: %q", got)
 	}
 	t.Logf("<凭证目录C>解析到: %s", got)
+}
+
+// TestAnnotateRiskControl 11140 风控提示注入：
+//   - 真实上游 403 响应体 → displayMsg.zh/en 尾部出现 [hub] 提示，JSON 仍合法；
+//   - 非 11140 / 非 403 → 原样返回。
+func TestAnnotateRiskControl(t *testing.T) {
+	upstream := `{"code":11140,"msg":"request illegal","requestId":"72de566e-717d-482a-a6bf-5b53112c0e91","displayMsg":{"en":"The content did not pass the safety review. Please adjust and retry.","zh":"内容未通过安全审核，请调整后重试。","zh-hant":"內容未通過安全審核，請調整後重試。"},"actions":["SUBMIT_FEEDBACK","COPY_ERROR","EDIT_INPUT"]}`
+
+	out := annotateRiskControl(403, []byte(upstream))
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("注入后 JSON 不合法: %v", err)
+	}
+	dm := m["displayMsg"].(map[string]any)
+	if !strings.Contains(dm["zh"].(string), "[hub]") || !strings.Contains(dm["zh"].(string), "换凭证") {
+		t.Fatalf("zh 提示未注入: %v", dm["zh"])
+	}
+	if !strings.Contains(dm["en"].(string), "[hub]") {
+		t.Fatalf("en 提示未注入: %v", dm["en"])
+	}
+	if m["code"].(float64) != 11140 {
+		t.Fatalf("code 被改动: %v", m["code"])
+	}
+
+	// 非 11140 / 非 403：必须原样返回
+	if got := annotateRiskControl(200, []byte(upstream)); string(got) != upstream {
+		t.Fatalf("200 响应不应被改写")
+	}
+	plain := []byte(`{"error":"boom"}`)
+	if got := annotateRiskControl(403, plain); string(got) != string(plain) {
+		t.Fatalf("非 11140 的 403 不应被改写: %s", got)
+	}
 }

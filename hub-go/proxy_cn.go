@@ -14,7 +14,7 @@ func NewDomProxy() *Proxy {
 		UserAgent:     "codebuddy2openai/2.0",
 		DefaultModel:  "auto",
 		Models: []string{
-			"glm-5.3", "glm-5.3-flash",
+			"space-bunny", "glm-5.3", "glm-5.3-flash",
 			"glm-5.2", "glm-5.1", "glm-5v-turbo",
 			"kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
 			"deepseek-v4-pro", "deepseek-v4-flash",
@@ -23,9 +23,13 @@ func NewDomProxy() *Proxy {
 		Aliases:       map[string]string{},
 		AuthFileName:  "workbuddy-desktop.info",
 		PrependSystem: false,
-		Owner:         "codebuddy",
-		LogPath:       "converter-cn.log",
-		DirectOnly:    true, // copilot.tencent.com 国内可达，直连不读系统代理
+		// 客户端没指定思考档位时补最高档（2026-10-08 用户要求，见 default_thinking.go）。
+		// 实测 copilot.tencent.com 对 glm-5.1/glm-5.3/deepseek-v4-flash/minimax-m3-pay/auto
+		// 接受 reasoning_effort=max，不支持的模型会忽略该字段。
+		ThinkingDefault: wbThinkingDefaultEffort,
+		Owner:           "codebuddy",
+		LogPath:         "converter-cn.log",
+		DirectOnly:      true, // copilot.tencent.com 国内可达，直连不读系统代理
 	}
 }
 

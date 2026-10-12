@@ -1,33 +1,19 @@
 package main
 
-// 平台相关：端口探测/清扫、进程查杀、浏览器打开、控制台日志
-// 由 main.go 拆分而来（纯文件搬运，未改逻辑）。
+// 平台相关（Windows）：端口占用者查询、进程查杀、浏览器打开。
+// 跨平台部分（portListening/stopPort/sweepPorts/logHub）在 platform.go。
 
 import (
 	"fmt"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
-
-// ---------- 端口工具 ----------
-
-func portListening(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 150*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
 
 func pidsOnPort(port int) []int {
 	var pids []int
-	out, err := exec.Command("netstat", "-ano").Output()
+	out, err := execCmd("netstat", "-ano").Output()
 	if err != nil {
 		return pids
 	}
@@ -67,7 +53,14 @@ func killPid(pid int) {
 	if isOwnProcessName(pid) {
 		return
 	}
-	exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run()
+	// 目标进程正持有默认控制台端口（8801）：它是另一个活跃控制台实例，
+	// 即使 exe 改名（isOwnProcessName 漏判）也绝不杀。
+	for _, cpid := range pidsOnPort(HubPort) {
+		if cpid == pid {
+			return
+		}
+	}
+	execCmd("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run()
 }
 
 // isOwnProcessName 判断 pid 是否就是本程序（同名的另一个 hub 实例）。
@@ -77,47 +70,14 @@ func isOwnProcessName(pid int) bool {
 		return false
 	}
 	want := strings.ToLower(filepath.Base(self))
-	out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
+	out, err := execCmd("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
 	if err != nil {
 		return false
 	}
 	return strings.Contains(strings.ToLower(string(out)), `"`+want+`"`)
 }
 
-func stopPort(port int) bool {
-	if portListening(port) {
-		for _, pid := range pidsOnPort(port) {
-			killPid(pid)
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	return !portListening(port)
-}
-
-// sweepPorts 启动时连续清扫，默认全部停止。
-func sweepPorts() {
-	deadline := time.Now().Add(6 * time.Second)
-	for time.Now().Before(deadline) {
-		a := stopPort(DomPort)
-		b := stopPort(IntlPort)
-		c := stopPort(MimoPort)
-		d := stopPort(QoderPort)
-		if a && b && c && d {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-
 func openBrowser(port int) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
-	exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-}
-
-func logHub(format string, args ...any) {
-	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
-	if f, err := os.OpenFile(dataPath("hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
-		f.WriteString(line)
-		f.Close()
-	}
+	execCmd("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }

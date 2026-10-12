@@ -37,7 +37,7 @@ func TestOpenInferValidatedStreamIntegrity(t *testing.T) {
 	a.creds = qoderCreds{Token: "dt-test", User: qoderUser{ID: "u1", Name: "tester"}}
 	p.auth = a
 
-	resp, err := p.openInferValidated(context.Background(), []byte(`{"model":"m","messages":[]}`), nil, "t01")
+	resp, err := p.openInferValidated(context.Background(), []byte(`{"model":"m","messages":[]}`), nil, "t01", nil)
 	if err != nil {
 		t.Fatalf("openInferValidated: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestOpenInferValidatedRetriesOnFirstFrameError(t *testing.T) {
 	a.creds = qoderCreds{Token: "dt-test", User: qoderUser{ID: "u1", Name: "tester"}}
 	p.auth = a
 
-	resp, err := p.openInferValidated(context.Background(), []byte(`{}`), nil, "t02")
+	resp, err := p.openInferValidated(context.Background(), []byte(`{}`), nil, "t02", nil)
 	if err != nil {
 		t.Fatalf("openInferValidated: %v", err)
 	}

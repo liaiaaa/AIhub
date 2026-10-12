@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,14 @@ const (
 
 	// zcodeDefaultModel 默认模型（必须是上游真实 id，不是显示名）
 	zcodeDefaultModel = "glm-5.3"
+
+	// zcodeRelayProbeURL 本地 start-plan 中继（tools\zcode-relay\，zcode-api
+	// 引擎）：免费额度通道。Start 时自动探测，探测到即切换；ZCODE_RELAY_URL
+	// =off 可强制关闭，ZCODE_RELAY_URL 指定其他地址；本地密钥解析见
+	// zcode_relay.go 的 zcodeRelayKey（env > relay-key 文件 > 历史常量）。
+	zcodeRelayProbeURL  = "http://127.0.0.1:8807"
+	zcodeRelayProbeTTL  = 5 * time.Minute
+	zcodeRelayProbeWait = 800 * time.Millisecond
 )
 
 // ZcodeProxy 一个本地代理实例。零值不可用，须用 NewZcodeProxy 初始化。
@@ -49,10 +58,44 @@ type ZcodeProxy struct {
 	APIKey       string // Z.ai API Key（启动前设置；为空时启动时自动回退加载）
 	DefaultModel string
 
-	// 模型目录与别名表（zcode_models.go 提供，内置快照）
-	catalogMu sync.RWMutex
-	catalog   []zcodeModelEntry
-	aliases   map[string]string
+	// 模型目录与别名表（zcode_models.go 提供，内置快照；
+	// zcode_catalog_refresh.go 以 client/configs 实时目录刷新）
+	catalogMu     sync.RWMutex
+	catalog       []zcodeModelEntry
+	aliases       map[string]string
+	catalogLiveAt time.Time // 最近一次实时目录成功时间
+	catalogTryAt  time.Time // 最近一次尝试时间（失败冷却用）
+
+	// 身份头 / 端点路由 / 套餐额度（2026-09-27 zcode-api 逆向接入）
+	identity *zcodeIdentity
+	routing  *zcodeRouting
+	stopCh   chan struct{}
+
+	// 本地 start-plan 中继（免费额度）：非空 = 中继模式
+	relayURL        string
+	relayKey        string
+	relayProbeAt    time.Time // 上次探测时间（探测失败后冷却重试）
+	relayProbeMutex sync.Mutex
+
+	// 本实例拉起的中继栈进程（点「停止」时一并收掉；外部手动启动的不动）
+	spawnedMintCmd  *exec.Cmd
+	spawnedRelayCmd *exec.Cmd
+	relayReadyOnce  *sync.Once
+
+	// 验证码熔断器：IP 风控惩罚期内 token 连续被拒，继续重铸只会喂深惩罚。
+	// 连续 N 轮 3007 自救失败 → 熔断打开，请求秒回明确错误；退避到期后
+	// 放行真实流量试探，成功即复位，仍被拒则加倍退避（封顶 30min）。
+	captchaFails        int
+	captchaBreakerUntil time.Time
+
+	// 中继请求启动节流（防验证码风控爆发特征，见 zcode_relay.go）
+	relayStartMu   sync.Mutex
+	relayNextStart time.Time
+
+	quotaMu        sync.Mutex
+	quotaBuckets   []zcodeQuotaBucket
+	quotaFetchedAt time.Time
+	quotaError     string
 
 	mu     sync.Mutex
 	client *http.Client
@@ -157,6 +200,27 @@ func (p *ZcodeProxy) Start() (bool, string) {
 	// api.z.ai 国内外均可直连，不读系统/环境代理（与 Qoder/dom 一致）
 	p.client = directClient()
 
+	// 桌面端身份（User-Agent/X-Device-Mid 等，请求指纹对齐官方客户端）
+	p.identity = zcodeLoadIdentity()
+	// 服务端端点改写表（agent/configs，fail-open）
+	p.routing = newZcodeRouting(p.identity, func() string { return p.apiKey })
+	// 中继栈自拉起 + 探测接入：正常 8~12s（mint 2s + 引擎 2~5s + 探测）。
+	// 有界等待让控制台「启动」返回时状态就是对的；超时则交后台循环兜底。
+	relayReady := make(chan struct{})
+	p.relayReadyOnce = new(sync.Once)
+	go func() {
+		defer p.relayReadyOnce.Do(func() { close(relayReady) })
+		p.spawnRelayStack()
+		p.detectRelay(true)
+	}()
+	select {
+	case <-relayReady:
+	case <-time.After(12 * time.Second):
+	}
+	// 后台刷新：实时模型目录 + 额度 + 中继探测（Stop 收敛）
+	p.stopCh = make(chan struct{})
+	go p.backgroundLoop()
+
 	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
 	var ln net.Listener
 	var err error
@@ -194,12 +258,58 @@ func (p *ZcodeProxy) Start() (bool, string) {
 	return true, "已启动（Zcode · " + p.Endpoint + "）"
 }
 
+// backgroundLoop 周期刷新实时目录与额度视图。所有刷新各自带节流与
+// fail-open 语义：失败只影响新鲜度，绝不动已服务的目录/路由。
+func (p *ZcodeProxy) backgroundLoop() {
+	stopCh := p.stopCh
+	if n, err := p.refreshCatalog(); err != nil {
+		p.logf("实时模型目录首刷失败（保留内置快照）：%v", err)
+	} else {
+		p.logf("实时模型目录已刷新：%d 个模型", n)
+	}
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-t.C:
+			if !p.Running() {
+				continue
+			}
+			// 中继未启用时周期重探测 + 兜底自拉起（中继崩溃后自动复活）
+			p.detectRelay(false)
+			if _, _, on := p.relayTarget(); !on {
+				p.spawnRelayStack()
+				p.detectRelay(true)
+			}
+			if n, err := p.refreshCatalog(); err != nil && p.log != nil {
+				p.log.Log("实时模型目录刷新失败（保留现有目录）：%v", err)
+			} else if p.log != nil {
+				p.log.Log("实时模型目录刷新：%d 个模型", n)
+			}
+		}
+	}
+}
+
+// logf 日志便捷封装（log 未初始化时静默）。
+func (p *ZcodeProxy) logf(format string, args ...any) {
+	if p.log != nil {
+		p.log.Log(format, args...)
+	}
+}
+
 // Stop 关闭本实例的监听并释放端口。
 func (p *ZcodeProxy) Stop() bool {
 	p.mu.Lock()
-	srv, ln := p.server, p.ln
+	srv, ln, stopCh := p.server, p.ln, p.stopCh
 	p.server, p.ln = nil, nil
 	p.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+		p.stopCh = nil
+	}
 
 	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -210,6 +320,8 @@ func (p *ZcodeProxy) Stop() bool {
 	if ln != nil {
 		_ = ln.Close()
 	}
+	// 点「停止」：本实例拉起的中继栈（mint/中继）一并收掉
+	p.stopSpawnedRelayStack()
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -251,7 +363,7 @@ func (p *ZcodeProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"backend":    p.Endpoint,
 		"proxy_port": p.Port,
 		"model":      p.DefaultModel,
-		"models":     len(p.catalogSnapshot()),
+		"models":     len(zcodeFilterCatalog(p.catalogSnapshot())),
 	}
 	if p.auth != nil {
 		info["credential"] = p.auth.Summary()
@@ -262,13 +374,78 @@ func (p *ZcodeProxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		info["credential"] = map[string]any{"type": "zai_api_key", "key_head": head}
 	}
+
+	// 实时目录新鲜度
+	p.catalogMu.RLock()
+	catalogLive := !p.catalogLiveAt.IsZero()
+	catalogLiveAt := p.catalogLiveAt
+	p.catalogMu.RUnlock()
+	info["catalog_source"] = map[string]any{
+		"mode":         orBoolStr(catalogLive, "live(client/configs)", "builtin_snapshot"),
+		"refreshed_at": catalogLiveAt.Format("2006-01-02 15:04:05"),
+	}
+
+	// 身份（脱敏：设备号只露头）
+	if p.identity != nil {
+		mid := p.identity.deviceMid
+		if len(mid) > 8 {
+			mid = mid[:8] + "..."
+		}
+		info["identity"] = map[string]any{
+			"app_version": p.identity.appVersion,
+			"platform":    p.identity.platformParam(),
+			"os_version":  p.identity.osVersion,
+			"timezone":    p.identity.clientTimezone,
+			"device_mid":  mid,
+		}
+	}
+	// 端点路由快照
+	info["endpoint_routing"] = map[string]any{
+		"snapshot": p.routing.HasSnapshot(),
+		"entries":  p.routing.SnapshotSize(),
+	}
+	// 本地 start-plan 中继（免费额度通道）
+	if url, _, ok := p.relayTarget(); ok {
+		relayInfo := map[string]any{
+			"mode": "start_plan_free_quota",
+			"url":  url,
+		}
+		if wait, open := p.captchaBreakerOpen(); open {
+			relayInfo["captcha_breaker"] = map[string]any{
+				"open":             true,
+				"retry_after_secs": int(wait.Seconds()) + 1,
+			}
+		} else {
+			relayInfo["captcha_breaker"] = map[string]any{"open": false}
+		}
+		info["relay"] = relayInfo
+	} else {
+		info["relay"] = map[string]any{
+			"mode": "direct_api_key",
+			"hint": "免费额度通道未启用：运行 tools\\zcode-relay\\start-zcode-relay.bat 后 5 分钟内自动接入（或重启本代理立即生效）",
+		}
+	}
+	// 套餐额度（只读 billing/balance，5min 缓存）
+	if buckets, qerr := p.quotaSnapshot(); len(buckets) > 0 {
+		info["quota"] = buckets
+	} else if qerr != "" {
+		info["quota"] = map[string]any{"error": qerr}
+	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+func orBoolStr(cond bool, a, b string) string {
+	if cond {
+		return a
+	}
+	return b
 }
 
 // handleModels 模型清单：id 用官方显示名（双轨别名，请求时映射回真实 key），
 // 并透出能力元数据（视觉/上下文/输出上限/思考档位），供客户端渲染选项。
+// 只透出白名单内的模型（当前套餐额度覆盖的两个），内部目录仍保留全量。
 func (p *ZcodeProxy) handleModels(w http.ResponseWriter, r *http.Request) {
-	catalog := p.catalogSnapshot()
+	catalog := zcodeFilterCatalog(p.catalogSnapshot())
 	data := make([]map[string]any, 0, len(catalog))
 	seen := make(map[string]bool, len(catalog))
 	for _, m := range catalog {

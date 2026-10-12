@@ -47,7 +47,13 @@ func main() {
 	}
 
 	hub := NewHub()
-	aggLoad() // 聚合线路白名单（:8790 默认不监听，控制台里启动）
+	aggLoad() // 聚合线路白名单
+	// 聚合口（:8790）随 hub 自动监听——它是 Codex 的入口，空窗期会让桌面版
+	// 拉不到模型目录而回退到内置官方目录（2026-10-12 事故：54 秒空窗导致
+	// 「选择模型」里出现 gpt-5.6-sol 等官方模型，且目录只在启动时读一次、
+	// 不会自愈）。只豁免这一个口：其余线路仍保持「启动后默认关闭」的用户偏好。
+	// 用户若在控制台手动停止聚合口，本次运行内不再自动拉起（见 aggUserStopped）。
+	hub.aggAutostart()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", hub.handleRoot)
 	mux.HandleFunc("/api/status", hub.apiStatus)

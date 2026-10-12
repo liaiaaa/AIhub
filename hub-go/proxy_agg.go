@@ -29,6 +29,10 @@ import (
 
 const AggPort = 8790
 
+// aggPort 是聚合口实际监听的端口。默认等于 AggPort；测试里改成别的值，
+// 免得断言时撞上正在运行的正式实例（本机 Codex 就挂在 :8790 上）。
+var aggPort = AggPort
+
 type aggModel struct {
 	Line    string `json:"line"`    // dom / intl / qoder / trae
 	Slug    string `json:"slug"`    // 对外（客户端请求里）的模型名，首个 '.' 前即线路名
@@ -45,7 +49,21 @@ var (
 
 // aggLineCN 线路中文名（错误提示 / 自动显示名用）；
 // aggLinePort 各线路本地端口（拉取在线模型目录用，与 webui SERVICES 一致）。
-var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae"}
+// "agg" 不是真实线路，是「被聚合口拒掉的请求」的统计归属（如未知模型 400），
+// 没有它用量表会显示成空名字（见 usage_stats.go 的 line_cn）。
+var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "agg": "聚合口(未受理)"}
+
+// aggSelectableLine 判断是不是「可挂模型的真实线路」。
+// 不能拿 aggLineCN 当校验表——它含 "agg" 这个纯统计用的键，
+// 用它校验会让 /api/agg/add?line=agg 被误认为合法线路。
+func aggSelectableLine(line string) bool {
+	switch line {
+	case "dom", "intl", "qoder", "trae":
+		return true
+	}
+	return false
+}
+
 var aggLinePort = map[string]int{"dom": 8787, "intl": 8799, "qoder": 8797, "trae": 8795}
 
 func aggDefaults() []aggModel {
@@ -119,12 +137,25 @@ func (h *Hub) startAggLine() (bool, string) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "models": len(aggSnapshot())})
 	})
+	// 目录可观测性：Codex 桌面版只在启动时拉一次模型目录，出问题时
+	// （拉到 0 个 / 根本没来拉）从日志要能看出来。按客户端版本区分形态，
+	// 每次请求记一行，不刷屏（桌面版启动时也就一两次）。
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("client_version") != "" {
-			writeJSON(w, http.StatusOK, h.aggCodexModels())
+		cv := r.URL.Query().Get("client_version")
+		if cv != "" {
+			out := h.aggCodexModels()
+			n := len(asSlice(out["models"]))
+			logHub("agg /v1/models 目录请求 | client_version=%s | codex 形态 | %d 个模型", cv, n)
+			if n == 0 {
+				logHub("agg ⚠ 模型目录为空：白名单里没有可用模型，客户端会回退到内置官方目录")
+			}
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
-		writeJSON(w, http.StatusOK, h.aggOpenAIModels())
+		out := h.aggOpenAIModels()
+		n := len(asSlice(out["data"]))
+		logHub("agg /v1/models 目录请求 | OpenAI 形态 | %d 个模型", n)
+		writeJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		h.aggDispatch(w, r, "responses")
@@ -133,7 +164,7 @@ func (h *Hub) startAggLine() (bool, string) {
 		h.aggDispatch(w, r, "chat")
 	})
 
-	addr := fmt.Sprintf("127.0.0.1:%d", AggPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", aggPort)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return false, "聚合端口绑定失败（可能被残留进程占用）: " + err.Error()
@@ -150,7 +181,7 @@ func (h *Hub) startAggLine() (bool, string) {
 		logHub("agg proxy stopped")
 	}()
 	logHub("agg proxy started on %s（%d 个模型）", addr, len(aggSnapshot()))
-	return true, fmt.Sprintf("聚合线路已启动（:%d，%d 个模型）", AggPort, len(aggSnapshot()))
+	return true, fmt.Sprintf("聚合线路已启动（:%d，%d 个模型）", aggPort, len(aggSnapshot()))
 }
 
 func (h *Hub) stopAggLine() (bool, string) {
@@ -165,6 +196,39 @@ func (h *Hub) stopAggLine() (bool, string) {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	return true, "聚合已停止"
+}
+
+// aggUserStopped 记录「本次运行内用户是否手动停过聚合口」。
+// 手动停过就不再自启，尊重用户意图；否则 hub 启动/换凭证重启后自动监听。
+var aggUserStopped bool
+
+// aggAutostart 让聚合口随 hub 自动监听（2026-10-12 事故修复）。
+//
+// 背景：:8790 原先要手动点「启动聚合」才监听。而 Codex 桌面版只在启动时
+// 读一次模型目录，正好落在空窗里就会回退到 codex 二进制内置的官方目录
+// （gpt-5.6-sol 之类），且不会自愈——只能重启桌面版。今天 hub 重启 7 次，
+// 每次 agg 晚 5~54 秒，实测踩中过。
+//
+// 白名单非空 = 用户已经配了要给 Codex 用的模型，自启是合理默认。
+// 只豁免 :8790 这一个口，其余线路仍保持「启动后默认关闭」。
+func (h *Hub) aggAutostart() {
+	if len(aggSnapshot()) == 0 {
+		logHub("agg 白名单为空，不自动监听 :%d", aggPort)
+		return
+	}
+	aggSrvMu.Lock()
+	stopped := aggUserStopped
+	aggSrvMu.Unlock()
+	if stopped {
+		logHub("用户已手动停止过聚合口，本次运行不再自动监听")
+		return
+	}
+	ok, msg := h.startAggLine()
+	if ok {
+		logHub("agg 自动监听：%s", msg)
+	} else {
+		logHub("agg 自动监听失败：%s", msg)
+	}
 }
 
 // aggStatusEntry 供控制台卡片轮询：聚合口是否在跑 + 白名单模型数。
@@ -236,6 +300,18 @@ func rewriteModel(raw []byte) (aggModel, []byte, error) {
 		}
 	}
 	return aggModel{}, nil, fmt.Errorf("未知模型 %q（在 AIHub 控制台「Codex 模型管理」里添加）", slug)
+}
+
+// requestedModelSlug 尽力取出请求体里的 model 字段（只为统计留痕，失败返回空）。
+func requestedModelSlug(raw []byte) string {
+	var m map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if dec.Decode(&m) != nil {
+		return ""
+	}
+	s, _ := m["model"].(string)
+	return strings.TrimSpace(s)
 }
 
 // responsesBodyToChatBody 把 Responses 请求体转成 chat/completions 请求体，
@@ -331,6 +407,14 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 	}
 	am, nb, err := rewriteModel(body)
 	if err != nil {
+		// 「未知模型」也要进统计：取样点在 rewriteModel 成功之后，所以这类
+		// 请求原本整条不落 usage.jsonl。补一行 code=400、slug=客户端请求的名字，
+		// 这样「客户端把官方模型名（gpt-5.6-sol 等）发过来了」一眼可见
+		// （2026-10-12 事故：桌面版回退内置目录后请求全被这一层拒掉，
+		// 但统计里毫无痕迹，排查时看不见）。
+		if slug := requestedModelSlug(body); slug != "" {
+			recordUsage(usageRec{Line: "agg", Slug: slug, Kind: kind, Code: http.StatusBadRequest})
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]any{"message": err.Error(), "type": "invalid_request_error"},
 		})
@@ -414,6 +498,9 @@ func (h *Hub) apiAggStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) apiAggStop(w http.ResponseWriter, r *http.Request) {
+	aggSrvMu.Lock()
+	aggUserStopped = true // 用户意图：本次运行别再自动拉起
+	aggSrvMu.Unlock()
 	ok, msg := h.stopAggLine()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
@@ -444,7 +531,7 @@ func (h *Hub) apiAggAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Line = strings.TrimSpace(req.Line)
 	req.Model = strings.TrimSpace(req.Model)
-	if aggLineCN[req.Line] == "" {
+	if !aggSelectableLine(req.Line) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "未知线路：" + req.Line})
 		return
 	}
@@ -472,7 +559,7 @@ func (h *Hub) apiAggRemove(w http.ResponseWriter, r *http.Request) {
 // 四条线路都是标准 OpenAI list 格式）。线路没启动时 ok=false。
 func (h *Hub) apiAggLineModels(w http.ResponseWriter, r *http.Request) {
 	line := r.URL.Query().Get("line")
-	if aggLineCN[line] == "" {
+	if !aggSelectableLine(line) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "未知线路：" + line})
 		return
 	}

@@ -243,6 +243,7 @@ const webHTML = `<!DOCTYPE html>
 
   <div class="checkin-bar">
     <button class="primary" onclick="doCheckin()">一键签到</button>
+    <button onclick="doIntlCheckin()">国际活跃上报</button>
     <span class="chip no" id="checkin-chip">…</span>
     <span class="sum" id="checkin-sum"></span>
   </div>
@@ -618,6 +619,26 @@ function stopAll() {
   post('stop_all', {});
 }
 function setCred(name) { post('intl/cred', { cred: name }); }
+
+// 国际活跃上报单独一个按钮：给**所有**国际凭证各报一次，不碰国内/Trae。
+// 国际版的活跃按账号计，原先混在一键签到里只能覆盖「当前选中的凭证」，
+// 要覆盖多个账号就得反复切凭证+点签到（每次都顺带重打国内/Trae）。
+async function doIntlCheckin() {
+  showMsg('正在给全部国际凭证上报活跃…');
+  try {
+    const r = await fetch('/api/intl/checkin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(120000)
+    });
+    const d = await r.json();
+    showMsg(d.msg, !d.ok);
+  } catch (e) {
+    showMsg('国际活跃上报失败：' + e, true);
+  }
+  refresh();
+}
 
 async function doCheckin() {
   showMsg('正在签到…');

@@ -168,6 +168,12 @@ func (h *Hub) apiCheckin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
 
+// apiIntlCheckin 单独给全部国际凭证做活跃上报（不碰国内/Trae）。
+func (h *Hub) apiIntlCheckin(w http.ResponseWriter, r *http.Request) {
+	ok, msg := runIntlCheckin(h)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
 // apiCredits 各平台剩余额度（5 分钟缓存，?force=1 作废缓存后台补拉）。
 // 带 ?key=<平台> 时只返回该平台（瓦片独立刷新），形如 {"intl":{...}}。
 func (h *Hub) apiCredits(w http.ResponseWriter, r *http.Request) {

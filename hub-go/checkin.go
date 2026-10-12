@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -452,20 +453,12 @@ func traeRewardField(m map[string]any) string {
 // 2026-10-08 变更：Qoder 签到永久停用——网关活动领取反复失败，且该平台
 // 对自动/定时类操作风控敏感（用户拍板）。仅保留国内 WorkBuddy + Trae。
 func runCheckin(h *Hub) (bool, string) {
-	// 国际版用控制台当前选中的凭证（与 8799 线路一致）
-	h.mu.Lock()
-	intlCred := h.intlCred
-	h.mu.Unlock()
-
 	domCh := make(chan checkinResult, 1)
 	traeCh := make(chan checkinResult, 1)
-	intlCh := make(chan checkinResult, 1)
 	go func() { domCh <- domCheckin() }()
 	go func() { traeCh <- traeCheckin() }()
-	go func() { intlCh <- intlCheckin(intlCred) }()
 	dom := <-domCh
 	trae := <-traeCh
-	intl := <-intlCh
 	const qoderDetail = "已停用"
 
 	h.mu.Lock()
@@ -473,18 +466,76 @@ func runCheckin(h *Hub) (bool, string) {
 		Date:  time.Now().Format("2006-01-02"),
 		Time:  time.Now().Format("15:04:05"),
 		Dom:   dom.Detail,
-		Intl:  intl.Detail,
 		Qoder: qoderDetail,
 		Trae:  trae.Detail,
-		OK:    dom.OK && trae.OK && intl.OK,
+		OK:    dom.OK && trae.OK,
 	}
 	h.saveStateLocked()
 	rec := h.checkin
 	h.mu.Unlock()
 
-	logHub("签到 | 国内=%s | 国际=%s | Qoder=%s | Trae=%s", dom.Detail, intl.Detail, rec.Qoder, rec.Trae)
-	msg := "国内：" + dom.Detail + "；国际：" + intl.Detail + "；Qoder：" + rec.Qoder + "；Trae：" + rec.Trae
+	logHub("签到 | 国内=%s | Qoder=%s | Trae=%s", dom.Detail, rec.Qoder, rec.Trae)
+	msg := "国内：" + dom.Detail + "；Qoder：" + rec.Qoder + "；Trae：" + rec.Trae
 	return rec.OK, msg
+}
+
+// runIntlCheckin 给**所有**国际凭证各做一次活跃上报，返回逐账号结果。
+//
+// 为什么单独成一个入口（2026-10-12 用户要求）：国际版的活跃是**按账号**计的，
+// 而 intlCheckin 原先只取「当前选中的那个凭证」。要覆盖 4 个账号就得
+// 「切凭证 → 点一键签到」重复 4 次，而每次都会顺带重打国内/Trae 两个已经
+// 签过的接口——既慢又平白多出请求。现在拆开：国际单独一个按钮，一次跑完
+// 全部凭证，不碰国内/Trae。
+//
+// 幂等：文档说「同一账号每日最多获得一次」，重复上报无害（实测 days 不再变）。
+func runIntlCheckin(h *Hub) (bool, string) {
+	names := make([]string, 0, 8)
+	for name, dir := range credDirs() {
+		if dir != "" && dirHasCredential(dir) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names) // 固定顺序，便于对照
+	if len(names) == 0 {
+		return false, "没有可用的国际凭证"
+	}
+
+	type one struct {
+		name string
+		res  checkinResult
+	}
+	ch := make(chan one, len(names))
+	for _, n := range names {
+		go func(n string) { ch <- one{n, intlCheckin(n)} }(n)
+	}
+
+	results := make([]one, 0, len(names))
+	allOK := true
+	for i := 0; i < len(names); i++ {
+		r := <-ch
+		results = append(results, r)
+		if !r.res.OK {
+			allOK = false
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+
+	parts := make([]string, 0, len(results))
+	for _, r := range results {
+		parts = append(parts, r.name+" "+r.res.Detail)
+	}
+	detail := strings.Join(parts, "；")
+
+	// 结果写进 checkin.Intl（沿用同一字段，控制台签到条能直接显示）
+	h.mu.Lock()
+	h.checkin.Date = time.Now().Format("2006-01-02")
+	h.checkin.Time = time.Now().Format("15:04:05")
+	h.checkin.Intl = detail
+	h.saveStateLocked()
+	h.mu.Unlock()
+
+	logHub("国际活跃上报（%d 个凭证）| %s", len(results), detail)
+	return allOK, "国际活跃上报：" + detail
 }
 
 // autoCheckinLoop 已停用（2026-10-08 用户拍板）。

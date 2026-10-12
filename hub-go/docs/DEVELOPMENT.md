@@ -15,7 +15,7 @@ $env:GOPATH ='E:\software\go-path'
 & 'E:\software\go\bin\go.exe' test ./...
 ```
 
-或直接双击 `scripts\build.bat`（产物输出到 `bin\workbuddy-hub.exe`）。
+或直接双击 `scripts\build.bat`（产物输出到 `bin\aihub.exe`）。
 
 **离线可跑**：`go vet` 必然通过；`go test` 中带 `live` 的用例会打真实后端，
 断网/无凭证时失败属正常，用 `-run` 挑选：
@@ -109,6 +109,74 @@ parameters` 改名 `input_schema`，assistant 历史消息的 `content` 必须�
   带指引的 OpenAI error（见 `zcodeHintError`）。
 - 探测用的临时脚本与载荷样本在 `archive\probes-zcode-20260926\`。
 
+### 3.7.1 Zcode 借鉴 zcode-api 的三项接入（2026-09-27 定论，真机验证）
+
+对照开源工程 TriDefender/zcode-api（本地缓存 `.ref-zcode-api\src\`）逐文件精读 +
+探针实测后，落地三件事（**验证码求解器明确不移植**：风控对抗、风险落在账号上，
+其 3007 墙经实测确认仍然有效）：
+
+- **桌面端身份头**（`zcode_identity.go`）：对齐官方客户端两套 header 组——
+  LLM 补全面 `g6n`（UA `ZCode/<ver>`、`X-ZCode-Agent: glm`、`X-Title: Z Code@cli`、
+  `X-Os-Category/Os-Version` 等，**无** `X-Device-Mid`）与控制面 `TV`（去
+  `X-ZCode-Agent`、加 `X-Device-Mid`）。值来源：版本扫
+  `~\.zcode\v2\runtime\provider\<平台>\<semver>`、设备号读
+  `telemetry-state.json`、OS 版本读注册表 CurrentBuildNumber（stdlib 无
+  `os.KernelVersion`）。官方 LLM 流量本就落在本代理同款 openai:chat 通道，
+  补齐后指纹层与官方一致。
+- **实时模型目录**（`zcode_catalog_refresh.go`）：`GET zcode.z.ai/api/v1/
+  client/configs?app_version=&platform=` 公开可读（实测 200），builtinModels +
+  providers[].models 合并内置快照（远端为主、快照补「思考不可关闭」等文档
+  结论），成功 TTL 30min、失败保留旧目录 + 30s 冷却。
+- **端点路由**（`zcode_routing.go`）：`GET /api/v1/agent/configs` 下发
+  `data.proxyEndpoint.mapping`（from→to，服务端随时可改写端点，2026-09-27
+  实测当期为空）。完整 URL 精确匹配 + base 前缀匹配两段式，严格 fail-open
+  （3s 超时、失败冷却 30s、解析异常弃用整表）。
+- **顺带打通**：凭据选取确定化（`individual-coding-plan` 族优先，map 遍历
+  无序曾导致重启换 key）；提取 `zcodejwttoken`，`billing/balance`（JWT +
+  `X-Device-Mid` + `x-coding-plan-api-key` 三头，实测 200）把套餐余额接到
+  `/health` 的 `quota` 字段。
+- 真机 smoke：`ZCODE_LIVE_TEST=1 go test -run TestZcodeLiveReverse`。
+
+### 3.7.2 Zcode 免费额度通道：本地 start-plan 中继（2026-09-27 定论，真机验证）
+
+验证码求解器**不自研**，但接入了 MIT 开源引擎 TriDefender/zcode-api（v4.7.0），
+把 Start Plan 免费额度真正接进了代理（部署在 `tools\zcode-relay\`）：
+
+- **引擎形态**：zcode-api 是 Bun 工程，其验证码求解器（happy-dom 进程内求解
+  阿里云无痕验证，实测 2s/枚 T001 通过）**只在 Bun 运行时下可用**——Node +
+  esbuild CJS bundle 会 `window is not defined`（脚本 eval 全局不可见，钉
+  happy-dom 版本也无效）。因此用 `bun build --compile` 出自包含 exe（88MB）。
+- **凭据注入**：`tools\zcode-relay\inject-credential.mjs` 把桌面端
+  `zcodejwttoken` 按 zcode-api 的凭据库格式（AES-256-GCM，种子
+  `{homedir}-{platform}-{arch}`，信封 `base64(iv||ct||tag)`）写入
+  `~/.zcode-proxy/credentials.json`，免浏览器 OAuth。JWT 无 exp 声明不过期。
+- **接线**：hub-go 侧 `zcode_relay.go` 自动探测 `127.0.0.1:8807/v1/models`
+  （Start 时 + 后台 5 分钟重探；`ZCODE_RELAY_URL`/`ZCODE_RELAY_KEY` 可覆盖，
+  `off` 强制关闭），命中后上游切到中继的 `/v1/chat/completions`（OpenAI
+  兼容，Bearer `hub-zcode-relay`）。
+- **不静默回落**：中继不可达时直接报错带指引，绝不退回 api.z.ai 直连——
+  直连是计费通道，静默回落会烧真钱。
+- **实测**：代理→中继→start-plan 网关 200，GLM-5.3 真实回复，额度被真实
+  消费（billing/balance 同步可见扣减）。3007 墙由引擎求解器自动过。
+- 配置默认 `claim`（自动领活动额度）关闭；引擎源码与重建命令见
+  `tools\zcode-relay\README.md`。
+
+### 3.8 Qoder 排队帧 10605：不是鉴权错误，按队列语义处理（2026-09-26 定论）
+
+晚高峰网关会返回 HTTP 200 + 业务错误帧：外层 `code:"403"`，message 里嵌两层
+JSON，最内层是 `isQueued/queueCount/queueType:"p3"/retryAfterSeconds/
+serviceAvailable/waitTime`（样本见 `qoder_queue.go` 头注释）。曾因此被 DSH
+显示成「API 密钥无效」——**凭据是好的，纯粹是网关排队**。处理定论：
+
+- 识别与重试在 `qoder_queue.go`：按 `retryAfterSeconds` 真实等待重试，
+  总预算默认 240s（`QODER_QUEUE_MAX_WAIT_SECS` 可调，0 关闭）；HTTP 403 +
+  10605 体与流中途排队帧也兜底。
+- 放弃/透传时的文案必须是「上游排队中（429）…」语义，**不得含 403/密钥
+  字样**（客户端按 403 分类成 AUTH 会再次误导）。
+- 流式路径（含降级流）在排队等待期发**空 delta 心跳帧**保活，避免客户端
+  静默超时掐掉本来能成的请求；心跳帧形态与网关自带空 usage 帧一致。
+- 非流式 JSON 路径无法心跳，靠 300s ctx + 预算 240s < 常见静默超时兜底。
+
 ## 4. 测试约定
 
 - 需要真实凭证/网络的测试要**可跳过**（`t.Skip`），不要用 `t.Fatal` 让离线环境红一片。
@@ -131,7 +199,7 @@ parameters` 改名 `input_schema`，assistant 历史消息的 `content` 必须�
 4. 用脚本对比「拆分前的 `func`/`type` 列表」与「拆分后所有文件合并的列表」，
    数量与签名必须完全一致；
 5. `go vet` + `go test` + 用产物在**空闲端口**跑一次端到端
-   （`bin\workbuddy-hub.exe -port 8899 -no-browser`，再 `curl /api/status`）。
+   （`bin\aihub.exe -port 8899 -no-browser`，再 `curl /api/status`）。
 
 本仓库 `proxy_qoder.go`（1642 行）、`proxy.go`（884 行）、`main.go`（640 行）
 都是按此法拆分并校验的，详见 git log。
@@ -141,11 +209,11 @@ parameters` 改名 `input_schema`，assistant 历史消息的 `content` 必须�
 ### ⚠️ 头号大坑：`go build` 不带 `-o` 会覆盖正在用的 exe
 
 `go build` 不带 `-o` 时，会在**当前目录**生成以包名命名的可执行文件。
-本模块 `module workbuddy-hub` 且 main 包在模块根，于是：
+本模块 `module aihub` 且 main 包在模块根，于是：
 
 ```powershell
 cd hub-go
-& 'E:\software\go\bin\go.exe' build ./...     # ❌ 直接覆盖 hub-go\workbuddy-hub.exe！
+& 'E:\software\go\bin\go.exe' build ./...     # ❌ 直接覆盖 hub-go\aihub.exe！
 ```
 
 这会**静默替换掉你正在使用的那份 exe**（虽然正在运行的进程用的是内存映像、
@@ -154,10 +222,10 @@ cd hub-go
 **永远显式指定输出路径**：
 
 ```powershell
-& 'E:\software\go\bin\go.exe' build -o bin\workbuddy-hub.exe .   # ✅
+& 'E:\software\go\bin\go.exe' build -o bin\aihub.exe .   # ✅
 ```
 
-或者直接用 `scripts\build.bat`（它固定 `-o bin\workbuddy-hub.exe`，安全）。
+或者直接用 `scripts\build.bat`（它固定 `-o bin\aihub.exe`，安全）。
 
 > 本仓库确实发生过一次：重构期间用 `go build ./...` 验证时覆盖了 `hub-go\workbuddy-hub.exe`。
 > 原始文件（11575296 字节）已备份到
@@ -203,7 +271,7 @@ TestResolveHubRootFindsRootAboveBin
 | 端口被占启动失败 | 程序会自动清扫并重试 4 次；仍失败看是否被别的程序占用。 |
 | 二进制体积异常 | 用 `build.bat`（含 `-s -w -H=windowsgui`）；手动 `go build` 不带这些标志会更大、还会弹黑窗。 |
 | 测试里 `resolveHubRoot()` 指向临时目录 | 正常：`go test` 的「exe」是测试二进制。生产代码不受影响。 |
-| 日志写到了意料外的目录 | 检查该目录是否含 `state.json`/凭证目录（会被当数据根）；或设 `WORKBUDDY_HUB_ROOT` 固定。 |
+| 日志写到了意料外的目录 | 检查该目录是否含 `state.json`/凭证目录（会被当数据根）；或设 `AIHUB_ROOT` 固定。 |
 
 ## 7. 归档区
 

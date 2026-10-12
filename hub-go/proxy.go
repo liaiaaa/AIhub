@@ -506,7 +506,8 @@ func (p *Proxy) doUpstream(ctx context.Context, client *http.Client, auth AuthPr
 }
 
 func (p *Proxy) streamToClient(w http.ResponseWriter, r *http.Request, auth AuthProvider, client *http.Client, logger *FileLogger, url string, headers map[string]string, payload []byte, t0 time.Time, rid string) {
-	resp, err := p.doUpstream(r.Context(), client, auth, url, headers, payload)
+	// 走 429 感知重试：瞬时限流在 hub 内部退避吸收（见 proxy_retry429.go）
+	resp, err := p.doUpstreamRetry429(r.Context(), client, auth, url, headers, payload, logger, rid)
 	if err != nil {
 		logger.Log("[%s] ✗ 网络错误 | %v", rid, err)
 		sseError(w, http.StatusBadGateway, err.Error())
@@ -548,7 +549,7 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	// 用请求上下文：客户端断开时能及时取消上游，不再空转到 300 秒。
 	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
-	resp, err := p.doUpstream(ctx, client, auth, url, headers, payload)
+	resp, err := p.doUpstreamRetry429(ctx, client, auth, url, headers, payload, logger, rid)
 	if err != nil {
 		logger.Log("[%s] ✗ 网络错误 | %v", rid, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{

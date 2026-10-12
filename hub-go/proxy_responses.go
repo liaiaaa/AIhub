@@ -162,7 +162,8 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	payload, _ := json.Marshal(chatBody)
 	t0 := time.Now()
 
-	resp, err := p.doUpstream(r.Context(), client, auth, p.Backend+p.chatPath(), headers, payload)
+	// 走 429 感知重试（聚合口路径，Codex 就走这里）
+	resp, err := p.doUpstreamRetry429(r.Context(), client, auth, p.Backend+p.chatPath(), headers, payload, logger, rid)
 	if err != nil {
 		logger.Log("[%s] ✗ 网络错误 | %v", rid, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{

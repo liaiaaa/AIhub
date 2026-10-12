@@ -98,6 +98,20 @@ class H(http.server.BaseHTTPRequestHandler):
                             "recorded": 0})
         if u.path == "/api/credits":
             return self._j({})
+        if u.path == "/api/intl/creds":
+            # 模拟：一个可用、一个限流中、一个账号级风控
+            return self._j({"ok": True, "creds": [
+                {"name": "<凭证目录A>", "nick": "<email>", "uid": "u1",
+                 "remain": 160, "total": 190, "ok": False, "state": "风控",
+                 "reason": "账号级风控(11140)", "selected": False},
+                {"name": "<凭证目录B>", "nick": "<nick-A>", "uid": "u2",
+                 "remain": 130, "total": 160, "ok": False, "state": "限流",
+                 "until": "20:01", "remain_txt": "还剩 42 分钟",
+                 "reason": "用量限流(6004)", "selected": False},
+                {"name": "<凭证目录D>", "nick": "<email>", "uid": "u3",
+                 "remain": 346, "total": 350, "ok": True, "state": "可用",
+                 "selected": True},
+            ]})
         return self._j({})
 
     def do_POST(self):

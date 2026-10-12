@@ -167,17 +167,34 @@ const webHTML = `<!DOCTYPE html>
   @media (max-width:900px) { .usage-cols { grid-template-columns:1fr; } }
   .usage-h { font-size:11px; font-weight:600; color:var(--faint);
              margin-bottom:5px; letter-spacing:.5px; }
-  .usage-item { display:flex; align-items:center; gap:8px; font-size:12px;
-                color:var(--muted); padding:5px 2px; border-bottom:1px solid var(--line2); }
+  .usage-item { padding:6px 2px 7px; border-bottom:1px solid var(--line2); }
   .usage-item:last-child { border-bottom:none; }
+  .usage-line { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
   .usage-item .k { flex:none; width:74px; font-family:var(--mono); color:var(--txt); }
   .usage-item .k.wide { width:auto; flex:1; min-width:0; white-space:nowrap;
                         overflow:hidden; text-overflow:ellipsis; }
-  .usage-item .n { flex:none; width:58px; text-align:right; font-family:var(--mono);
+  .usage-item .n { flex:none; width:56px; text-align:right; font-family:var(--mono);
                    font-variant-numeric:tabular-nums; }
-  .usage-item .n.sum { width:70px; color:var(--txt); font-weight:600; }
-  .usage-item.head { color:var(--faint); font-size:11px; font-weight:600;
-                     border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .usage-item .n.muted { color:var(--faint); }
+  .usage-item .n.sum { width:66px; color:var(--txt); font-weight:600; }
+  /* 构成条：段宽 = 该行合计占「所有行最大合计」的比例 × 行内构成，
+     所以既能比大小（哪天花得多），又能看构成（缓存/新输入/输出）。 */
+  .usage-bar { height:3px; border-radius:2px; background:var(--line2);
+               display:flex; overflow:hidden; margin-top:5px; }
+  .usage-bar i { display:block; height:100%; }
+  .usage-bar i.b1 { background:#3b5bfd; }   /* 新输入（计费） */
+  .usage-bar i.b2 { background:#a5b4fc; }   /* 缓存命中（折扣） */
+  .usage-bar i.b3 { background:#0f9d58; }   /* 输出 */
+  .usage-item .fail { font-style:normal; font-size:10px; font-weight:600;
+                      color:var(--err); margin-left:3px; }
+  .usage-item.head .usage-line { color:var(--faint); font-size:11px; font-weight:600; }
+  .usage-item.head { border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .usage-hint { color:var(--faint); font-weight:500; margin-left:6px; font-size:11.5px; }
+  .usage-legend { display:flex; gap:12px; flex-wrap:wrap; font-size:11px;
+                  color:var(--faint); margin-top:6px; }
+  .usage-legend span { display:flex; align-items:center; gap:5px; }
+  .usage-legend b { width:9px; height:9px; border-radius:2px; display:block; }
+  @media (max-width:560px) { .usage-item .n.muted { display:none; } }
   .usage-note { font-size:11.5px; color:var(--faint); }
   .usage-sum { font-size:12.5px; font-weight:600; color:var(--brand); }
   .foot-hint { margin-top:20px; font-size:11.5px; color:var(--faint); text-align:center; }
@@ -202,6 +219,9 @@ const webHTML = `<!DOCTYPE html>
     .ratio.free { background:#12301f; color:#5fd493; }
     .agg-item.down { background:#13161b; }
     .off-tag { background:#33260f; color:#e0a54a; border-color:#4a3818; }
+    .usage-bar i.b1 { background:#7c96ff; }
+    .usage-bar i.b2 { background:#465081; }
+    .usage-bar i.b3 { background:#22c55e; }
     .tile.on { border-color:#1f3a2a; }
     .tile.warn { border-color:#3a2f18; }
     button.danger { border-color:#4a2622; }
@@ -267,14 +287,14 @@ const webHTML = `<!DOCTYPE html>
     <div class="usage-cols">
       <div>
         <div class="usage-h">按天</div>
-        <div class="usage-item head"><span class="k">日期</span><span class="n">请求</span>
-          <span class="n">输入</span><span class="n">输出</span><span class="n sum">合计</span></div>
+        <div class="usage-item head"><div class="usage-line"><span class="k">日期</span><span class="n">请求</span>
+          <span class="n">输入</span><span class="n muted">缓存</span><span class="n">输出</span><span class="n sum">合计</span></div></div>
         <div id="usage-day-list"></div>
       </div>
       <div>
         <div class="usage-h">按模型</div>
-        <div class="usage-item head"><span class="k wide">线路 · 模型</span><span class="n">请求</span>
-          <span class="n">输入</span><span class="n">输出</span><span class="n sum">合计</span></div>
+        <div class="usage-item head"><div class="usage-line"><span class="k wide">线路 · 模型</span><span class="n">请求</span>
+          <span class="n">输入</span><span class="n muted">缓存</span><span class="n">输出</span><span class="n sum">合计</span></div></div>
         <div id="usage-model-list"></div>
       </div>
     </div>
@@ -387,6 +407,20 @@ function updateTiles() {
   }
 }
 
+// 签到结果压缩：「签到成功，+100 积分」→「✓ +100」，「已停用」→「停用」。
+// 认不出的原样保留（宁可长一点，也不要丢信息）。
+function shortCheckin(s) {
+  if (!s) return '';
+  if (s.indexOf('签到成功') >= 0) {
+    const m = s.match(/\+\s*([\d,]+)/);
+    return '✓' + (m ? ' ' + m[1] : '');
+  }
+  if (s.indexOf('已停用') >= 0) return '停用';
+  if (s.indexOf('未开放') >= 0) return '未开放';
+  if (s.indexOf('未启用') >= 0) return '停用';
+  return s.length > 14 ? s.slice(0, 14) + '…' : s;
+}
+
 function renderCheckin() {
   const chip = document.getElementById('checkin-chip');
   const sum = document.getElementById('checkin-sum');
@@ -401,11 +435,17 @@ function renderCheckin() {
   const todayStr = today.getFullYear() + '-' +
     String(today.getMonth() + 1).padStart(2, '0') + '-' +
     String(today.getDate()).padStart(2, '0');
+  // 压缩成一行短文案：原来「2026-10-12 10:46:02：国内 签到成功，+100 积分；
+  // Qoder 已停用；Trae 签到成功」要占满整行，扫一眼抓不到重点。
+  // 完整原文挂 title，悬停仍可看全。
   const parts = [];
-  if (c.dom) parts.push('国内 ' + c.dom);
-  if (c.qoder) parts.push('Qoder ' + c.qoder);
-  if (c.trae) parts.push('Trae ' + c.trae);
-  sum.textContent = c.date + ' ' + (c.time || '') + '：' + parts.join('；');
+  if (c.dom) parts.push('国内 ' + shortCheckin(c.dom));
+  if (c.qoder) parts.push('Qoder ' + shortCheckin(c.qoder));
+  if (c.trae) parts.push('Trae ' + shortCheckin(c.trae));
+  sum.textContent = c.date.slice(5) + ' ' + (c.time || '').slice(0, 5) + ' · ' + parts.join(' · ');
+  sum.title = c.date + ' ' + (c.time || '') + '：' +
+    [c.dom && '国内 ' + c.dom, c.qoder && 'Qoder ' + c.qoder, c.trae && 'Trae ' + c.trae]
+      .filter(Boolean).join('；');
   if (c.date === todayStr && c.ok) {
     chip.textContent = '今日已签';
     chip.className = 'chip ok';
@@ -698,25 +738,57 @@ async function usageRefresh() {
     const j = await r.json();
     if (!j.ok) { note.textContent = j.msg || '读取用量失败'; return; }
     const s = j.summary || {};
-    document.getElementById('usage-sum').textContent =
-      (s.reqs || 0) + ' 次 · 合计 ' + fmtTok(s.total) + ' tok';
+    const cac = s.cached || 0;
+    const hitPct = s.in ? Math.round(cac * 100 / s.in) : 0;
+    // 输入里绝大部分常是缓存命中（折扣计价）。只报「输入」会让人以为烧了上亿 token，
+    // 所以把命中量单独点出来（2026-10-12 实测：输入 148.9M 里 146.6M 是缓存）。
+    document.getElementById('usage-sum').innerHTML =
+      (s.reqs || 0) + ' 次 · 合计 ' + fmtTok(s.total) + ' tok' +
+      (cac ? '<span class="usage-hint">其中 ' + fmtTok(cac) + ' 命中缓存（' + hitPct + '%）</span>' : '');
     const rows = Number(j.recorded) || 0;
     note.textContent = j.from
       ? (j.from + ' → ' + j.to + ' · 累计 ' + rows + ' 条 / ' + j.file_mb + ' MB')
       : ('还没有记录（用一次 Codex 再刷新）· 累计 ' + rows + ' 条');
-    const line = function (k, a, wide) {
-      return '<div class="usage-item"><span class="k' + (wide ? ' wide' : '') + '">' + k + '</span>' +
-        '<span class="n">' + (a.reqs || 0) + '</span>' +
-        '<span class="n">' + fmtTok(a.in) + '</span>' +
-        '<span class="n">' + fmtTok(a.out) + '</span>' +
-        '<span class="n sum">' + fmtTok(a.total) + '</span></div>';
+
+    // 归一基准：**每个列表各自**取最大合计（按天 / 按模型分开）。
+    // 段宽 = 值 / 该列表基准，于是每个列表里最大的那行占满整条，行间可直接比长短。
+    // 两个列表共用基准会让「按天」普遍偏短（实测最大才 60%），不好比。
+    const mkSeg = function (list) {
+      let max = 0;
+      list.forEach(function (x) {
+        const t = (x.agg && x.agg.total) || 0;
+        if (t > max) max = t;
+      });
+      return function (v) { return max ? (v * 100 / max).toFixed(2) : '0'; };
+    };
+    const segDays = mkSeg(j.days || []);
+    const segModels = mkSeg(j.models || []);
+
+    const line = function (k, a, wide, title, seg) {
+      const inTok = a.in || 0, cached = a.cached || 0, outTok = a.out || 0;
+      const newIn = Math.max(0, inTok - cached);
+      const fail = a.fail
+        ? '<i class="fail" title="其中 ' + a.fail + ' 次请求失败">✗' + a.fail + '</i>' : '';
+      const bar = '<div class="usage-bar">' +
+        '<i class="b1" style="width:' + seg(newIn) + '%"></i>' +
+        '<i class="b2" style="width:' + seg(cached) + '%"></i>' +
+        '<i class="b3" style="width:' + seg(outTok) + '%"></i></div>';
+      return '<div class="usage-item">' +
+        '<div class="usage-line">' +
+        '<span class="k' + (wide ? ' wide' : '') + '"' + (title ? ' title="' + title + '"' : '') + '>' + k + '</span>' +
+        '<span class="n">' + (a.reqs || 0) + fail + '</span>' +
+        '<span class="n">' + fmtTok(inTok) + '</span>' +
+        '<span class="n muted">' + (cached ? fmtTok(cached) : '—') + '</span>' +
+        '<span class="n">' + fmtTok(outTok) + '</span>' +
+        '<span class="n sum">' + fmtTok(a.total) + '</span>' +
+        '</div>' + bar + '</div>';
     };
     document.getElementById('usage-day-list').innerHTML =
-      (j.days || []).map(function (d) { return line(d.date.slice(5), d.agg, false); }).join('') ||
-      '<div class="usage-item"><span class="k">—</span></div>';
+      (j.days || []).map(function (d) { return line(d.date.slice(5), d.agg, false, d.date, segDays); }).join('') ||
+      '<div class="usage-item"><div class="usage-line"><span class="k">—</span></div></div>';
     document.getElementById('usage-model-list').innerHTML =
-      (j.models || []).map(function (m) { return line(m.line_cn + ' · ' + m.slug, m.agg, true); }).join('') ||
-      '<div class="usage-item"><span class="k">—</span></div>';
+      (j.models || []).map(function (m) { return line(m.line_cn + ' · ' + m.slug, m.agg, true, m.slug, segModels); }).join('') ||
+      '<div class="usage-item"><div class="usage-line"><span class="k">—</span></div></div>';
   } catch (e) { note.textContent = '用量接口请求失败：' + e; }
 }
 

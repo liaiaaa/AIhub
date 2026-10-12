@@ -71,7 +71,10 @@ class H(http.server.BaseHTTPRequestHandler):
             out["creds"] = ["<凭证目录A>"]
             out["intl_cred"] = "<凭证目录A>"
             out["default_cred"] = "<凭证目录A>"
-            out["checkin"] = {}
+            # 用与真实实例同形状的签到记录（含原始措辞，便于验证 title 不丢信息）
+            out["checkin"] = {"date": "2026-10-12", "time": "10:46:02",
+                              "dom": "签到成功，+100 积分", "qoder": "已停用",
+                              "trae": "签到成功", "ok": True}
             return self._j(out)
         if u.path == "/api/nick":
             return self._j({})

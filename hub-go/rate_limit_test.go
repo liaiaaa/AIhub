@@ -276,3 +276,39 @@ func TestProbeActuallySendsRequest(t *testing.T) {
 		t.Fatal("必须真的发一次推理请求")
 	}
 }
+
+// 关键修正（2026-10-13 用户报）：11140 风控上游**从不给恢复时刻**
+// （实测响应只有 code/msg/displayMsg，无任何时间字段）。
+// 此前代码用 rateLimitMaxUntil（2 小时）兜底，界面上却显示成「恢复 10:24」，
+// 是假信息——用户会以为到点就能好。必须区分「上游给的」与「本地兜底」。
+func TestRateLimitUpstreamResetFlag(t *testing.T) {
+	resetRateLimit(t)
+
+	// 6004：上游文案带恢复时刻 → HasUpstreamReset = true
+	body6004 := []byte(`{"code":6004,"msg":"usage exceeds frequency limit, your usage will reset at 2030-01-01 10:00:00 UTC+8"}`)
+	recordRateLimitFromBody(authWithUID{uid: "u-a"}, []byte(`{"model":"m"}`), body6004)
+	e, ok := rateLimitFor("u-a", "m")
+	if !ok {
+		t.Fatal("应记录")
+	}
+	if !e.HasUpstreamReset() {
+		t.Fatal("6004 带恢复时刻，应标记 HasUpstreamReset=true")
+	}
+
+	// 11140：上游无时间 → HasUpstreamReset = false（本地兜底不算承诺）
+	body11140 := []byte(`{"code":11140,"msg":"request illegal","displayMsg":{"zh":"内容未通过安全审核"}}`)
+	recordRateLimitFromBody(authWithUID{uid: "u-b"}, []byte(`{"model":"m"}`), body11140)
+	e2, ok := rateLimitFor("u-b", "m")
+	if !ok {
+		t.Fatal("应记录")
+	}
+	if e2.HasUpstreamReset() {
+		t.Fatalf("11140 无上游时间，不该标记 HasUpstreamReset（实际 ResetAt=%v）", e2.ResetAt)
+	}
+	// 但仍应有本地兜底 Until（用于"暂缓多久再试"），只是不当作"恢复时刻"
+	if e2.Until.IsZero() {
+		t.Fatal("本地兜底 Until 仍应存在（用于暂缓重试）")
+	}
+	t.Logf("11140: Until=%v HasUpstreamReset=%v（正确：不谎称恢复时间）",
+		rateLimitShortUntil(e2.Until), e2.HasUpstreamReset())
+}

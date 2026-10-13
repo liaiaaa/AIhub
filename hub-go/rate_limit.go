@@ -44,17 +44,24 @@ const (
 
 // rateLimitEntry 一次限流记录。
 type rateLimitEntry struct {
-	UID      string    `json:"uid"`
-	Name     string    `json:"name,omitempty"`     // 昵称，便于辨认
-	Kind     string    `json:"kind"`               // model / account
-	Model    string    `json:"model,omitempty"`    // 模型级时记录具体模型
-	Code     int       `json:"code,omitempty"`     // 上游业务码（6004 / 11140 …）
-	Reason   string    `json:"reason,omitempty"`   // 简短原因
-	Until    time.Time `json:"until"`              // 冷却截止（已按上限截断）
-	ResetAt  time.Time `json:"reset_at,omitempty"` // 上游原始恢复时刻（供展示）
-	SeenAt   time.Time `json:"seen_at"`            // 首次记录时刻
-	Hits     int       `json:"hits"`               // 累计命中次数
+	UID    string `json:"uid"`
+	Name   string `json:"name,omitempty"`  // 昵称，便于辨认
+	Kind   string `json:"kind"`            // model / account
+	Model  string `json:"model,omitempty"` // 模型级时记录具体模型
+	Code   int    `json:"code,omitempty"`  // 上游业务码（6004 / 11140 …）
+	Reason string `json:"reason,omitempty"`// 简短原因
+	Until  time.Time `json:"until"`        // 冷却截止（已按上限截断）
+	// ResetAt 上游**明确给出**的恢复时刻。为零表示上游没给（如 11140 风控
+	// 只回「内容未通过安全审核」，不含任何时间）——此时 Until 只是本地兜底，
+	// **不能当作"到点就恢复"展示**（2026-10-13 修正：此前会把兜底时间
+	// 显示成"恢复 10:24"，是假信息）。
+	ResetAt time.Time `json:"reset_at,omitempty"`
+	SeenAt  time.Time `json:"seen_at"` // 首次记录时刻
+	Hits    int       `json:"hits"`    // 累计命中次数
 }
+
+// HasUpstreamReset 上游是否明确给了恢复时刻。
+func (e rateLimitEntry) HasUpstreamReset() bool { return !e.ResetAt.IsZero() }
 
 var rateLimitState = struct {
 	mu      sync.Mutex
@@ -277,6 +284,9 @@ type intlCredStatus struct {
 	State    string  `json:"state"`              // 简短状态：可用 / 限流 / 风控 / 未知
 	Until    string  `json:"until,omitempty"`    // 限流截止（如 "20:01"）
 	RemainTx string  `json:"remain_txt,omitempty"` // 「还剩 42 分钟」
+	// UpstreamReset 上游是否明确给了恢复时刻。false 时 Until 只是本地兜底，
+	// 前端**不得**把它展示成"恢复时间"。
+	UpstreamReset bool `json:"upstream_reset"`
 	Reason   string  `json:"reason,omitempty"`   // 原因（限流/风控）
 	Selected bool    `json:"selected"`           // 是否是当前选中
 }
@@ -337,13 +347,19 @@ func intlCredStatusOne(name, dir string, selected bool) intlCredStatus {
 	// 先看本地限流台账（比探活快，且能给出「限到几点」）
 	if e, limited := rateLimitFor(st.UID, ""); limited {
 		st.OK = false
-		st.Until = rateLimitShortUntil(e.Until)
-		st.RemainTx = rateLimitRemain(e.Until)
 		st.Reason = e.Reason
+		st.UpstreamReset = e.HasUpstreamReset()
 		if e.Kind == rlKindAccount {
 			st.State = "风控"
+			// 风控（11140）上游从不给恢复时刻：只报"被拦"，不编时间。
+			if st.UpstreamReset {
+				st.Until = rateLimitShortUntil(e.Until)
+				st.RemainTx = rateLimitRemain(e.Until)
+			}
 		} else {
 			st.State = "限流"
+			st.Until = rateLimitShortUntil(e.Until)
+			st.RemainTx = rateLimitRemain(e.Until)
 		}
 		return st
 	}
@@ -360,7 +376,7 @@ func intlCredStatusOne(name, dir string, selected bool) intlCredStatus {
 		st.OK = false
 		st.State = "风控"
 		st.Reason = "账号级风控(11140)"
-		st.Until = ""
+		st.UpstreamReset = false
 		// 探活发现的风控也记进台账，后续查询就不必反复探
 		rateLimitRecord(st.UID, st.Nick, rlKindAccount, "", 11140, st.Reason, time.Time{})
 	case probeRateLimited:

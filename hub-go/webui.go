@@ -126,6 +126,9 @@ const webHTML = `<!DOCTYPE html>
   .tile-credit span.bad { color:var(--err); }
   .credit-ref { padding:3px 9px; font-size:11px; flex:none; border-radius:7px; }
   .cred-item { display:inline-flex; align-items:center; gap:3px; }
+  .cred-alert { display:block; width:100%; font-size:11px; margin-top:3px; color:var(--muted); }
+  .cred-alert.ok { color:var(--ok); }
+  .cred-alert.warn { color:var(--warn); }
   .cred-badge { font-size:10px; font-weight:600; padding:1px 5px; border-radius:999px;
                 background:#eef0f4; color:var(--muted); }
   .cred-badge.ok { background:#e8f7ee; color:#0b7a43; }
@@ -342,7 +345,7 @@ function ensureTiles() {
   if (grid.children.length) return;
   grid.innerHTML = SERVICES.map(function (s) {
     let extra = '';
-    if (s.cred) extra += '<span class="cred-radios" id="cred-row"></span>';
+    if (s.cred) extra += '<span class="cred-radios" id="cred-row"></span><div class="cred-alert" id="cred-alert"></div>';
     if (s.zkey) extra += '<input type="password" class="zkey" id="zcode-apikey" placeholder="可选 API Key，留空自动读桌面端凭据">';
     return '<div class="tile">' +
       '<div class="tile-head"><span class="dot" id="dot-' + s.key + '"></span>' +
@@ -423,39 +426,125 @@ function credsSig(list) {
   }).join('|');
 }
 
+// 倒计时本地刷新用的定时器（每 30 秒重算一次剩余时长文案）。
+// 为什么不在 credsSig 里放 remain_txt：它是「还剩 N 分钟」，随时间自然变化，
+// 放进去会导致每轮都重建 DOM。改为「不重建结构、只更新文本」。
+let credTickTimer = null;
+
 function renderCreds() {
   const row = document.getElementById('cred-row');
+  const alert = document.getElementById('cred-alert');
   if (!row || !state) return;
   const list = credStatus || [];
   if (!list.length) return;
   const sig = state.intl_cred + '#' + credsSig(list);
-  if (row.dataset.sig === sig) return;   // 无变化，不动 DOM
-  row.dataset.sig = sig;
-  row.innerHTML = '<span>凭证：</span>';
+  if (row.dataset.sig !== sig) {
+    row.dataset.sig = sig;
+    row.innerHTML = '<span>凭证：</span>';
+    list.forEach(function (c) {
+      const lab = document.createElement('label');
+      lab.className = 'cred-item';
+      lab.dataset.name = c.name;
+      lab.title = credTitle(c);
+      const inp = document.createElement('input');
+      inp.type = 'radio';
+      inp.name = 'cred';
+      inp.value = c.name;
+      inp.checked = (c.name === state.intl_cred);
+      inp.onchange = function () { setCred(c.name); };
+      lab.appendChild(inp);
+      lab.appendChild(document.createTextNode(c.name));
+      // 状态徽标：可用(绿✓) / 限流(黄，显示倒计时) / 风控(红)
+      const b = document.createElement('span');
+      b.className = 'cred-badge';
+      lab.appendChild(b);
+      row.appendChild(lab);
+    });
+  }
+  // 徽标文本每次刷新（含倒计时）
   list.forEach(function (c) {
-    const lab = document.createElement('label');
-    lab.className = 'cred-item';
-    lab.title = c.nick
-      ? (c.nick + (c.reason ? ' · ' + c.reason : '') + (c.until ? ' · 恢复 ' + c.until + '（' + c.remain_txt + '）' : '')
-         + (c.remain >= 0 ? ' · 余额 ' + Math.round(c.remain) + '/' + Math.round(c.total) : ''))
-      : c.name;
-    const inp = document.createElement('input');
-    inp.type = 'radio';
-    inp.name = 'cred';
-    inp.value = c.name;
-    inp.checked = (c.name === state.intl_cred);
-    inp.onchange = function () { setCred(c.name); };
-    lab.appendChild(inp);
-    lab.appendChild(document.createTextNode(c.name));
-    // 状态徽标：可用(绿) / 限流(黄) / 风控(红) / 未知(灰)
-    const cls = c.ok ? 'ok' : (c.state === '风控' ? 'bad' : (c.state === '限流' ? 'warn' : ''));
-    const txt = c.ok ? '✓' : (c.until ? c.until : c.state);
-    const b = document.createElement('span');
-    b.className = 'cred-badge ' + cls;
-    b.textContent = txt;
-    lab.appendChild(b);
-    row.appendChild(lab);
+    const lab = row.querySelector('.cred-item[data-name="' + c.name + '"]');
+    if (!lab) return;
+    lab.title = credTitle(c);
+    const b = lab.querySelector('.cred-badge');
+    if (!b) return;
+    b.className = 'cred-badge ' + credCls(c);
+    b.textContent = credBadgeText(c);
   });
+  renderCredAlert(alert, list);
+
+  // 本地定时刷新倒计时（不请求后端；纯前端重算）
+  if (credTickTimer) clearInterval(credTickTimer);
+  if (list.some(function (c) { return !c.ok && c.until && c.upstream_reset; })) {
+    credTickTimer = setInterval(function () {
+      (credStatus || []).forEach(function (c) {
+        const lab = row.querySelector('.cred-item[data-name="' + c.name + '"]');
+        if (!lab) return;
+        const b = lab.querySelector('.cred-badge');
+        if (b) b.textContent = credBadgeText(c);
+      });
+      renderCredAlert(document.getElementById('cred-alert'), credStatus || []);
+    }, 30000);
+  }
+}
+
+function credCls(c) {
+  if (c.ok) return 'ok';
+  if (c.state === '风控') return 'bad';
+  if (c.state === '限流') return 'warn';
+  return '';
+}
+
+// 徽标文案：可用显示 ✓；被限时显示「限流到 10:24」——把恢复时刻直接摆在
+// 界面上，不再只塞进悬停提示（用户反馈：看不见恢复时刻与剩余时间）。
+function credBadgeText(c) {
+  if (c.ok) return '✓';
+  if (c.state === '风控') return '风控';   // 风控没有上游恢复时刻，不编时间
+  if (c.until && c.upstream_reset) return '限流到 ' + c.until;
+  if (c.until) return '限流中';            // 有本地兜底时间但不来自上游
+  return c.state;
+}
+
+function credTitle(c) {
+  const parts = [];
+  if (c.nick) parts.push(c.nick);
+  if (c.reason) parts.push(c.reason);
+  if (c.until && c.upstream_reset) {
+    // 上游明确给了恢复时刻，可以承诺"到点恢复"
+    parts.push('上游称 ' + c.until + ' 恢复' + (c.remain_txt ? '（' + c.remain_txt + '）' : ''));
+  } else if (c.until) {
+    // 本地兜底：只是我们暂不重试的时长，不是上游承诺
+    parts.push('本地暂缓 ' + c.remain_txt + ' 后重试（上游未给恢复时刻）');
+  }
+  if (c.remain >= 0) parts.push('余额 ' + Math.round(c.remain) + '/' + Math.round(c.total));
+  return parts.join(' · ') || c.name;
+}
+
+// 详情行：把「谁被限到几点、还剩多久」写成一句话直显在凭证区下方。
+// 只列不可用的账号；全部可用时给一句绿色的确认。
+function renderCredAlert(el, list) {
+  if (!el) return;
+  const bad = list.filter(function (c) { return !c.ok; });
+  if (!bad.length) {
+    el.className = 'cred-alert ok';
+    el.textContent = '✓ 全部可用';
+    return;
+  }
+  el.className = 'cred-alert warn';
+  el.textContent = bad.map(function (c) {
+    if (c.state === '风控') {
+      // 11140 上游从不给恢复时刻（实测只回"内容未通过安全审核"），
+      // 所以不写"恢复 X 点"——那是假信息。只说明现状与建议。
+      return c.name + ' 账号级风控：推理被拦（账号本身正常），上游未给恢复时刻，建议换其它凭证';
+    }
+    if (c.until && c.upstream_reset) {
+      return c.name + ' 限流至 ' + c.until + (c.remain_txt ? '，' + c.remain_txt : '');
+    }
+    if (c.until) {
+      return c.name + ' 限流中（' + c.remain_txt + '后本地重试；上游未给恢复时刻）';
+    }
+    return c.name + ' ' + c.state;
+  }).join('　');
 }
 
 // 签到结果压缩：「签到成功，+100 积分」→「✓ +100」，「已停用」→「停用」。

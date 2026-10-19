@@ -2,13 +2,14 @@
 # ============================================================
 #  AIHub (Go) - 安全切换到新编译的产物，并做端到端自检
 #
-#  一步做完：记录当前在跑的线路 → 停旧实例 → 换上 bin/aihub.new →
-#  按原样拉起线路和聚合口 → 用「并行工具调用 + 图片压缩提示」这个真实
-#  形状打一次 :8790，确认上游 11148 已经不再复现。
+#  一步做完：跑检查（vet+test+race）→ 记录当前在跑的线路 → 停旧实例 →
+#  换上 bin/aihub.new → 按原样拉起线路和聚合口 → 用「并行工具调用 + 图片
+#  压缩提示」这个真实形状打一次 :8790，确认上游 11148 已经不再复现。
 #
 #  用法：
 #    bash scripts/aihub-switch.sh              # 自动恢复切换前在跑的线路
 #    AIHUB_LINES="intl" bash scripts/aihub-switch.sh
+#    AIHUB_SKIP_CHECK=1 bash scripts/aihub-switch.sh   # 跳过部署前检查（紧急回滚用）
 #
 #  产物从哪来：源码目录里
 #    go build -trimpath -ldflags "-s -w" -o bin/aihub.new .
@@ -24,6 +25,24 @@ if [ ! -f "$NEW" ]; then
   echo "✗ 缺少 $NEW。先在 $SRC_DIR 编译："
   echo "    go build -trimpath -ldflags \"-s -w\" -o bin/aihub.new ."
   exit 1
+fi
+
+# 0) 部署前检查（2026-10-19 新增）。
+#
+# 以前换产物只做端到端自检，不跑单测/race —— 单测红着也照部署，并发缺陷
+# 更是从不可见（2026-10-19 首次跑 -race 就抓到 stopAggLine 的数据竞争）。
+# 现在默认先跑 scripts/check.sh（vet + test + race，约 80s）。
+#   AIHUB_SKIP_CHECK=1  跳过（紧急回滚/只换二进制时用）
+# 检查失败直接退出，不碰正在跑的服务。
+if [ "${AIHUB_SKIP_CHECK:-0}" != "1" ]; then
+  echo "· 部署前检查（AIHUB_SKIP_CHECK=1 可跳过）"
+  if ! bash "$SRC_DIR/scripts/check.sh"; then
+    echo ""
+    echo "✗ 检查未通过，已中止部署（正在跑的服务未受影响）。"
+    echo "  确认要带病部署：AIHUB_SKIP_CHECK=1 bash scripts/aihub-switch.sh"
+    exit 1
+  fi
+  echo ""
 fi
 
 # 探测某端口是否在听。

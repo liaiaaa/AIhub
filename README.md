@@ -299,7 +299,23 @@ go vet ./... && go build ./...          # 交叉检查 Windows 侧是否编译�
 GOOS=windows go build -o /dev/null .    # 需 -ldflags "-s -w -H=windowsgui" 才是产物形态
 ```
 
-- 当前状态：`go vet` 通过；`go test` 全部通过（含 4 项数据根解析测试）。
+**提交前检查（推荐用脚本，别手敲）：**
+
+```bash
+./scripts/check.sh            # vet + test + race，约 80s
+./scripts/check.sh --fast     # 跳过 race，约 45s（改文档之类不想等时用）
+```
+
+`bash scripts/aihub-switch.sh`（部署换产物）现在会**先自动跑一遍这个检查**，
+不通过就中止、不碰正在跑的服务。紧急回滚可 `AIHUB_SKIP_CHECK=1` 跳过。
+
+> **为什么一定要跑 race**：2026-10-19 第一次跑 `go test -race` 就抓到一个
+> 存在已久的生产代码数据竞争——`stopAggLine` 调完 `srv.Shutdown` 直接返回，
+> 而 `startAggLine` 起的 Serve goroutine 还要 `logHub`（读全局 `hubRoot`），
+> 停服后立刻改全局状态的调用方就会撞车。此前只跑 `go vet` + `go test -short`，
+> 这类缺陷**完全不可见**。
+
+- 当前状态：`go vet` 通过；`go test -short` 与 `go test -short -race` 全部通过。
 - 部分测试（`*_live_test.go`、`*_e2e_live_test.go`）打真实后端，离线时会失败，
   用 `-short` 或 `-run` 挑选。
 - 重构基线与历史问题记录在 `hub-go\docs\BASELINE.md`，

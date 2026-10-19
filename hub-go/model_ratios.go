@@ -193,7 +193,8 @@ func humanTokens(n int) string {
 }
 
 // (h *Hub) modelRatio 查某条线路上某模型的倍率；ok=false 表示无倍率数据。
-// 优先级：用户覆盖表 > qoder 官方目录 price_factor > 上游 /v3/config 目录 > 静态表。
+//
+// 优先级（2026-10-19 调整）：上游 /v3/config 目录 > 用户覆盖表 > qoder 官方目录 > 静态表。
 //
 // 2026-10-15 修复：qoder 线路没启动（qoderForAgg 返回 nil）或官方目录里没有
 // 该条目时，原来直接 return 0,false——线路没启动就彻底没有倍率标注。现在统一
@@ -201,20 +202,26 @@ func humanTokens(n int) string {
 //
 // 2026-10-16 追加：dom/intl 先查上游 /v3/config 目录再落静态表。手工表会漏上新
 // 模型，目录是账号级实时下发的，以它为准；抓不到时（线路没起、无凭据）照旧回落。
+//
+// 2026-10-19 调整顺序：把「用户覆盖表」从最前挪到上游目录之后。
+// 原先用户表排第一，导致 model_ratios_user.json 里那 38 个手工条目把实时倍率
+// 全盖住了——即便把 dom 的 UA 修对、目录里拿到了 x0.17，显示出来还是旧的 0.06。
+// 上游目录是按账号下发的权威值且随促销自动变化，应当优先；用户表降级为
+// 「上游没下发时」的兜底，仍然有用（比如上游目录里没有 minimax-m3-pay 这类）。
 func (h *Hub) modelRatio(line, model string) (float64, bool) {
 	// OpenCode 免费档（2026-10-15）：这条线只挂免费模型，倍率恒为 0（显示「免费」）。
 	if line == "oc" {
 		_, ok := opencodeModelIDs[model]
 		return 0, ok
 	}
-	loadUserRatios()
-	if m, ok := userRatios[line]; ok {
-		if v, ok := m[model]; ok {
+	if line == "dom" || line == "intl" {
+		if v, ok := wbCatalogRatioValue(line, model); ok {
 			return v, true
 		}
 	}
-	if line == "dom" || line == "intl" {
-		if v, ok := wbCatalogRatioValue(line, model); ok {
+	loadUserRatios()
+	if m, ok := userRatios[line]; ok {
+		if v, ok := m[model]; ok {
 			return v, true
 		}
 	}

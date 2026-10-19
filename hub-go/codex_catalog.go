@@ -107,8 +107,20 @@ func writeCodexCatalogFile(h *Hub) (string, error) {
 	}
 	items := make([]item, 0, len(list))
 	for _, am := range list {
-		items = append(items, item{slug: am.Slug, display: am.Display,
-			desc: am.Display + " · AIHub 统一网关"})
+		// 2026-10-19：display_name 改用与 /v1/models 同一套生成函数，
+		// 带上倍率与上下文（例：「DeepSeek V4 Flash（国内） · 0.17x · 上下文 1M」）。
+		//
+		// 原来这里直接用 am.Display —— 那是聚合白名单 agg_models.json 里手写的
+		// 静态字符串，只有「DeepSeek V4 Flash（国内）」，没有倍率。于是 Codex 的
+		// 模型选择器看不到计价，与 dsh / curl 看到的完全不一致。
+		// 复用 aggOpenAIDisplayName 后三者统一，上游倍率一变这里跟着变
+		// （前提是目录刷新后触发 codexCatalogRefresh，见 wb_config.go）。
+		display := am.Display
+		if h != nil {
+			display = aggOpenAIDisplayName(h, am)
+		}
+		items = append(items, item{slug: am.Slug, display: display,
+			desc: display + " · AIHub 统一网关"})
 	}
 	entries := make([]map[string]any, 0, len(items))
 	// 上下文窗口与「向 Codex 宣告的上下文窗口」（设置页可调）同步：

@@ -127,14 +127,32 @@ func TestWBCatalogDiskRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWBCatalogUAIsWorkbuddyForBothLines(t *testing.T) {
-	// 接口按 UA 决定响应形状，大小写/前缀都敏感（workbuddy-desktop/5.7.6 实测被拒）。
-	// 曾经以为国内要发 CodeBuddy/<版本>：那样发回来的 data 里根本没有 models 字段。
-	// 两条线路都只认 WorkBuddy/<版本>，依据见 wbCatalogUA 的注释。
-	for _, line := range []string{"intl", "dom", "qoder"} {
-		if got := wbCatalogUA(line); got != "WorkBuddy/"+wbCatalogVersion {
-			t.Errorf("%s 目录 UA = %q，应为 WorkBuddy/%s", line, got, wbCatalogVersion)
-		}
+// 目录接口按 UA 决定响应形状，这是最容易踩的坑，2026-10-19 踩过一次。
+//
+// 实测矩阵（同一凭据）：
+//
+//	copilot.tencent.com（dom）
+//	  UA=CodeBuddy/5.7.6               → data 只剩 enterpriseId/productFeatures，无 models
+//	  UA=WorkBuddy/5.7.6               → models=37，**credits 一个都没有**
+//	  UA=CLI/2.63.2 CodeBuddy/2.63.2   → models=34，**credits 32 个**
+//
+//	www.workbuddy.ai（intl）→ WorkBuddy/<版本> 正常，带 credits
+//
+// 曾经据此断言「dom 没有 credits 字段」，实为用错 UA 得出的错误结论。
+func TestWBCatalogUAIsLineSpecific(t *testing.T) {
+	// 国内必须带 CLI 身份，否则一个倍率都拿不到
+	wantDom := "CLI/" + wbCatalogCLIVersion + " CodeBuddy/" + wbCatalogCLIVersion
+	if got := wbCatalogUA("dom"); got != wantDom {
+		t.Errorf("dom 目录 UA = %q，应为 %q（否则上游不下发 credits）", got, wantDom)
+	}
+	// 国际继续用 WorkBuddy/<版本>
+	wantIntl := "WorkBuddy/" + wbCatalogVersion
+	if got := wbCatalogUA("intl"); got != wantIntl {
+		t.Errorf("intl 目录 UA = %q，应为 %q", got, wantIntl)
+	}
+	// 其它线路不读目录，但 UA 也不该是空串（防御性）
+	if got := wbCatalogUA("qoder"); got == "" {
+		t.Error("qoder 目录 UA 不该为空")
 	}
 }
 
@@ -209,18 +227,24 @@ func TestRatioNamePrefersUpstreamCatalog(t *testing.T) {
 	}
 }
 
-// dom 不适用上游目录（见 wbCatalogApplies 里的实测依据）。这条钉住范围，
-// 免得以后有人「统一一下」把 dom 也接上，用一份更旧还没有倍率的表覆盖手工表。
-func TestWBCatalogAppliesOnlyToIntl(t *testing.T) {
-	if !wbCatalogApplies("intl") {
-		t.Fatal("intl 必须用上游目录：倍率和上下文就在那儿")
-	}
-	for _, line := range []string{"dom", "qoder", "trae", "zcode", "oc"} {
-		if wbCatalogApplies(line) {
-			t.Errorf("%s 不该走 intl 的上游目录", line)
+// 2026-10-19 起 dom 也用上游目录：用对 UA 后国内能拿到 32/34 个倍率。
+// 这条钉住范围——别再把 dom 踢出去，否则国内倍率又会退回手工表。
+func TestWBCatalogAppliesToIntlAndDom(t *testing.T) {
+	for _, line := range []string{"intl", "dom"} {
+		if !wbCatalogApplies(line) {
+			t.Fatalf("%s 必须用上游目录：倍率和上下文就在那儿", line)
 		}
 	}
-	// 即使磁盘上残留着 dom 快照，查询也必须返回「查不到」。
+	// 这些线路没有 /v3/config 目录接口，不该走
+	for _, line := range []string{"qoder", "trae", "zcode", "oc"} {
+		if wbCatalogApplies(line) {
+			t.Errorf("%s 不该走 /v3/config 目录", line)
+		}
+	}
+}
+
+// dom 快照必须能被查到（对照旧行为：原先这里断言查不到）。
+func TestWBDomCatalogLookupWorks(t *testing.T) {
 	old := hubRoot
 	dir := t.TempDir()
 	hubRoot = dir
@@ -237,14 +261,51 @@ func TestWBCatalogAppliesOnlyToIntl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wbCatalogPut(cat) // 直接塞进缓存，绕过 applies 守卫，模拟残留
-	if _, ok := wbCatalogLookup("dom", "deepseek-v4.1-flash"); ok {
-		t.Fatal("dom 残留快照仍被查到 —— 守卫漏了")
+	wbCatalogPut(cat)
+	if _, ok := wbCatalogLookup("dom", "deepseek-v4.1-flash"); !ok {
+		t.Fatal("dom 快照应能被查到 —— 国内倍率全靠它")
 	}
-	if wbCatalogGet("dom") != nil {
-		t.Fatal("wbCatalogGet 对 dom 必须返回 nil")
+	if wbCatalogGet("dom") == nil {
+		t.Fatal("wbCatalogGet 对 dom 应返回快照")
 	}
-	if n := wbCatalogFallbackNote("dom"); n == "" {
-		t.Error("dom 该有独立的说明文案")
+}
+
+// 国内上游返回的真实形状：只有 maxInputTokens、没有 contextWindow 对象。
+// 解析必须回退到 maxInputTokens，否则上下文会全是 0。
+func TestParseWBDomShapeWithoutContextWindowObject(t *testing.T) {
+	body := []byte(`{"code":0,"data":{"models":[
+		{"id":"glm-5.3","name":"GLM-5.3","credits":"x0.79 credits",
+		 "descriptionZh":"旗舰模型","maxInputTokens":1000000,"maxOutputTokens":64000,
+		 "supportsImages":true,"supportsReasoning":true},
+		{"id":"step-5-preview","name":"Step 5 Preview","credits":"x0.00 credits",
+		 "maxInputTokens":1000000,"maxOutputTokens":64000}
+	]}}`)
+	cat, err := parseWBConfigBody(body, "dom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 2 {
+		t.Fatalf("应解析出 2 个模型，实际 %d", len(cat.Entries))
+	}
+	e, ok := cat.byID()["glm-5.3"]
+	if !ok {
+		t.Fatal("glm-5.3 未解析出来")
+	}
+	if e.Ratio != "0.79x" {
+		t.Errorf("倍率 = %q，应为 0.79x", e.Ratio)
+	}
+	// 关键：没有 contextWindow 对象时，上下文必须回退到 maxInputTokens
+	if e.Context != 1000000 {
+		t.Errorf("上下文 = %d，应从 maxInputTokens 回退到 1000000", e.Context)
+	}
+	if e.Name != "GLM-5.3" {
+		t.Errorf("名称 = %q", e.Name)
+	}
+	if e.Desc != "旗舰模型" {
+		t.Errorf("中文描述 = %q", e.Desc)
+	}
+	// x0.00 → 免费
+	if e2 := cat.byID()["step-5-preview"]; e2.Ratio != "免费" {
+		t.Errorf("step-5-preview 倍率 = %q，应为免费", e2.Ratio)
 	}
 }

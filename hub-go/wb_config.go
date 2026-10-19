@@ -41,14 +41,21 @@ import (
 // wbCatalogEntry 目录里一个模型。
 type wbCatalogEntry struct {
 	ID        string `json:"id"`
-	Name      string `json:"name,omitempty"`        // 官方显示名（可能缺，缺则用 id）
-	Desc      string `json:"desc,omitempty"`        // descriptionZh
-	Ratio     string `json:"ratio,omitempty"`       // "0.79x" / "免费"；空 = 上游没给
-	Context   int    `json:"context,omitempty"`     // 能配的最大上下文（supportedLengths 取大）
-	Default   int    `json:"default,omitempty"`     // 上游默认档位
-	MaxInput  int    `json:"max_input,omitempty"`   // 输入上限
-	Chat      bool   `json:"chat"`                  // 是否对话模型（图像/视频模型为 false）
+	Name      string `json:"name,omitempty"`      // 官方显示名（可能缺，缺则用 id）
+	Desc      string `json:"desc,omitempty"`      // descriptionZh
+	Ratio     string `json:"ratio,omitempty"`     // "0.79x" / "免费"；空 = 上游没给
+	Context   int    `json:"context,omitempty"`   // 能配的最大上下文（supportedLengths 取大）
+	Default   int    `json:"default,omitempty"`   // 上游默认档位
+	MaxInput  int    `json:"max_input,omitempty"` // 历史字段：**输出**上限（见下方 MaxOutput）
+	Chat      bool   `json:"chat"`                // 是否对话模型（图像/视频模型为 false）
 	IsDefault bool   `json:"is_default,omitempty"` // 上游标的主模型
+
+	// 2026-10-19 新增：把输入/输出上限拆开。
+	// 上游 /v3/config 给的是 maxInputTokens（如 1000000）与 maxOutputTokens（如 131072）。
+	// 此前只解析了前者却塞进 MaxInput，而 MaxInput 的既有语义是「输出上限」，
+	// 结果聚合网关把 max_output_tokens 报成了 1000000 —— 客户端会以为能吐 100 万 token。
+	MaxInputTokens int `json:"max_input_tokens,omitempty"` // 输入上限
+	MaxOutput      int `json:"max_output,omitempty"`       // 输出上限
 }
 
 // wbCatalog 一次抓取的快照。
@@ -77,33 +84,56 @@ var (
 
 // wbCatalogApplies 这条线路是否该用上游 /v3/config 目录。
 //
-// 只有 intl 用。dom（copilot.tencent.com）实测**不适用**，两个硬伤：
-//  1. 里面根本没有 credits 字段 → 一个倍率都拿不到；
-//  2. 列的是 IDE 补全那一套老 id（glm-4.6 / deepseek-v3-0324 / codewise-* 等 37 个），
-//     hub-go 实际在路由的 glm-5.3、glm-5.2 反而**不在**里面。拿它当上游目录，
-//     等于用一份更旧、还缺倍率的表去覆盖现有的手工表，只会更差。
-// 所以 dom 继续走 倍率/workbuddy国内.md 那套静态表；这里留口子是为了让
-// 「dom 不适用」这件事有个能改的地方，而不是散在各分支里。
-func wbCatalogApplies(line string) bool { return line == "intl" }
+// 2026-10-19 起 intl 与 dom 都用。
+//
+// 【dom 的历史误判，已纠正】
+// 原先这里只放 intl，注释断言 dom「里面根本没有 credits 字段、列的是老 id」。
+// 2026-10-19 用同一凭据实测，发现那个结论是**用错 UA 得出的**：
+//
+//	UA=WorkBuddy/5.7.6                  → models=37, 带 credits 的=0
+//	UA=CLI/2.63.2 CodeBuddy/2.63.2      → models=34, 带 credits 的=32
+//
+// 同一接口同一凭据，只换 UA 就从「一个倍率都没有」变成「32 个都有」。
+// 且新 UA 的 34 个 id 里，hub-go 实际路由的 15 个命中 12 个
+// （glm-5.3 / glm-5.2 / glm-5.1 / glm-5.3-flash / glm-5v-turbo / kimi-k2.7 /
+//  kimi-k2.6 / kimi-k2.5 / deepseek-v4-pro / deepseek-v4-flash / space-bunny /
+//  step-5-preview），比旧 UA 那份「37 个但全是 IDE 补全老 id」有用得多。
+//
+// 未命中的 3 个（minimax-m3-pay / hy3-preview-agent / auto）会照旧回落到
+// 静态表 model_ratios.go，不会因为改用目录就失去倍率——见 modelRatio 的优先级链。
+func wbCatalogApplies(line string) bool { return line == "intl" || line == "dom" }
 
 // wbCatalogPath 快照落盘位置。线路没启动也能显示倍率/上下文，靠的就是这份缓存。
 func wbCatalogPath(line string) string { return dataPath("wb_catalog_" + line + ".json") }
 
-// wbCatalogUA 目录接口认的 UA。
+// wbCatalogUA 目录接口认的 UA —— 这个接口**按 UA 下发不同形状的响应**，
+// 选错 UA 会静默少掉一半字段，是最容易踩的坑。
 //
-// 起初按产品名猜：国内后端是 copilot.tencent.com、客户端自称 CodeBuddy，于是给
-// 它发 CodeBuddy/<版本>。实测**猜错**，同一凭据下
+// 实测矩阵（2026-10-19，同一凭据）：
 //
-//	UA=CodeBuddy/5.7.6 → data 只剩 enterpriseId/productFeatures，根本没有 models
-//	UA=WorkBuddy/5.7.6 → data.models 37 个
+//	copilot.tencent.com（dom）
+//	  UA=CodeBuddy/5.7.6               → data 只剩 enterpriseId/productFeatures，无 models
+//	  UA=WorkBuddy/5.7.6               → models=37，**credits 一个都没有**
+//	  UA=CLI/2.63.2 CodeBuddy/2.63.2   → models=34，**credits 32 个**  ← 采用
 //
-// 即这个接口对两条线路都只认 WorkBuddy/<版本>。保留这个函数而不是写死一处，
-// 是因为它已经证明「UA 决定响应形状」；上游真分化时这里是一个明确的改动点。
+//	www.workbuddy.ai（intl）
+//	  UA=WorkBuddy/<版本>              → 正常，带 credits
+//
+// 国内必须用 CLI/<cli> CodeBuddy/<v> 这个「桌面端 CLI 身份」形状：上游据此判定
+// 调用方是 CLI 客户端，才下发带计价字段的那份目录。国际线路继续用 WorkBuddy/<版本>。
 func wbCatalogUA(line string) string {
+	if line == "dom" {
+		return "CLI/" + wbCatalogCLIVersion + " CodeBuddy/" + wbCatalogCLIVersion
+	}
 	return "WorkBuddy/" + wbCatalogVersion
 }
 
 const wbCatalogVersion = "5.7.6"
+
+// wbCatalogCLIVersion 国内目录接口要求的 CLI 身份版本号。
+// 与 dsh-workbuddy-bridge 插件实测一致（其 CLIENT_UA 常量）。
+// 上游对版本号本身不敏感，敏感的是「CLI/... CodeBuddy/...」这个形状。
+const wbCatalogCLIVersion = "2.63.2"
 
 // 上游 credits 文案形态："x0.79 credits" / "x0.00" / "0.79"。
 var wbCreditsRe = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)`)
@@ -203,15 +233,24 @@ func parseWBConfigBody(body []byte, line string) (*wbCatalog, error) {
 			e.Context = firstNumber(m["contextWindow"])
 			e.Default = e.Context
 		}
-		e.MaxInput = firstNumber(m["maxInputTokens"])
+		// 输入/输出上限是**两个不同的字段**，2026-10-19 前只取了输入那个，
+		// 而 modelMeta.MaxInput 的语义是「输出上限」（静态表里全是 131072/65536
+		// 这类输出值）。于是目录一接管，输出上限就被错填成了输入上限
+		// （1000000），客户端会以为模型能吐 100 万 token。
+		// 上游真实字段：maxInputTokens=1000000、maxOutputTokens=131072。
+		e.MaxInputTokens = firstNumber(m["maxInputTokens"])
+		e.MaxOutput = firstNumber(m["maxOutputTokens"])
+		// 兼容字段：历史上 MaxInput 被当成输出上限用，这里保持该语义，
+		// 免得 model_meta.go / 聚合网关的既有读法全部要改。
+		e.MaxInput = e.MaxOutput
 		if e.Context == 0 {
-			e.Context = e.MaxInput
+			e.Context = e.MaxInputTokens
 		}
 		if d, _ := m["isDefault"].(bool); d {
 			e.IsDefault = true
 		}
 		// 图像/视频模型没有输入上限，只有 tags —— 混进对话目录会让客户端选了必挂。
-		if e.Context == 0 && e.MaxInput == 0 {
+		if e.Context == 0 && e.MaxInputTokens == 0 {
 			e.Chat = false
 		}
 		cat.Entries = append(cat.Entries, e)
@@ -350,6 +389,10 @@ func (h *Hub) refreshWBCatalog(line string, p *Proxy, force bool) *wbCatalog {
 	}
 	wbCatalogPut(cat)
 	logHub("%s 上游目录已刷新：%d 个条目（%d 个对话模型）", line, len(cat.Entries), wbCatalogChatCount(cat))
+	// 2026-10-19：倍率/上下文变了，Codex 桌面版的目录文件要跟着重写。
+	// 那个文件里的 display_name 现在也带倍率（见 codex_catalog.go），
+	// 但 Codex 只在启动时读一次，所以这里必须主动落盘，否则用户看到的还是旧值。
+	codexCatalogRefresh()
 	return cat
 }
 
@@ -399,15 +442,18 @@ func (h *Hub) warmWBCatalogs() {
 	if dir := credDirs()[intlCred]; dir != "" {
 		h.refreshWBCatalog("intl", NewIntlProxy(dir), true)
 	}
-	_ = domCred // dom 不适用上游目录（见 wbCatalogApplies），只热 intl
+	// 2026-10-19：dom 也读上游目录了（用对 UA 后国内能拿到 32/34 个倍率）。
+	// 这里必须一起预热：否则国内倍率要等到线路被手动启动、且恰好触发刷新才有，
+	// 控制台在没启线路时看到的还是旧的手工表数值。
+	h.refreshWBCatalog("dom", NewDomProxyDir(domCredDir(domCred)), true)
 }
 
 // wbCatalogFallbackNote 用不上上游目录时，控制台该显示哪句说明。
-// 分线路写，是因为「dom 不适用」和「intl 这次没抓到」是两件不同的事，
-// 混成一句会让人以为 dom 也只是偶发失败、重试就好。
+// 分两种情况：这条线路压根没有目录接口，还是这次没抓到（可以重试）。
+// 混成一句会让人以为前者也只是偶发失败、重试就好。
 func wbCatalogFallbackNote(line string) string {
 	if !wbCatalogApplies(line) {
-		return "倍率来自公开资料+实测（model_ratios.go）；该线路的上游目录不含倍率且模型更旧，不适用（见 wbCatalogApplies）"
+		return "倍率来自公开资料+实测（model_ratios.go）；该线路没有 /v3/config 目录接口"
 	}
 	return "倍率来自公开资料+实测（model_ratios.go）；这次没抓到上游目录，已回落手工表"
 }

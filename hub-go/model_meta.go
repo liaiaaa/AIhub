@@ -133,6 +133,10 @@ func (h *Hub) modelMeta(line, model string) (modelMeta, bool) {
 		if e, ok := wbCatalogLookup(line, model); ok && e.Context > 0 {
 			m := static
 			m.ContextWindow = e.Context
+			// e.MaxInput 是**输出**上限（历史命名，见 wbCatalogEntry 的注释）。
+			// 2026-10-19 前它被错填成上游的 maxInputTokens（输入上限 1000000），
+			// 于是聚合网关把 max_output_tokens 报成 1000000 —— 客户端会以为能吐
+			// 100 万 token。现在 parseWBConfigBody 改填 maxOutputTokens（131072）。
 			if e.MaxInput > 0 {
 				m.MaxInput = e.MaxInput
 			}

@@ -39,7 +39,8 @@ func sweepPorts() {
 		d := stopPort(QoderPort)
 		e := stopPort(TraePort)
 		f := stopPort(ZcodePort)
-		if a && b && c && d && e && f {
+		g := stopPort(OpencodePort)
+		if a && b && c && d && e && f && g {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)

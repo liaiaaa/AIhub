@@ -40,6 +40,11 @@ type creditInfo struct {
 	// Diff 是「较前一日」的余额变化文案（仅国际版填，见 credit_history.go）。
 	// 用于回答「昨天上报的活跃，30 分到账了吗」——不必去官网翻积分明细。
 	Diff string `json:"diff,omitempty"`
+	// Burn/Burned：国际版消耗预警（2026-10-13，见 intl_burn.go）。
+	// Burned=true 表示当日监测到余额下探（标 0.00x 的免费模型在扣积分），
+	// Burn 为当日累计扣费额。前端显示黄牌提醒用户停手。
+	Burn   float64 `json:"burn,omitempty"`
+	Burned bool    `json:"burned,omitempty"`
 }
 
 type creditEntry struct {
@@ -174,7 +179,10 @@ func wbCredits(h *Hub, intl bool) *creditInfo {
 	ua := "WorkBuddy/5.5.4" // 单段：billing 域白名单 UA
 	name := "国内 WorkBuddy"
 	if !intl {
-		p := NewDomProxy()
+		h.mu.Lock()
+		dir := domCredDir(h.domCred)
+		h.mu.Unlock()
+		p := NewDomProxyDir(dir)
 		path := p.AuthFilePath()
 		if path == "" || !fileExists(path) {
 			return &creditInfo{OK: false, Text: "未找到国内凭据"}
@@ -277,6 +285,10 @@ func wbCreditResult(intl bool, uid, name string, remain, total float64) *creditI
 	if intl && uid != "" {
 		creditHistoryRecord(uid, name, remain, total)
 		info.Diff = creditHistoryDiffText(uid)
+		if burn := recordIntlCreditWater(uid, remain); burn > 0.005 {
+			info.Burn = burn
+			info.Burned = true
+		}
 	}
 	return info
 }

@@ -31,6 +31,20 @@ func NewIntlProxy(authDir string) *Proxy {
 			"gpt-5.6-terra",
 			"gpt-5.6-sol",
 			"gpt-6-astra",
+			// 2026-10-15 补：倍率/workbuddy国际.md 里列有、但上游 /v1/models 目录
+			// 不返回的模型。全部经 :8799 直连实测可用后才录入：
+			//   step-5-preview / kimi-k3 / kimi-k2.8-preview / grok-4.7 /
+			//   gemini-3.8-flash / gemini-3.5-flash / gpt-6-luna  → 均 200
+			// 实测不可用故未录入：hy3-preview（400 11102）、gpt-6.1-sol（400 11102）、
+			// gpt-6-sol（假 200：finish_reason=error、usage 全 0）。
+			// 本地目录只影响 /v1/models 候选单与控制台探测，路由按模型名原样透传。
+			"step-5-preview",
+			"kimi-k3",
+			"kimi-k2.8-preview",
+			"grok-4.7",
+			"gemini-3.8-flash",
+			"gemini-3.5-flash",
+			"gpt-6-luna",
 		},
 		Aliases: map[string]string{
 			"deepseek-v4-flash":      "deepseek-v4.1-flash",
@@ -42,6 +56,9 @@ func NewIntlProxy(authDir string) *Proxy {
 		AuthDir:       authDir,
 		AuthFileName:  "workbuddy-desktop-ai.info",
 		PrependSystem: true,
+		// 2026-10-16 起上游对 /v2/chat/completions 开通路校验，缺会话四头整条线路报
+		// 11128「conversation id missing」。见 withConversationHeaders。
+		ConversationHeaders: true,
 		// 同国内线路：客户端没指定思考档位时补最高档（见 default_thinking.go）。
 		ThinkingDefault: wbThinkingDefaultEffort,
 		Owner:           "workbuddy-ai",

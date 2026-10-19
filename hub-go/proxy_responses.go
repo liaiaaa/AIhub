@@ -19,10 +19,22 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const respMsgIDPrefix = "msg_"
+
+// advertisedContextWindow 是 /v1/models 目录里向 Codex 宣告的上下文窗口上限
+// （tokens）。Codex 据此决定何时自动压缩历史。上游硬顶约 1,048,576（1M）：
+// 若宣告 1,000,000，历史逼近上限时会撞上游 400（code 11115 prompt is too long）。
+// 控制台「Codex 上下文窗口」可调低，让 Codex 更早压缩。默认 1,000,000。
+// 用 func 字面量初始化，避免依赖 init() 的执行顺序。
+var advertisedContextWindow = func() *atomic.Int64 {
+	v := &atomic.Int64{}
+	v.Store(1_000_000)
+	return v
+}()
 
 // codexModelMessages 是 codex 模型目录里 model_messages 字段的固定形状
 // （对齐 openai/codex 仓库 manager_tests.rs 的官方测试夹具，缺失会解码失败）。
@@ -53,6 +65,7 @@ func codexModelsResponse(models []string) map[string]any {
 }
 
 func codexModelsResponseFrom(entries []codexModelEntry) map[string]any {
+	cw := advertisedContextWindow.Load()
 	out := make([]any, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, map[string]any{
@@ -71,10 +84,10 @@ func codexModelsResponseFrom(entries []codexModelEntry) map[string]any {
 			"support_verbosity":              false,
 			"default_verbosity":              nil,
 			"apply_patch_tool_type":          nil,
-			"truncation_policy":              map[string]any{"mode": "tokens", "limit": 1000000},
+			"truncation_policy":              map[string]any{"mode": "tokens", "limit": cw},
 			"supports_image_detail_original": false,
-			"context_window":                 1000000,
-			"max_context_window":             1000000,
+			"context_window":                 cw,
+			"max_context_window":             cw,
 			"experimental_supported_tools":   []any{},
 		})
 	}
@@ -277,7 +290,88 @@ func responsesInputToMessages(raw map[string]any) []any {
 			}
 		}
 	}
-	return msgs
+	return normalizeToolResultAdjacency(msgs)
+}
+
+// normalizeToolResultAdjacency 把插进「assistant.tool_calls ↔ tool 结果」序列中间的
+// 其它消息挪到该序列末尾，保证两者严格相邻。
+//
+// 背景（2026-10-13 实测）：Codex 回放历史时，带图片的 function_call_output 之后会
+// 额外插一条 <image_resize_notice> 的 system 条目。并行工具调用时它正好夹在两条
+// tool 消息中间，而 WorkBuddy 上游要求 tool_calls 的结果连续相邻，否则 400
+// code 11148 "tool calls and tool results do not match"。因为触发条件是「历史里
+// 出现被压缩过的图片」，新开对话只要读一次大图就立刻复现，重开会话无效。
+// 实测：同一形状下删掉或挪后这条 system 都能通过，只有夹在中间才被拒。
+func normalizeToolResultAdjacency(msgs []any) []any {
+	out := make([]any, 0, len(msgs))
+	for i := 0; i < len(msgs); {
+		waiting := assistantToolCallIDs(msgs[i])
+		if len(waiting) == 0 {
+			out = append(out, msgs[i])
+			i++
+			continue
+		}
+		var results, interlopers []any
+		j := i + 1
+		for j < len(msgs) && len(waiting) > 0 {
+			m, ok := msgs[j].(map[string]any)
+			if !ok {
+				break
+			}
+			if id := toolResultCallID(m); id != "" {
+				if _, pending := waiting[id]; !pending {
+					break // 不属于本次调用的结果，不跨组重排
+				}
+				delete(waiting, id)
+				results = append(results, m)
+			} else {
+				interlopers = append(interlopers, m)
+			}
+			j++
+		}
+		if len(interlopers) == 0 {
+			out = append(out, msgs[i])
+			i++
+			continue
+		}
+		out = append(out, msgs[i])
+		out = append(out, results...)
+		out = append(out, interlopers...)
+		i = j
+	}
+	return out
+}
+
+// assistantToolCallIDs 取 assistant 消息里待回应的 tool_call id 集合，其它情形返回 nil。
+func assistantToolCallIDs(m any) map[string]struct{} {
+	mm, ok := m.(map[string]any)
+	if !ok || mm["role"] != "assistant" {
+		return nil
+	}
+	tcs, _ := mm["tool_calls"].([]any)
+	ids := make(map[string]struct{}, len(tcs))
+	for _, tc := range tcs {
+		tm, ok := tc.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, _ := tm["id"].(string); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return ids
+}
+
+// toolResultCallID 返回 tool 消息回应的 call id；非 tool 消息返回空串。
+func toolResultCallID(m map[string]any) string {
+	if m["role"] != "tool" {
+		return ""
+	}
+	id, _ := m["tool_call_id"].(string)
+	return id
 }
 
 // responsesContentText 拼接 content 数组里的文本片段。

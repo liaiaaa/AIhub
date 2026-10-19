@@ -51,20 +51,29 @@ var (
 // aggLinePort 各线路本地端口（拉取在线模型目录用，与 webui SERVICES 一致）。
 // "agg" 不是真实线路，是「被聚合口拒掉的请求」的统计归属（如未知模型 400），
 // 没有它用量表会显示成空名字（见 usage_stats.go 的 line_cn）。
-var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "agg": "聚合口(未受理)"}
+var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "zcode": "Zcode", "oc": "OpenCode免费", "official": "官方", "agg": "聚合口(未受理)"}
 
 // aggSelectableLine 判断是不是「可挂模型的真实线路」。
 // 不能拿 aggLineCN 当校验表——它含 "agg" 这个纯统计用的键，
 // 用它校验会让 /api/agg/add?line=agg 被误认为合法线路。
 func aggSelectableLine(line string) bool {
 	switch line {
-	case "dom", "intl", "qoder", "trae":
+	case "dom", "intl", "qoder", "trae", "zcode", "oc":
 		return true
 	}
 	return false
 }
 
-var aggLinePort = map[string]int{"dom": 8787, "intl": 8799, "qoder": 8797, "trae": 8795}
+var aggLinePort = map[string]int{"dom": 8787, "intl": 8799, "qoder": 8797, "trae": 8795, "zcode": 8796, "oc": OpencodePort}
+
+// aggCCSKeys 兼容 Hub Switch 时代的模型名前缀：ccs-<key>/<model> 与
+// ccs-claude-<key>--<model>（2026-10-13 方案 C：hub-go 吞并网关后，
+// 客户端里存量配置的模型名不用改也能继续路由）。
+var aggCCSKeys = map[string]string{
+	"dom": "dom", "intl": "intl", "qoder": "qoder", "trae": "trae", "zcode": "zcode",
+	"claude-dom": "dom", "claude-intl": "intl", "claude-qoder": "qoder",
+	"claude-trae": "trae", "claude-zcode": "zcode",
+}
 
 func aggDefaults() []aggModel {
 	return []aggModel{
@@ -78,10 +87,34 @@ func aggLoad() {
 	defer aggMu.Unlock()
 	b, err := os.ReadFile(dataPath("agg_models.json"))
 	if err == nil && json.Unmarshal(b, &aggList) == nil && len(aggList) > 0 {
+		aggNormalizeDisplayLocked()
 		return
 	}
 	aggList = aggDefaults()
 	aggSaveLocked()
+}
+
+// aggNormalizeDisplayLocked 把存量条目的 display 规范成友好名。
+//
+// 2026-10-15 新增：aggAdd 早先用 backend 直接拼显示名，历史白名单里留下
+// kimi-k3（国际）这类小写英文 id。这里启动时把「正好等于旧规则产物」的条目
+// 重算一遍；用户手工改过的显示名（不等于旧规则产物）原样保留，不覆盖。
+func aggNormalizeDisplayLocked() {
+	changed := false
+	for i := range aggList {
+		m := &aggList[i]
+		legacy := m.Backend + "（" + aggLineCN[m.Line] + "）"
+		if m.Display == legacy || m.Display == "" {
+			if fresh := aggDisplayName(m.Line, m.Backend); fresh != m.Display {
+				m.Display = fresh
+				changed = true
+			}
+		}
+	}
+	if changed {
+		aggSaveLocked()
+		codexCatalogRefresh()
+	}
 }
 
 func aggSaveLocked() {
@@ -97,6 +130,73 @@ func aggSnapshot() []aggModel {
 	return out
 }
 
+// aggDisplayName 生成白名单条目的显示名：`<友好名>（<线路中文名>）`。
+//
+// 2026-10-15 新增：原来直接用 backend（如 kimi-k3（国际）），选择器里是一串
+// 小写英文 id。现在优先用友好名映射（各线路高频模型的通用写法），未命中的
+// 回落 backend，保证新增模型也有可读的显示名。
+func aggDisplayName(line, backend string) string {
+	name := backend
+	if n, ok := aggPrettyNames[backend]; ok {
+		name = n
+	}
+	return name + "（" + aggLineCN[line] + "）"
+}
+
+// aggPrettyNames 模型 id → 友好显示名（不含线路后缀）。
+// 只收各线路目录里常见的高频模型；不求全，未列入的走 backend 原值。
+var aggPrettyNames = map[string]string{
+	// 国内 / 国际 WorkBuddy 共有
+	"deepseek-v4.1-flash": "DeepSeek 4.1 Flash",
+	"deepseek-v4-flash":  "DeepSeek V4 Flash",
+	"deepseek-v4-pro":    "DeepSeek V4 Pro",
+	"glm-5.3-flash":      "GLM 5.3 Flash",
+	"glm-5.3":            "GLM 5.3",
+	"glm-5.2":            "GLM 5.2",
+	"glm-5.1":            "GLM 5.1",
+	"glm-5v-turbo":       "GLM 5V Turbo",
+	"hy4-preview":        "HY4 Preview",
+	"hy3-preview":        "HY3 Preview",
+	"hy3-preview-agent":  "HY3 Preview Agent",
+	"kimi-k3":            "Kimi K3",
+	"kimi-k2.8-preview":  "Kimi K2.8 Preview",
+	"kimi-k2.6":          "Kimi K2.6",
+	"kimi-k2.7":          "Kimi K2.7",
+	"minimax-m3":         "MiniMax M3",
+	"minimax-m3-pay":     "MiniMax M3",
+	"space-bunny":        "Space Bunny",
+	"space-bunny-max":    "Space Bunny Max",
+	"step-5-preview":     "Step 5 Preview",
+	// 国际线额外模型
+	"grok-4.7":          "Grok 4.7",
+	"gemini-3.8-flash":  "Gemini 3.8 Flash",
+	"gemini-3.5-flash":  "Gemini 3.5 Flash",
+	"gpt-5.4":           "GPT 5.4",
+	"gpt-5.5":           "GPT 5.5",
+	"gpt-5.6-luna":      "GPT 5.6 Luna",
+	"gpt-5.6-terra":     "GPT 5.6 Terra",
+	"gpt-5.6-sol":       "GPT 5.6 Sol",
+	"gpt-6-astra":       "GPT 6 Astra",
+	"gpt-6-luna":        "GPT 6 Luna",
+	"gpt-6-sol":         "GPT 6 Sol",
+	"gpt-6.1-sol":       "GPT 6.1 Sol",
+	// Qoder 线（客户端可见的 DisplayName）
+	"Qwen3.8-Flash":     "Qwen3.8 Flash",
+	"Qwen3.8-Max":       "Qwen3.8 Max",
+	"Qwen3.7-Plus":      "Qwen3.7 Plus",
+	"Qwen3.7-Max":       "Qwen3.7 Max",
+	"Qwen3.7-Flash":     "Qwen3.7 Flash",
+	"DeepSeek-V4-Pro":   "DeepSeek V4 Pro",
+	"DeepSeek-Flash":    "DeepSeek Flash",
+	"GLM-5.3-Flash":     "GLM 5.3 Flash",
+	"GLM-5.2":           "GLM 5.2",
+	"Kimi-K3":           "Kimi K3",
+	"Kimi-K2.8-Preview": "Kimi K2.8 Preview",
+	"MiniMax-M2.7":      "MiniMax M2.7",
+	"Auto":              "Auto",
+	"Fast":              "Fast",
+}
+
 func aggAdd(line, backend string) (aggModel, bool, string) {
 	aggMu.Lock()
 	defer aggMu.Unlock()
@@ -106,9 +206,10 @@ func aggAdd(line, backend string) (aggModel, bool, string) {
 			return m, false, "已存在：" + slug
 		}
 	}
-	m := aggModel{Line: line, Slug: slug, Backend: backend, Display: backend + "（" + aggLineCN[line] + "）"}
+	m := aggModel{Line: line, Slug: slug, Backend: backend, Display: aggDisplayName(line, backend)}
 	aggList = append(aggList, m)
 	aggSaveLocked()
+	codexCatalogRefresh()
 	return m, true, "已添加 " + slug
 }
 
@@ -119,6 +220,7 @@ func aggRemove(slug string) (bool, string) {
 		if m.Slug == slug {
 			aggList = append(aggList[:i], aggList[i+1:]...)
 			aggSaveLocked()
+			codexCatalogRefresh()
 			return true, "已删除 " + slug
 		}
 	}
@@ -162,6 +264,18 @@ func (h *Hub) startAggLine() (bool, string) {
 	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		h.aggDispatch(w, r, "chat")
+	})
+	// Anthropic 入站（2026-10-13 方案 C）：Claude Code / Claude Desktop 3P 直连本口
+	// /claude-desktop 前缀路径是 Desktop 网关 profile 的 base_url 形状（与
+	// Hub Switch 时代一致），与 /v1/messages 同一 handler。
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		h.aggAnthropicMessages(w, r)
+	})
+	mux.HandleFunc("/claude-desktop/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		h.aggAnthropicMessages(w, r)
+	})
+	mux.HandleFunc("/claude-desktop/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		h.aggOpenAIModelsHandler(w, r)
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", aggPort)
@@ -265,6 +379,19 @@ func (h *Hub) traeForAgg() *TraeProxy {
 	return h.trae
 }
 
+func (h *Hub) zcodeForAgg() *ZcodeProxy {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.zcode
+}
+
+// ocForAgg OpenCode 免费档（2026-10-15）。
+func (h *Hub) ocForAgg() *OpencodeProxy {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.oc
+}
+
 func (h *Hub) lineRunning(line string) bool {
 	switch line {
 	case "dom", "intl":
@@ -279,8 +406,56 @@ func (h *Hub) lineRunning(line string) bool {
 		if p := h.traeForAgg(); p != nil {
 			return p.Running()
 		}
+	case "oc":
+		if p := h.ocForAgg(); p != nil {
+			return p.Running()
+		}
 	}
 	return false
+}
+
+// resolveAggModel 统一网关的模型名解析（2026-10-13 方案 C 升级）。
+// 三级匹配：
+//  1. 白名单精确命中（agg_models.json，控制台可管理）；
+//  2. Hub Switch 时代前缀：ccs-<key>/<model>、ccs-claude-<key>--<model>；
+//  3. 动态 <线路>.<模型>（如 dom.glm-5.3-flash）——零配置，所有线路全模型可用。
+func resolveAggModel(slug string) (aggModel, bool) {
+	for _, am := range aggSnapshot() {
+		if am.Slug == slug {
+			return am, true
+		}
+	}
+	// Claude Desktop 安全角色名（claude-sonnet-5 等，含日期后缀）→ 聚合 slug
+	if s := resolveDesktopRole(slug); s != "" {
+		if am, ok := resolveAggModel(s); ok {
+			return am, true
+		}
+	}
+	// ccs- 形式（含 claude 桌面版的 key--model 写法）
+	if rest, ok := strings.CutPrefix(slug, "ccs-"); ok {
+		var key, model string
+		if i := strings.Index(rest, "/"); i >= 0 {
+			key, model = rest[:i], rest[i+1:]
+		} else if i := strings.Index(rest, "--"); i >= 0 {
+			key, model = rest[:i], rest[i+2:]
+		}
+		if line, ok := aggCCSKeys[key]; ok && model != "" {
+			return aggModel{Line: line, Slug: slug, Backend: model,
+				Display: model + "（" + aggLineCN[line] + "）"}, true
+		}
+		return aggModel{}, false
+	}
+	// <线路>.<模型> 动态形式
+	if line, model, found := strings.Cut(slug, "."); found && aggSelectableLine(line) && model != "" {
+		return aggModel{Line: line, Slug: slug, Backend: model,
+			Display: model + "（" + aggLineCN[line] + "）"}, true
+	}
+	// 官方 ChatGPT 模型（gpt-*）：透传官方 API（2026-10-13 共存方案，见 proxy_official.go）。
+	if isOfficialModelSlug(slug) {
+		return aggModel{Line: "official", Slug: slug, Backend: slug,
+			Display: slug + "（官方）"}, true
+	}
+	return aggModel{}, false
 }
 
 // rewriteModel 把请求体里的聚合 slug 换成线路真实模型名。
@@ -292,14 +467,12 @@ func rewriteModel(raw []byte) (aggModel, []byte, error) {
 		return aggModel{}, nil, fmt.Errorf("bad json: %w", err)
 	}
 	slug, _ := m["model"].(string)
-	for _, am := range aggSnapshot() {
-		if am.Slug == slug {
-			m["model"] = am.Backend
-			nb, err := json.Marshal(m)
-			return am, nb, err
-		}
+	if am, ok := resolveAggModel(slug); ok {
+		m["model"] = am.Backend
+		nb, err := json.Marshal(m)
+		return am, nb, err
 	}
-	return aggModel{}, nil, fmt.Errorf("未知模型 %q（在 AIHub 控制台「Codex 模型管理」里添加）", slug)
+	return aggModel{}, nil, fmt.Errorf("未知模型 %q（可用形式：线路.模型 / ccs-线路/模型，或在控制台白名单里添加）", slug)
 }
 
 // requestedModelSlug 尽力取出请求体里的 model 字段（只为统计留痕，失败返回空）。
@@ -529,6 +702,30 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 			return
 		}
 		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
+	case "zcode":
+		p := h.zcodeForAgg()
+		if p == nil || !p.Running() {
+			aggLineOff(w, am)
+			return
+		}
+		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
+	case "oc":
+		// OpenCode 免费档（2026-10-15）：上游只有 chat/completions，走 chat-only 转换。
+		p := h.ocForAgg()
+		if p == nil || !p.Running() {
+			aggLineOff(w, am)
+			return
+		}
+		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
+	case "official":
+		// 官方 ChatGPT 透传（2026-10-13 共存方案）：只支持 Codex 的 responses 形态。
+		if kind != "responses" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": map[string]any{"message": officialChatUnsupported, "type": "invalid_request_error"},
+			})
+			return
+		}
+		h.officialPassthrough(w, r, nb)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]any{"message": "未知线路：" + am.Line, "type": "invalid_request_error"},
@@ -538,6 +735,9 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 
 // aggCodexModels 聚合线路的 codex 模型目录（display_name 带线路标注与倍率，
 // Codex 模型选择器里直接能看到 0.03x/免费 这类计费参考）。
+//
+// 2026-10-15：gpt-* 官方模型不再进目录（用户要求目录只放 hub-go 线路模型），
+// 透传路由在 resolveAggModel 里保留，直接请求 gpt-* 仍走官方订阅。
 func (h *Hub) aggCodexModels() map[string]any {
 	list := aggSnapshot()
 	entries := make([]codexModelEntry, 0, len(list))
@@ -551,21 +751,58 @@ func (h *Hub) aggCodexModels() map[string]any {
 	return codexModelsResponseFrom(entries)
 }
 
-// aggOpenAIModels 聚合线路的标准 OpenAI /v1/models 列表（id 为聚合 slug，
-// name 带倍率，供 dsh 等客户端显示）。
+// aggOpenAIModels 聚合线路的标准 OpenAI /v1/models 列表。
+//
+// 2026-10-15 改造：DSH 等客户端的模型发现解析器（dsh-llm-pi-ai）同时接受
+// 标准 `data` 数组和富信息 `models` 对象，后者能读出 id / 显示名 / 上下文窗口 /
+// 最大输出 token。原来的实现只输出 `id`=英文 slug + `name`="slug · 倍率"，
+// 客户端选择器里就是一串 intl.deepseek-v4.1-flash，看不出线路归属和计价。
+//
+// 现在输出富信息形态：
+//   - key/id  ：聚合 slug（请求侧唯一标识，不能改）
+//   - name    ：中文显示名 + 倍率（DSH 的显示名只认 name/display_name/displayName，
+//               倍率不在它解析的字段里，只能并进显示名）
+//   - contextWindow / maxTokens：元数据（有则输出）
+//
+// gpt-* 官方模型不再进目录（2026-10-15 用户要求：目录里不该混官方模型），
+// 但透传路由保留——想用官方订阅仍可直接请求 gpt-*。
 func (h *Hub) aggOpenAIModels() map[string]any {
 	list := aggSnapshot()
 	data := make([]map[string]any, 0, len(list))
 	for _, am := range list {
 		entry := map[string]any{
-			"id": am.Slug, "object": "model", "created": 1700000000, "owned_by": "aihub-agg",
+			"id":       am.Slug,
+			"object":   "model",
+			"created":  1700000000,
+			"owned_by": "aihub-agg",
+			"name":     aggOpenAIDisplayName(h, am),
 		}
-		if r, ok := h.modelRatio(am.Line, am.Backend); ok {
-			entry["name"] = am.Slug + " · " + ratioLabel(r)
+		if m, ok := h.modelMeta(am.Line, am.Backend); ok {
+			if m.ContextWindow > 0 {
+				entry["contextWindow"] = m.ContextWindow
+				entry["max_input_tokens"] = m.ContextWindow
+			}
+			if m.MaxInput > 0 {
+				entry["max_output_tokens"] = m.MaxInput
+			}
 		}
 		data = append(data, entry)
 	}
 	return map[string]any{"object": "list", "data": data}
+}
+
+// aggOpenAIDisplayName 生成 OpenAI 形态的显示名：中文名 + 倍率。
+// 优先用白名单里配的 Display（已含「（国内）/（国际）」归属），没有时用
+// 模型名兜底；倍率只在查得到时追加，查不到不编。
+func aggOpenAIDisplayName(h *Hub, am aggModel) string {
+	base := am.Display
+	if base == "" {
+		base = am.Backend
+	}
+	if r, ok := h.modelRatio(am.Line, am.Backend); ok {
+		return base + " · " + ratioLabel(r)
+	}
+	return base
 }
 
 // ---------- 控制台 API ----------
@@ -590,12 +827,21 @@ func (h *Hub) apiAggState(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) apiAggModels(w http.ResponseWriter, r *http.Request) {
 	list := aggSnapshot()
 	ratios := map[string]any{}
+	metas := map[string]any{}
+	models := make([]map[string]any, 0, len(list))
 	for _, am := range list {
 		if v, ok := h.modelRatio(am.Line, am.Backend); ok {
 			ratios[am.Slug] = ratioLabel(v)
 		}
+		if mj := metaJSON(h.modelMeta(am.Line, am.Backend)); mj != nil {
+			metas[am.Slug] = mj
+		}
+		models = append(models, map[string]any{
+			"line": am.Line, "line_cn": aggLineCN[am.Line], "slug": am.Slug,
+			"backend": am.Backend, "display": am.Display,
+		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": list, "ratios": ratios})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models, "ratios": ratios, "meta": metas})
 }
 
 func (h *Hub) apiAggAdd(w http.ResponseWriter, r *http.Request) {
@@ -668,10 +914,14 @@ func (h *Hub) apiAggLineModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ratios := map[string]string{}
+	metas := map[string]any{}
 	for _, id := range models {
 		if v, ok := h.modelRatio(line, id); ok {
 			ratios[id] = ratioLabel(v)
 		}
+		if mj := metaJSON(h.modelMeta(line, id)); mj != nil {
+			metas[id] = mj
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models, "ratios": ratios})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models, "ratios": ratios, "meta": metas, "line_cn": aggLineCN[line]})
 }

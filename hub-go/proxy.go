@@ -85,6 +85,10 @@ type Proxy struct {
 	LogPath       string
 	DirectOnly    bool // 直连后端，不读系统代理（国内 / 小米服务器，避免依赖代理软件）
 
+	// ConversationHeaders：给上游补「官方客户端」的会话四头，见 withConversationHeaders。
+	// 2026-10-16 起 intl 必需（缺了整条线路全废）。
+	ConversationHeaders bool
+
 	// ThinkingDefault：客户端没指定思考档位时补的默认档（见 default_thinking.go）。
 	// 空串 = 不注入，完全透传。
 	ThinkingDefault string
@@ -475,6 +479,37 @@ func (p *Proxy) normalizeMessages(msgs []any) []any {
 // MiMo 的 serviceToken 有效期不由我们掌握，服务端可能提前判失效。
 type authInvalidator interface{ Invalidate() }
 
+// withConversationHeaders 补齐上游「通路校验」要的会话四头。
+//
+// 2026-10-16 起 www.workbuddy.ai 对 /v2/chat/completions 开了一道渠道校验：缺头就
+//
+//	400 {"code":11128,"msg":"conversation id missing",
+//	     "displayMsg":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的。"}}
+//
+// 流式请求更阴：HTTP 200 + 一个 data:{"error":{...}} 帧，正文为空 —— 上层看着像成功。
+//
+// 四个值都是客户端自造的随机 id，**不需要先向服务端申请会话**（实测随机值即通）。
+// 形状抄自官方客户端：conversation / conversationRequestId 是 32 位裸 hex，
+// messageID / requestID 是带连字符的 UUID —— 两种都见过，别混。
+// 头名与取值来自 app.asar 里的 Yr()（见 docs/2026-10-16-intl通路校验.md）。
+//
+// 只在 ConversationHeaders 置位的信源启用：dom 线路实测不需要，贸然加会改变
+// 一个能正常工作的东西的请求形状，不做这种「顺手统一」。
+func (p *Proxy) withConversationHeaders(h map[string]string) map[string]string {
+	if !p.ConversationHeaders {
+		return h
+	}
+	out := make(map[string]string, len(h)+4)
+	for k, v := range h {
+		out[k] = v
+	}
+	out["X-Conversation-ID"] = randHex(16)
+	out["X-Conversation-Request-ID"] = randHex(16)
+	out["X-Conversation-Message-ID"] = randUUID()
+	out["X-Request-ID"] = randUUID()
+	return out
+}
+
 // doUpstream 发起后端请求；返回 401 且认证支持作废时，换票后重试一次。
 func (p *Proxy) doUpstream(ctx context.Context, client *http.Client, auth AuthProvider, url string, headers map[string]string, payload []byte) (*http.Response, error) {
 	attempt := func(h map[string]string) (*http.Response, error) {
@@ -482,7 +517,7 @@ func (p *Proxy) doUpstream(ctx context.Context, client *http.Client, auth AuthPr
 		if err != nil {
 			return nil, err
 		}
-		for k, v := range h {
+		for k, v := range p.withConversationHeaders(h) {
 			req.Header.Set(k, v)
 		}
 		return client.Do(req)

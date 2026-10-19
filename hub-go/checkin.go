@@ -42,12 +42,54 @@ type checkinResult struct {
 	Detail string `json:"detail"`
 }
 
-// domCheckin 国内 WorkBuddy/CodeBuddy 每日签到。
+// domCheckin 国内 WorkBuddy/CodeBuddy 每日签到：**全部国内凭证各签一次**
+// （2026-10-13 国内多凭证：桌面端账号 + CodeBuddy IDE 账号都是独立积分池，
+// 只签当前选中的会漏掉另一个账号的 +100）。逐账号结果拼接，签到条可见。
 func domCheckin() checkinResult {
+	dirs := domCredDirs()
+	// 只签目录里真有凭据文件的；都没有时回退传统解析路径（保持旧行为）。
+	var names []string
+	for _, n := range domCredNames() {
+		if dirHasDomCredential(dirs[n]) {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return domCheckinPath("")
+	}
+	type one struct {
+		name string
+		res  checkinResult
+	}
+	ch := make(chan one, len(names))
+	for _, n := range names {
+		go func(n string) { ch <- one{n, domCheckinPath(dirs[n] + "/" + domAuthFileName)} }(n)
+	}
+	results := make([]one, 0, len(names))
+	allOK := true
+	for i := 0; i < len(names); i++ {
+		r := <-ch
+		results = append(results, r)
+		if !r.res.OK {
+			allOK = false
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	parts := make([]string, 0, len(results))
+	for _, r := range results {
+		parts = append(parts, r.name+"："+r.res.Detail)
+	}
+	return checkinResult{OK: allOK, Detail: strings.Join(parts, "；")}
+}
+
+// domCheckinPath 对单个国内凭据文件签到。path 为空时走传统解析。
+func domCheckinPath(path string) checkinResult {
 	p := NewDomProxy()
-	path := p.AuthFilePath()
-	if path == "" || !fileExists(path) {
-		return checkinResult{OK: false, Detail: "未找到国内版凭据文件，请先在桌面端登录"}
+	if path == "" {
+		path = p.AuthFilePath()
+		if path == "" || !fileExists(path) {
+			return checkinResult{OK: false, Detail: "未找到国内版凭据文件，请先在桌面端登录"}
+		}
 	}
 	cm := NewCredentialManager(path, p.Backend, p.DefaultDomain, p.UserAgent)
 	headers, err := cm.Headers()
@@ -277,7 +319,7 @@ func httpPostJSON(url string, headers map[string]string, body []byte) ([]byte, i
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := backendClient(20 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -299,7 +341,7 @@ func httpGetJSON(url string, headers map[string]string) ([]byte, int, error) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := backendClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err

@@ -67,8 +67,11 @@ func TestAggAutostartListens(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("目录不是合法 JSON：%s", b)
 	}
-	if n := len(asSlice(m["models"])); n != 1 {
-		t.Fatalf("目录应有 1 个模型，实际 %d：%s", n, b)
+	// 目录 = 白名单。2026-10-15 起 gpt-* 官方模型不再进目录（用户要求目录只放
+	// hub-go 线路模型，不混官方模型）；透传路由保留，直接请求 gpt-* 仍走官方订阅。
+	want := 1
+	if n := len(asSlice(m["models"])); n != want {
+		t.Fatalf("目录应有 %d 个模型（白名单 1），实际 %d：%s", want, n, b)
 	}
 }
 
@@ -145,7 +148,9 @@ func TestApiAggStopMarksUserStopped(t *testing.T) {
 	}
 }
 
-// 「未知模型」的 400 也要落一行统计（否则客户端发官方模型名时看不见）
+// 「未知模型」的 400 也要落一行统计（否则客户端发来的怪模型名在用量表里
+// 看不见）。注意 2026-10-13 起 gpt-* 是官方透传、不再走 400，所以这里用
+// 非官方的未知名验证同一条记账路径。
 func TestUnknownModelRecordedInUsage(t *testing.T) {
 	isolateAggRoot(t)
 	useTestAggPort(t)
@@ -154,7 +159,7 @@ func TestUnknownModelRecordedInUsage(t *testing.T) {
 	usageMu.Unlock()
 
 	h := &Hub{}
-	body := `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+	body := `{"model":"totally-unknown-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.aggDispatch(rec, req, "responses")
@@ -175,7 +180,7 @@ func TestUnknownModelRecordedInUsage(t *testing.T) {
 	if rec2.Code != http.StatusBadRequest {
 		t.Fatalf("统计 code 应为 400，实际 %d", rec2.Code)
 	}
-	if rec2.Slug != "gpt-5.6-sol" {
+	if rec2.Slug != "totally-unknown-model" {
 		t.Fatalf("统计应记客户端请求的原始名字，实际 %q", rec2.Slug)
 	}
 	if rec2.Line != "agg" {

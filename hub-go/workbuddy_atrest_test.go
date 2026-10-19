@@ -6,6 +6,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -152,5 +153,102 @@ func TestWBAtRestRealCredential(t *testing.T) {
 	if s.Auth != nil {
 		t.Logf("uid=%s nickname_len=%d access_len=%d refresh_len=%d 信封处数=%d",
 			s.Account.UID, len(s.Account.Nickname), len(s.Auth.AccessToken), len(s.Auth.RefreshToken), len(meta))
+	}
+}
+
+// 密钥环：国内凭据与移植版国际凭据用的是**两把不同的密钥**
+// （移植 shim 找不到 .at-rest-key 会 randomBytes 现生成），所以 loadKeys
+// 必须同时收多把，换一把不能弄坏另一条线（2026-10-16）。
+func TestWBAtRestKeyringBothKeysWork(t *testing.T) {
+	old := hubRoot
+	dir := t.TempDir()
+	hubRoot = dir
+	*wbCodecInstance = wbCodec{}
+	t.Cleanup(func() { hubRoot = old; *wbCodecInstance = wbCodec{} })
+
+	// 主密钥（国内那把）
+	keyA := make([]byte, 32)
+	if _, err := rand.Read(keyA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, wbKeyFileName),
+		[]byte(base64.StdEncoding.EncodeToString(keyA)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 备用密钥（移植版国际那把）：按桌面端规则写成 44 字符原文，
+	// 真正的 AES key 是 sha256(字符串)，正好覆盖 loadKeys 的第二种候选。
+	rawB := make([]byte, 32)
+	if _, err := rand.Read(rawB); err != nil {
+		t.Fatal(err)
+	}
+	b64B := base64.StdEncoding.EncodeToString(rawB)
+	derivedB := sha256.Sum256([]byte(b64B))
+	if err := os.WriteFile(filepath.Join(dir, "wbatrest-workbuddy-ai.key"),
+		[]byte(b64B), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		meta wbFieldMeta
+		want string
+	}{
+		{"主密钥", wbFieldMeta{KeyID: wbKeyIDOf(keyA), Suite: 1, Framing: "field"}, "国内昵称"},
+		{"备用密钥(sha256派生)", wbFieldMeta{KeyID: wbKeyIDOf(derivedB[:]), Suite: 1, Framing: "field"}, "国际昵称"},
+	} {
+		env, err := wbCodecInstance.seal(tc.meta, tc.want)
+		if err != nil {
+			t.Fatalf("%s seal: %v", tc.name, err)
+		}
+		e, ok := asEnvelope(env)
+		if !ok {
+			t.Fatalf("%s 出来的不是信封", tc.name)
+		}
+		got, err := wbCodecInstance.open(tc.meta.Framing, e)
+		if err != nil {
+			t.Fatalf("%s open: %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s 解出来 %q，期望 %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// 主文件缺失但有备用密钥时，不该直接判定「没有密钥」。
+func TestWBAtRestWorksWhenPrimaryKeyMissing(t *testing.T) {
+	old := hubRoot
+	dir := t.TempDir()
+	hubRoot = dir
+	*wbCodecInstance = wbCodec{}
+	t.Cleanup(func() { hubRoot = old; *wbCodecInstance = wbCodec{} })
+
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "wbatrest-port.key"),
+		[]byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := wbCodecInstance.seal(wbFieldMeta{KeyID: wbKeyIDOf(key), Suite: 1, Framing: "field"}, "只有备用密钥")
+	if err != nil {
+		t.Fatalf("wbatrest.key 不存在时也应能用备用密钥： %v", err)
+	}
+	e, _ := asEnvelope(env)
+	if got, err := wbCodecInstance.open("field", e); err != nil || got != "只有备用密钥" {
+		t.Fatalf("解回失败：%v %q", err, got)
+	}
+}
+
+// 一把都没有时才报错，且提示要提到两种文件名。
+func TestWBAtRestNoKeysErrors(t *testing.T) {
+	old := hubRoot
+	dir := t.TempDir()
+	hubRoot = dir
+	*wbCodecInstance = wbCodec{}
+	t.Cleanup(func() { hubRoot = old; *wbCodecInstance = wbCodec{} })
+
+	if _, err := wbCodecInstance.seal(wbFieldMeta{KeyID: "x", Suite: 1, Framing: "field"}, "v"); err == nil {
+		t.Fatal("没有任何密钥文件时必须报错")
 	}
 }

@@ -61,7 +61,7 @@ type MimoAuth struct {
 }
 
 func NewMimoAuth() *MimoAuth {
-	return &MimoAuth{client: &http.Client{Timeout: 20 * time.Second}}
+	return &MimoAuth{client: backendClient(20 * time.Second)}
 }
 
 // Invalidate 丢弃缓存，下次请求重新换票。

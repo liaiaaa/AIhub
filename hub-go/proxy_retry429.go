@@ -326,6 +326,11 @@ func recordRateLimitFromBody(auth AuthProvider, payload, body []byte) {
 		return
 	}
 
+	// 只记额度类信号，其它上游 4xx 一律不进台账（见 isQuotaSignal）。
+	if !isQuotaSignal(code, msg) {
+		return
+	}
+
 	kind, reason := rlKindModel, "限流"
 	if code == 11140 {
 		// 11140 实测是账号级：连 hi/1+1 都被拒（2026-10-12 验证<凭证目录A>），
@@ -333,6 +338,8 @@ func recordRateLimitFromBody(auth AuthProvider, payload, body []byte) {
 		kind, reason = rlKindAccount, "账号级风控(11140)"
 	} else if strings.Contains(msg, "frequency limit") {
 		reason = "用量限流(6004)"
+	} else if code == 14003 {
+		reason = "并发限流(14003)"
 	}
 
 	resetAt := time.Time{}
@@ -340,4 +347,22 @@ func recordRateLimitFromBody(auth AuthProvider, payload, body []byte) {
 		resetAt = t
 	}
 	rateLimitRecord(uid, nick, kind, model, code, reason, resetAt)
+}
+
+// isQuotaSignal 判断上游 4xx 是不是真的「额度/频控」，只有这类才配写进限流台账。
+//
+// 台账回答的是「这个账号限到几点」，请求本身的问题必须排除，否则控制台会拿一个
+// 兜底恢复时刻盖掉真实原因（2026-10-13：桥接层把并行工具结果排列弄坏，上游报
+// 400 code 11148，却被记成「deepseek-v4.1-flash 限流到 10:58」）。
+//
+// 收录 6004（用量频控，文案带 reset at）、14003（too many requests）、
+// 11140（账号级风控）。排除 11115 上下文超长、11128 渠道风控/首条消息、
+// 11133 参数被拒、11148 工具记录不完整、11150 思考档位不支持。
+func isQuotaSignal(code int, msg string) bool {
+	switch code {
+	case 6004, 14003, 11140:
+		return true
+	}
+	// 上游换码但文案仍写明频控的，按文案放行。
+	return strings.Contains(msg, "frequency limit") || strings.Contains(msg, "too many requests")
 }

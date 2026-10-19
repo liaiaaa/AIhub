@@ -107,10 +107,32 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// randUUID 造 v4 形态 UUID（8-4-4-4-12）。上游有的会话头收 32 位裸 hex、有的收
+// 带连字符的 UUID，两种形状都得能造（见 withConversationHeaders）。
+func randUUID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		now := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(now >> (uint(i%8) * 8))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10xx
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
 // newBackendClient 构造后端 HTTP 客户端：
 //  1. 优先环境变量代理（HTTP_PROXY/HTTPS_PROXY，与 Python httpx trust_env 一致）
 //  2. 环境变量无代理时，回退读取系统代理（Windows 注册表 / GNOME dconf）
 //  3. 都没有则直连。
+//
+// 2026-10-15 修复「失效代理导致整条线路 502」：代理地址来自进程启动时的环境，
+// 而本机代理软件常被关闭/换端口（scripts/start.sh 会把当时 shell 的
+// https_proxy 带进进程）。代理一旦失效，所有请求都 `proxyconnect tcp: dial
+// tcp 127.0.0.1:43345: connect: connection refused`，intl 整条线路不可用。
+// 现在代理候选地址在进程内**探测一次**：TCP 连不上就不走它，回落直连。
 func newBackendClient() *http.Client {
 	tr := &http.Transport{
 		MaxIdleConns:        10,
@@ -118,12 +140,94 @@ func newBackendClient() *http.Client {
 		TLSHandshakeTimeout: 15 * time.Second,
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			if u, _ := http.ProxyFromEnvironment(req); u != nil {
-				return u, nil
+				if proxyReachable(u) {
+					return u, nil
+				}
+				return nil, nil // 代理死了：直连
 			}
-			return systemProxy(req), nil
+			u := systemProxy(req)
+			if u != nil && !proxyReachable(u) {
+				return nil, nil
+			}
+			return u, nil
 		},
 	}
 	return &http.Client{Transport: tr}
+}
+
+// backendClient 带超时的后端 client。
+//
+// 所有「打后端域名」的地方都必须用它，不要用 &http.Client{Timeout: N} ——
+// 裸 client 用的是 http.DefaultTransport，它会无条件相信环境变量里的代理。
+// 而本机 start.sh 会把 shell 的 https_proxy 带进服务环境，代理一关就留下一个
+// 没人听的端口（今天实测：https_proxy=http://127.0.0.1:40643 根本没在听），
+// 于是裸 client 一律 proxyconnect 失败。推理线路走 newBackendClient 有死代理
+// 回落，所以表现为「线路能用、看板全红」这种最难解释的假故障
+// （2026-10-17 国际凭证 0/4 可用就是这么来的）。
+func backendClient(timeout time.Duration) *http.Client {
+	c := newBackendClient()
+	c.Timeout = timeout
+	return c
+}
+
+// proxyAliveCache 缓存代理地址的存活探测结果：地址 → (是否可用, 探测时间)。
+// 带 TTL：既避免每个请求都做 TCP 握手，又能在代理恢复/失效后自愈
+// （永久缓存会让「代理后来起来了」也用不上）。
+var (
+	proxyAliveMu    sync.Mutex
+	proxyAliveCache = map[string]proxyAliveEntry{}
+)
+
+type proxyAliveEntry struct {
+	alive bool
+	at    time.Time
+}
+
+// proxyAliveTTL 探测结果的有效期。
+const proxyAliveTTL = 30 * time.Second
+
+// proxyReachable 判断代理地址能否建立 TCP 连接；结果带 TTL 缓存。
+// 只做 TCP 可达性判断，不发 HTTP 请求（开销小、不依赖代理协议）。
+func proxyReachable(u *url.URL) bool {
+	if u == nil || u.Host == "" {
+		return false
+	}
+	addr := u.Host
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		// 没写端口：按 scheme 补默认端口
+		port := "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+		addr = net.JoinHostPort(addr, port)
+	}
+
+	now := time.Now()
+	proxyAliveMu.Lock()
+	if e, ok := proxyAliveCache[addr]; ok && now.Sub(e.at) < proxyAliveTTL {
+		proxyAliveMu.Unlock()
+		return e.alive
+	}
+	proxyAliveMu.Unlock()
+
+	conn, err := net.DialTimeout("tcp", addr, 1200*time.Millisecond)
+	alive := err == nil
+	if alive {
+		_ = conn.Close()
+	}
+
+	proxyAliveMu.Lock()
+	prev, had := proxyAliveCache[addr]
+	proxyAliveCache[addr] = proxyAliveEntry{alive: alive, at: now}
+	proxyAliveMu.Unlock()
+
+	// 只在状态变化时记日志，避免刷屏
+	if !alive && (!had || prev.alive) {
+		logHub("代理 %s 不可达（TCP 连接失败），改走直连（%s 后重探）", addr, proxyAliveTTL)
+	} else if alive && had && !prev.alive {
+		logHub("代理 %s 已恢复，恢复走代理", addr)
+	}
+	return alive
 }
 
 // directClient 直连客户端：完全忽略环境变量与系统代理。

@@ -1,9 +1,14 @@
 package main
 
 // 控制台网页（嵌入二进制，无外部依赖）。
-// 2026-10-07 重设计：顶栏 + 签到条 + 三列网格瓦片（替代原来的单列大卡片），
-// 每个瓦片：状态点/账号/额度/启停按钮。额度走 /api/credits（5 分钟缓存，
-// 过期后台补拉，见 credits.go），控制台轮询永远不碰上游。
+//
+// 2026-10-13 UI 布局 v2（按 docs/2026-10-13-UI布局设计-v2.md 终稿重写）：
+//   五页骨架：总览 / 线路与凭证 / 模型 / 用量 / 设置
+//   一条信息只有一个家：线路详情只在「线路与凭证」，网关状态只在总览 hero，
+//   维护类操作（探测/倍率/接管/上下文窗口）归「模型」与「设置」页。
+//   既往拍板全部保留：额度永不自动轮询、限流不编恢复时刻、停止线路视觉降权、
+//   模型限流显黄标、嵌入式单文件、深色跟随系统。
+//   本文件只含 HTML/CSS/JS；后端 /api/* 一律未动。
 
 const webHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -19,7 +24,7 @@ const webHTML = `<!DOCTYPE html>
     --brand:#3b5bfd; --brand2:#7c3aed;
     --radius:14px;
     --shadow:0 1px 2px rgba(16,24,40,.04), 0 4px 16px rgba(16,24,40,.05);
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Fira Code","JetBrains Mono",monospace;
   }
   * { box-sizing:border-box; }
   html, body { margin:0; }
@@ -28,12 +33,32 @@ const webHTML = `<!DOCTYPE html>
     background:var(--bg);
     background-image:radial-gradient(1100px 460px at 50% -220px, #eaefff 0%, rgba(234,239,255,0) 72%);
     color:var(--txt); font-size:14px; line-height:1.5;
-    padding:0 18px 34px;
     -webkit-font-smoothing:antialiased;
   }
-  .wrap { max-width:1080px; margin:0 auto; }
+  .layout { display:flex; min-height:100vh; }
+  .sidebar {
+    width:196px; flex:none; position:sticky; top:0; height:100vh;
+    display:flex; flex-direction:column; gap:4px;
+    padding:18px 12px; background:var(--card); border-right:1px solid var(--line);
+  }
+  .sidebar .brand { display:flex; align-items:center; gap:9px; font-size:16px;
+                    font-weight:700; padding:2px 8px 14px; }
+  .sidebar .brand::before {
+    content:""; width:24px; height:24px; border-radius:7px; flex:none;
+    background:linear-gradient(135deg,var(--brand),var(--brand2));
+    box-shadow:0 2px 8px rgba(59,91,253,.35);
+  }
+  .nav-item {
+    display:flex; align-items:center; gap:9px; width:100%; text-align:left;
+    font:inherit; font-size:13px; font-weight:550; color:var(--muted);
+    border:none; background:none; border-radius:9px; padding:9px 10px; cursor:pointer;
+  }
+  .nav-item:hover { background:#f3f5f9; color:var(--txt); }
+  .nav-item.active { background:#eef2ff; color:var(--brand); }
+  .nav-item .ico { width:16px; text-align:center; flex:none; }
+  .sidebar .foot { margin-top:auto; font-size:11px; color:var(--faint); padding:8px; line-height:1.7; }
+  .main { flex:1; min-width:0; padding:0 22px 34px; }
 
-  /* ---------- 顶栏（吸顶 + 毛玻璃） ---------- */
   .topbar {
     position:sticky; top:0; z-index:20;
     display:flex; align-items:center; gap:14px; flex-wrap:wrap;
@@ -41,19 +66,8 @@ const webHTML = `<!DOCTYPE html>
     background:linear-gradient(180deg, rgba(245,246,248,.97) 62%, rgba(245,246,248,0));
     backdrop-filter:saturate(1.6) blur(8px);
   }
-  .brand { display:flex; align-items:center; gap:10px; font-size:17px;
-           font-weight:700; letter-spacing:.2px; white-space:nowrap; }
-  .brand::before {
-    content:""; width:26px; height:26px; border-radius:8px; flex:none;
-    background:linear-gradient(135deg,var(--brand),var(--brand2));
-    box-shadow:0 2px 8px rgba(59,91,253,.35);
-  }
-  .brand .tag { font-size:11.5px; font-weight:500; color:var(--muted);
-                padding-left:10px; border-left:1px solid var(--line); }
-  #msg { flex:1; min-width:160px; font-size:12.5px; color:var(--muted);
-         min-height:18px; word-break:break-all; }
-  #msg.err { color:var(--err); font-weight:500; }
-  .top-actions { display:flex; gap:7px; }
+  .topbar .page-title { font-size:15px; font-weight:700; white-space:nowrap; }
+  .top-actions { display:flex; gap:7px; margin-left:auto; }
 
   button {
     font:inherit; font-size:12.5px; line-height:1;
@@ -68,669 +82,597 @@ const webHTML = `<!DOCTYPE html>
     color:#fff; font-weight:600; box-shadow:0 1px 2px rgba(59,91,253,.3);
   }
   button.primary:hover { background:linear-gradient(180deg,#3f5cf5,#3450e8); }
+  button.text { border-color:transparent; background:none; color:var(--muted); padding:6px 8px; }
+  button.text:hover { background:#f0f2f5; color:var(--txt); }
   button.danger { color:var(--err); border-color:#f2d3d0; }
   button.danger:hover { background:#fdf3f2; border-color:#e8b4b0; }
+  button.sm { font-size:12px; padding:6px 10px; }
 
-  /* ---------- 签到条 ---------- */
-  .checkin-bar {
-    display:flex; align-items:center; gap:11px; flex-wrap:wrap;
+  .page { max-width:1080px; margin:0 auto; }
+  .page[hidden] { display:none; }
+
+  .card {
     background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
-    padding:11px 14px; margin-bottom:14px; box-shadow:var(--shadow);
+    padding:14px 16px; box-shadow:var(--shadow); margin-bottom:14px;
   }
-  .checkin-bar .sum { flex:1; font-size:12.5px; color:var(--muted); min-width:200px; }
+  .card-h { display:flex; align-items:center; gap:9px; margin-bottom:10px; }
+  .card-h .t { font-weight:650; font-size:13.5px; flex:1; }
+  .card-h .tag { font-size:11px; font-weight:500; color:var(--faint); }
+
   .chip { font-size:11.5px; font-weight:600; padding:3px 11px; border-radius:999px;
-          white-space:nowrap; border:1px solid transparent; }
+          white-space:nowrap; border:1px solid transparent; display:inline-flex; align-items:center; gap:5px; }
   .chip.ok { background:#e8f7ee; color:#0b7a43; border-color:#c7ebd6; }
   .chip.no { background:#f1f3f6; color:#6b7280; border-color:#e5e8ed; }
   .chip.warn { background:#fdf4e3; color:#a35a00; border-color:#f6e2bd; }
+  .chip.bad { background:#fdecea; color:#b3261e; border-color:#f5c6c2; }
 
-  /* ---------- 瓦片网格 ---------- */
-  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
-  @media (max-width:880px) { .grid { grid-template-columns:repeat(2,1fr); } }
-  @media (max-width:580px) { .grid { grid-template-columns:1fr; } }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--off); flex:none;
+         transition:background .18s, box-shadow .18s; }
+  .dot.on { background:var(--ok); box-shadow:0 0 0 3px rgba(15,157,88,.16); }
+  .dot.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(199,119,0,.16); }
 
+  /* ---------- 总览 hero ---------- */
+  .hero { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+          box-shadow:var(--shadow); padding:14px 16px; margin-bottom:14px; }
+  .hero-verdict { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:700; }
+  .hero-verdict .mark { font-size:18px; }
+  .hero-verdict.ok .mark { color:var(--ok); }
+  .hero-verdict.bad .mark { color:var(--err); }
+  .hero-verdict .act { margin-left:auto; }
+  .hero-gw { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);
+             display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12.5px; color:var(--muted); }
+  .hero-gw .name { font-weight:650; color:var(--txt); }
+  .hero-gw .mono { font-family:var(--mono); font-size:12px; }
+  .hero-gw .link { color:var(--brand); cursor:pointer; }
+  .hero-gw .link:hover { text-decoration:underline; }
+  .hero-gw .spacer { flex:1; }
+
+  /* ---------- 需要关注 ---------- */
+  .attention { background:#fff8f0; border:1px solid #f6e2bd; border-radius:var(--radius);
+               padding:10px 14px; margin-bottom:14px; }
+  .attention .att-title { font-size:12px; font-weight:650; color:#a35a00; margin-bottom:4px; }
+  .attention .att-item { display:flex; align-items:center; gap:8px; font-size:12.5px;
+                         padding:3px 0; cursor:pointer; color:var(--txt); }
+  .attention .att-item:hover { color:var(--brand); }
+  .attention .att-item .why { color:var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* ---------- 线路开关列表（总览） ---------- */
+  .line-list { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+               box-shadow:var(--shadow); margin-bottom:14px; overflow:hidden; }
+  .line-row {
+    display:grid; grid-template-columns: 1.2fr 0.9fr 1.4fr 1fr auto;
+    gap:10px; align-items:center; padding:8px 14px; border-top:1px solid var(--line2);
+    cursor:pointer; min-height:34px;
+  }
+  .line-row:first-child { border-top:none; }
+  .line-row:hover { background:#f7f8fa; }
+  .line-row .lname { display:flex; align-items:center; gap:8px; font-weight:600; font-size:13px; min-width:0; }
+  .line-row .lname .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .line-row .lstate { font-size:12px; color:var(--muted); }
+  .line-row .lstate.on { color:var(--ok); font-weight:600; }
+  .line-row .lacct, .line-row .lcredit { font-size:12px; color:var(--muted);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .line-row .lcredit .credit-diff { margin-left:4px; }
+  .line-row .loper { text-align:right; }
+  .line-row.stopped { opacity:.55; }
+  .line-row.stopped:hover { opacity:1; }
+  .credit-diff { font-size:11px; font-weight:600; }
+  .credit-diff.up { color:var(--ok); }
+  .credit-diff.down { color:var(--err); }
+  .credit-burn {
+    display:inline-block; margin-left:6px; padding:1px 8px;
+    font-size:11px; font-weight:600; color:#8a5b00;
+    background:#fff3d6; border:1px solid #f0d48a; border-radius:20px;
+  }
+
+  /* ---------- 签到条 ---------- */
+  .checkin-bar {
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:11px 14px; margin-bottom:14px; box-shadow:var(--shadow);
+  }
+  .checkin-bar .tags { display:flex; gap:6px; flex-wrap:wrap; flex:1; }
+
+  /* ---------- 线路与凭证 ---------- */
+  .filter-bar { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .filter-bar .spacer { flex:1; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--card); }
+  .seg button { border:none; border-radius:0; padding:6px 12px; font-size:12.5px; color:var(--muted); }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button.on { background:#eef2ff; color:var(--brand); font-weight:600; }
+
+  .zkey { font:inherit; font-size:12px; width:100%; border:1px solid var(--line);
+          border-radius:9px; padding:7px 10px; }
+
+  .cred-sum {
+    display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted);
+    background:none; border:none; padding:4px 0; cursor:pointer; width:100%; text-align:left;
+  }
+  .cred-sum:hover { color:var(--txt); }
+  .cred-sum .arrow { transition:transform .18s; font-size:10px; color:var(--faint); }
+  .cred-sum.open .arrow { transform:rotate(90deg); }
+  .cred-risk-dot { width:7px; height:7px; border-radius:50%; background:var(--err); flex:none;
+                   box-shadow:0 0 0 3px rgba(217,48,37,.14); }
+  .cred-list { display:none; flex-direction:column; gap:7px; margin-top:2px; }
+  .cred-list.open { display:flex; }
+  .cred-card {
+    display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+    border:1px solid var(--line); border-radius:10px; padding:8px 10px; cursor:pointer;
+    background:#fbfcfd;
+  }
+  .cred-card.sel { border-color:#c7d4fe; background:#f5f7ff; }
+  .cred-card.bad { border-color:#f2c4c0; background:#fdecea; box-shadow:inset 3px 0 0 var(--err); }
+  .cred-card.warn { border-color:#f6e2bd; background:#fdf8ee; }
+  .cred-card .cn { font-weight:600; font-size:12.5px; }
+  .cred-card .nick { font-size:11.5px; color:var(--muted); }
+  .cred-card .bal { font-size:11.5px; color:var(--muted); font-family:var(--mono); }
+  .cred-card .why { font-size:11.5px; color:var(--muted); flex-basis:100%; }
+  .cred-badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; }
+  .cred-badge.ok { background:#e8f7ee; color:#0b7a43; }
+  .cred-badge.warn { background:#fdf4e3; color:#a35a00; }
+  .cred-badge.bad { background:#fdecea; color:#b3261e; }
+
+  .tile-credit { display:flex; align-items:center; gap:8px; font-size:12px;
+                 color:var(--muted); min-height:20px; }
+  .tile-credit .stale { color:var(--faint); }
+  .tile-credit .bad { color:var(--err); }
+
+  .grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+  @media (max-width:880px) { .grid { grid-template-columns:1fr; } }
   .tile {
     position:relative; overflow:hidden;
     background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
     padding:13px 14px 12px; display:flex; flex-direction:column; gap:7px;
     box-shadow:var(--shadow);
-    transition:border-color .18s, box-shadow .18s;
   }
-  /* 左侧状态色条：一眼看出哪条线路在跑 */
-  .tile::before {
-    content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
-    background:var(--line2); transition:background .18s;
-  }
-  .tile.on::before { background:linear-gradient(180deg,#22c55e,#0f9d58); }
-  .tile.warn::before { background:linear-gradient(180deg,#fbbf24,#d97706); }
-  .tile.on { border-color:#d9ecdf; }
-  .tile.warn { border-color:#f3e3c8; }
-
   .tile-head { display:flex; align-items:center; gap:8px; }
   .tile-name { font-weight:650; font-size:13.5px; flex:1;
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .tile-name .tag { font-size:11px; font-weight:500; color:var(--faint); margin-left:6px; }
-  .tile-port { font-size:11px; color:var(--faint); font-family:var(--mono); flex:none; }
-  .dot { width:8px; height:8px; border-radius:50%; background:var(--off); flex:none;
-         transition:background .18s, box-shadow .18s; }
-  .dot.on { background:var(--ok); box-shadow:0 0 0 3px rgba(15,157,88,.16); }
-  .dot.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(199,119,0,.16); }
+  .tile-port { font-size:11px; color:var(--faint); flex:none; }
   .tile-acct { font-size:12px; color:var(--muted); min-height:17px;
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tile-acct.off { color:var(--faint); }
-  .tile-credit { font-size:12px; color:var(--brand); min-height:17px;
-                 display:flex; align-items:center; gap:7px; }
-  .tile-credit span { flex:1; min-width:0; white-space:nowrap;
-                      overflow:hidden; text-overflow:ellipsis; }
-  .tile-credit span.stale { color:var(--faint); }
-  .tile-credit span.bad { color:var(--err); }
-  .credit-ref { padding:3px 9px; font-size:11px; flex:none; border-radius:7px; }
-  .cred-item { display:inline-flex; align-items:center; gap:3px; }
-  .cred-alert { display:block; width:100%; font-size:11px; margin-top:3px; color:var(--muted); }
-  .cred-alert.ok { color:var(--ok); }
-  .cred-alert.warn { color:var(--warn); }
-  .cred-badge { font-size:10px; font-weight:600; padding:1px 5px; border-radius:999px;
-                background:#eef0f4; color:var(--muted); }
-  .cred-badge.ok { background:#e8f7ee; color:#0b7a43; }
-  .cred-badge.warn { background:#fdf4e3; color:#a35a00; }
-  .cred-badge.bad { background:#fdeceb; color:var(--err); }
-  .credit-diff { font-weight:600; }
-  .credit-diff.up { color:var(--ok); }
-  .credit-diff.down { color:var(--err); }
-  .tile-btns { display:flex; gap:6px; margin-top:2px; flex-wrap:wrap; align-items:center; }
+  .tile-btns { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
   .tile-btns .spacer { flex:1; }
-  .tile-btns button { padding:6px 12px; }
-  .cred-radios { font-size:11.5px; color:var(--muted); display:flex; gap:9px;
-                 flex-wrap:wrap; align-items:center; width:100%; }
-  .cred-radios label { cursor:pointer; display:flex; align-items:center; gap:4px; }
-  .cred-radios input { accent-color:var(--brand); margin:0; }
-  .zkey { flex:1; min-width:120px; padding:6px 10px; border:1px solid var(--line);
-          border-radius:9px; font:inherit; font-size:12px; background:#fbfbfc; color:var(--txt); }
-  .zkey:focus { outline:none; border-color:var(--brand); background:var(--card);
-                box-shadow:0 0 0 3px rgba(59,91,253,.1); }
+  .golink { font-size:11.5px; color:var(--brand); cursor:pointer; text-align:right; }
+  .golink:hover { text-decoration:underline; }
 
-  /* ---------- 聚合线路 / Token 用量 ---------- */
-  .agg-card, .usage-card { margin-top:12px; }
-  .agg-row { display:flex; gap:7px; flex-wrap:wrap; align-items:center; margin-top:5px; }
-  .agg-row select {
-    padding:6px 10px; border:1px solid var(--line); border-radius:9px;
-    font:inherit; font-size:12px; background:#fbfbfc; color:var(--txt);
-    max-width:230px; cursor:pointer;
+  /* 已停止卡折叠成单行 */
+  /* 折叠只收「账号 / 凭证抽屉 / 按钮」，额度行必须留着 ——
+     停用的线路同样要能查额度。上一版我把整块 tile-body 都 display:none 掉了，
+     结果 Trae 一停就看不到「刷新额度」，只能先点开展开（用户 2026-10-17 二次指出）。 */
+  .tile.collapsed .tile-body > :not(.tile-credit) { display:none; }
+  .tile.collapsed { padding:9px 14px; opacity:.75; cursor:pointer; }
+  .tile.collapsed:hover { opacity:1; }
+  .tile .fold-arrow { font-size:10px; color:var(--faint); transition:transform .18s; }
+  .tile.collapsed .fold-arrow { transform:rotate(-90deg); }
+  .tile-head { cursor:pointer; }
+
+  /* ---------- 模型 / 通用表 ---------- */
+  .agg-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .agg-row select { font:inherit; font-size:12.5px; border:1px solid var(--line);
+                    border-radius:9px; padding:7px 9px; background:var(--card); }
+  .agg-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .agg-table th {
+    text-align:left; font-size:11.5px; font-weight:600; color:var(--muted);
+    padding:7px 10px; border-bottom:1px solid var(--line); white-space:nowrap;
   }
-  .agg-row select:focus { outline:none; border-color:var(--brand);
-                          box-shadow:0 0 0 3px rgba(59,91,253,.1); }
-  .agg-item { display:flex; align-items:center; gap:9px; font-size:12px;
-              color:var(--muted); padding:7px 10px; border-radius:9px;
-              background:#fafbfc; border:1px solid var(--line2); margin-top:6px; }
-  .agg-item .slug { font-family:var(--mono); color:var(--txt); font-size:11.5px; }
-  .agg-item button { padding:4px 10px; font-size:11.5px; border-radius:7px; }
-  .ratio { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px;
-           background:#eef0f4; color:var(--muted); flex:none; }
-  .ratio.free { background:#e8f7ee; color:#0b7a43; }
-  /* 依赖线路没启动的白名单行：整行弱化 + 明确标注，避免选到必失败的模型 */
-  .agg-item.down { background:#f7f8fa; border-style:dashed; }
-  .agg-item.down .slug, .agg-item.down > span { color:var(--faint); }
-  .agg-item.down .ratio { opacity:.55; }
-  .off-tag { font-size:10.5px; font-weight:600; padding:2px 7px; border-radius:999px;
-             background:#fdf4e3; color:#a35a00; border:1px solid #f6e2bd; flex:none; }
+  .agg-table td { padding:8px 10px; border-bottom:1px solid var(--line2); vertical-align:middle; }
+  .agg-table tr:last-child td { border-bottom:none; }
+  .agg-table tr.down td { background:#f7f8fa; color:var(--muted); }
+  .agg-table .slug { font-family:var(--mono); font-size:12px; }
+  .agg-table .op { text-align:right; white-space:nowrap; }
+  .ratio { font-size:11px; font-weight:600; color:var(--muted); background:#f3f5f9;
+           border:1px solid var(--line); border-radius:6px; padding:1px 7px; margin-left:6px; }
+  .ratio.free { color:#0b7a43; background:#e8f7ee; border-color:#c7ebd6; }
+  .off-tag { font-size:11px; font-weight:600; color:#8a94a0; background:#eef0f3;
+             border:1px solid var(--line); border-radius:6px; padding:1px 7px; }
+  .live-tag { font-size:11px; font-weight:600; color:#0b7a43; background:#e8f7ee;
+              border:1px solid #c7ebd6; border-radius:6px; padding:1px 7px; }
+  .gw-model { font-size:11px; font-family:var(--mono); background:#f3f5f9; border:1px solid var(--line);
+              border-radius:6px; padding:2px 7px; color:var(--muted); }
+  .gw-desc { font-size:12px; color:var(--muted); }
 
-  .usage-cols { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:10px; }
-  .usage-cols > div { min-width:0; }
-  @media (max-width:900px) { .usage-cols { grid-template-columns:1fr; } }
-  .usage-h { font-size:11px; font-weight:600; color:var(--faint);
-             margin-bottom:5px; letter-spacing:.5px; }
-  .usage-item { padding:6px 2px 7px; border-bottom:1px solid var(--line2); }
-  .usage-item:last-child { border-bottom:none; }
-  .usage-line { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
-  .usage-item .k { flex:none; width:74px; font-family:var(--mono); color:var(--txt); }
-  .usage-item .k.wide { width:auto; flex:1; min-width:0; white-space:nowrap;
-                        overflow:hidden; text-overflow:ellipsis; }
-  .usage-item .n { flex:none; width:56px; text-align:right; font-family:var(--mono);
-                   font-variant-numeric:tabular-nums; }
-  .usage-item .n.muted { color:var(--faint); }
-  .usage-item .n.sum { width:66px; color:var(--txt); font-weight:600; }
-  /* 构成条：段宽 = 该行合计占「所有行最大合计」的比例 × 行内构成，
-     所以既能比大小（哪天花得多），又能看构成（缓存/新输入/输出）。 */
-  .usage-bar { height:3px; border-radius:2px; background:var(--line2);
-               display:flex; overflow:hidden; margin-top:5px; }
-  .usage-bar i { display:block; height:100%; }
-  .usage-bar i.b1 { background:#3b5bfd; }   /* 新输入（计费） */
-  .usage-bar i.b2 { background:#a5b4fc; }   /* 缓存命中（折扣） */
-  .usage-bar i.b3 { background:#0f9d58; }   /* 输出 */
-  .usage-item .fail { font-style:normal; font-size:10px; font-weight:600;
-                      color:var(--err); margin-left:3px; }
-  .usage-item.head .usage-line { color:var(--faint); font-size:11px; font-weight:600; }
-  .usage-item.head { border-bottom:1px solid var(--line); padding-bottom:6px; }
-  .usage-hint { color:var(--faint); font-weight:500; margin-left:6px; font-size:11.5px; }
-  .usage-legend { display:flex; gap:12px; flex-wrap:wrap; font-size:11px;
-                  color:var(--faint); margin-top:6px; }
-  .usage-legend span { display:flex; align-items:center; gap:5px; }
-  .usage-legend b { width:9px; height:9px; border-radius:2px; display:block; }
-  @media (max-width:560px) { .usage-item .n.muted { display:none; } }
-  .usage-note { font-size:11.5px; color:var(--faint); }
-  .usage-sum { font-size:12.5px; font-weight:600; color:var(--brand); }
-  .foot-hint { margin-top:20px; font-size:11.5px; color:var(--faint); text-align:center; }
+  details.rollback { border:1px dashed var(--line); border-radius:var(--radius);
+                     background:#fafbfc; padding:0 14px; }
+  details.rollback > summary {
+    cursor:pointer; list-style:none; padding:12px 0; font-weight:650; font-size:13px;
+    display:flex; align-items:center; gap:8px; color:var(--muted);
+  }
+  details.rollback > summary::-webkit-details-marker { display:none; }
+  details.rollback > summary::before { content:"▸"; font-size:10px; color:var(--faint); }
+  details.rollback[open] > summary::before { content:"▾"; }
+  details.rollback .rb-body { padding-bottom:14px; }
+  .rb-note { font-size:12px; color:var(--muted); background:#fdf4e3; border:1px solid #f6e2bd;
+             border-radius:9px; padding:8px 11px; margin-bottom:12px; }
 
-  /* ---------- 深色模式 ---------- */
-  @media (prefers-color-scheme:dark) {
+  .ctx-row { display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+             font-size:12.5px; }
+  .ctx-row select { font:inherit; font-size:12.5px; border:1px solid var(--line);
+                    border-radius:9px; padding:6px 9px; background:var(--card); }
+  .ctx-row .cur { font-family:var(--mono); font-size:12px; color:var(--muted); }
+
+  /* ---------- 用量 ---------- */
+  .kpi-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+             gap:10px; margin-bottom:14px; }
+  .kpi { position:relative; background:var(--card); border:1px solid var(--line);
+         border-radius:var(--radius); box-shadow:var(--shadow);
+         padding:12px 15px 11px 18px; overflow:hidden; }
+  .kpi::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+                 background:linear-gradient(180deg,var(--brand),var(--brand2)); }
+  .kpi.k-ok::before { background:linear-gradient(180deg,#0f9d58,#4cd964); }
+  .kpi.k-warn::before { background:linear-gradient(180deg,#c77700,#f5b301); }
+  .kpi.k-err::before { background:linear-gradient(180deg,#d93025,#ff7a6b); }
+  .kpi .k-label { font-size:11.5px; color:var(--muted); }
+  .kpi .k-value { font-size:22px; font-weight:750; font-family:var(--mono);
+                  letter-spacing:-.02em; line-height:1.2; margin-top:2px; }
+  .kpi .k-sub { font-size:11.5px; color:var(--faint); margin-top:2px; }
+  .kpi .delta { font-size:11px; font-weight:650; margin-left:7px; padding:1px 7px;
+                border-radius:99px; vertical-align:3px; white-space:nowrap; }
+  .delta.up { color:var(--ok); background:rgba(15,157,88,.1); }
+  .delta.down { color:var(--err); background:rgba(217,48,37,.09); }
+
+  .trend { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+           box-shadow:var(--shadow); padding:13px 16px 8px; margin-bottom:14px; }
+  .trend .t-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:2px; }
+  .trend .t-title { font-weight:700; font-size:13.5px; }
+  .trend .t-legend { margin-left:auto; display:flex; gap:12px; font-size:11.5px; color:var(--muted); }
+  .trend .lg { display:inline-flex; align-items:center; gap:5px; }
+  .trend .lg i { width:9px; height:9px; border-radius:3px; display:inline-block; }
+  .trend .lg.lg-in i { background:linear-gradient(180deg,#5b7cff,#3b5bfd); }
+  .trend .lg.lg-out i { background:linear-gradient(180deg,#b9c7ff,#8ba0ff); }
+  .trend svg { width:100%; height:180px; display:block; }
+  .trend .empty { text-align:center; color:var(--faint); font-size:12.5px; padding:52px 0; }
+
+  .board2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+  @media (max-width:760px) { .board2 { grid-template-columns:1fr; } }
+  .board { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+           box-shadow:var(--shadow); padding:13px 14px 9px; }
+  .board .b-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  .board .b-title { font-weight:700; font-size:13.5px; }
+  .board .b-count { margin-left:auto; font-size:11px; color:var(--faint); }
+  .board .empty { text-align:center; color:var(--faint); font-size:12px; padding:18px 0; }
+  .b-row { display:grid; grid-template-columns:20px minmax(0,1fr) auto; gap:9px;
+           align-items:center; padding:6px 8px; margin:0 -8px; border-radius:9px; }
+  .b-row:hover { background:var(--line2); }
+  .b-rank { font-size:10.5px; font-weight:700; color:var(--faint); text-align:center;
+            font-family:var(--mono); line-height:18px; height:18px; }
+  .b-row.r1 .b-rank { background:linear-gradient(135deg,#f5b301,#f08c00); color:#fff; border-radius:6px; }
+  .b-row.r2 .b-rank { background:linear-gradient(135deg,#c3ccd9,#94a0ae); color:#fff; border-radius:6px; }
+  .b-row.r3 .b-rank { background:linear-gradient(135deg,#e3b28c,#cf9163); color:#fff; border-radius:6px; }
+  .b-name { display:flex; align-items:center; gap:6px; font-size:12.5px; min-width:0; }
+  .b-name .nm { font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .b-dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .b-bar { height:5px; border-radius:3px; background:var(--line2); margin-top:5px; overflow:hidden; }
+  .b-bar > div { height:100%; border-radius:3px; transition:width .3s; }
+  .b-val { text-align:right; white-space:nowrap; }
+  .b-val .v-tok { font-family:var(--mono); font-size:12px; font-weight:700; }
+  .b-val .v-sub { font-size:10.5px; color:var(--faint); margin-top:1px; }
+  .agg-table tbody tr:hover { background:var(--line2); }
+
+  /* ---------- toast ---------- */
+  #toast {
+    position:fixed; right:18px; bottom:18px; z-index:50;
+    display:flex; flex-direction:column; gap:8px; max-width:420px;
+  }
+  .toast-item {
+    background:#22262d; color:#fff; border-radius:10px; padding:10px 14px;
+    font-size:12.5px; box-shadow:0 6px 24px rgba(0,0,0,.25);
+    display:flex; gap:10px; align-items:flex-start;
+    animation:toastIn .18s ease-out;
+  }
+  .toast-item.err { background:#7a1f1a; }
+  .toast-item .t-close { cursor:pointer; opacity:.7; font-weight:700; }
+  .toast-item .t-close:hover { opacity:1; }
+  @keyframes toastIn { from { transform:translateY(8px); opacity:0; } to { transform:none; opacity:1; } }
+
+  .foot-hint { font-size:11.5px; color:var(--faint); text-align:center; padding:6px 0 2px; }
+
+  @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#0f1216; --card:#171b21; --line:#272d36; --line2:#20252c;
-      --txt:#e8eaed; --muted:#9aa3ad; --faint:#6b7280;
-      --brand:#7c96ff; --brand2:#a78bfa;
-      --shadow:0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+      --bg:#101318; --card:#171b22; --line:#262c36; --line2:#20252e;
+      --txt:#e8eaee; --muted:#9aa3ad; --faint:#6b7280;
     }
-    body { background-image:radial-gradient(1100px 460px at 50% -220px, #1a2033 0%, rgba(26,32,51,0) 72%); }
-    .topbar { background:linear-gradient(180deg, rgba(15,18,22,.97) 62%, rgba(15,18,22,0)); }
-    button:hover { background:#1e242c; border-color:#333a44; }
-    .zkey, .agg-row select { background:#12161b; }
-    .agg-item { background:#141820; }
-    .chip.ok { background:#12301f; color:#5fd493; border-color:#1d4a30; }
-    .chip.no { background:#1c2027; color:#9aa3ad; border-color:#2a3038; }
-    .chip.warn { background:#33260f; color:#e0a54a; border-color:#4a3818; }
-    .ratio { background:#222831; color:#9aa3ad; }
-    .ratio.free { background:#12301f; color:#5fd493; }
-    .agg-item.down { background:#13161b; }
-    .off-tag { background:#33260f; color:#e0a54a; border-color:#4a3818; }
-    .usage-bar i.b1 { background:#7c96ff; }
-    .usage-bar i.b2 { background:#465081; }
-    .usage-bar i.b3 { background:#22c55e; }
-    .tile.on { border-color:#1f3a2a; }
-    .tile.warn { border-color:#3a2f18; }
+    body { background-image:radial-gradient(1100px 460px at 50% -220px, #1a2030 0%, rgba(26,32,48,0) 72%); }
+    .topbar { background:linear-gradient(180deg, rgba(16,19,24,.97) 62%, rgba(16,19,24,0)); }
+    .nav-item:hover { background:#20252e; }
+    .nav-item.active { background:#1e2540; color:#8ba0ff; }
+    button:hover { background:#20252e; border-color:#333a46; }
     button.danger { border-color:#4a2622; }
     button.danger:hover { background:#2a1714; }
+    .cred-card { background:#14181f; }
+    .cred-card.sel { background:#1a2030; border-color:#2e3a5c; }
+    .cred-card.bad { background:#2a1714; border-color:#4a2622; }
+    .cred-card.warn { background:#2a2312; border-color:#4a3c18; }
+    .agg-table tr.down td { background:#14181f; }
+    .ratio { background:#20252e; }
+    .ratio.free { background:#12281c; }
+    details.rollback { background:#14181f; }
+    .rb-note { background:#2a2312; border-color:#4a3c18; }
+    .gw-model { background:#20252e; }
+    .chip.no { background:#20252e; }
+    .attention { background:#2a2312; border-color:#4a3c18; }
+    .attention .att-title { color:#e0a94a; }
+    .seg button.on { background:#1e2540; color:#8ba0ff; }
+    .line-row:hover { background:#20252e; }
+    .hero-gw { border-top-color:#262c36; }
+    #toast .toast-item { background:#22262d; }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="topbar">
-    <div class="brand">AIHub<span class="tag">本地模型网关 · Go</span></div>
-    <div id="msg"></div>
-    <div class="top-actions">
-      <button onclick="refreshAll()">刷新</button>
-      <button onclick="stopAll()">全部停止</button>
-      <button class="danger" onclick="exitHub()">退出</button>
-    </div>
-  </div>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">AIHub</div>
+    <button class="nav-item active" data-page="dash" onclick="switchPage('dash')">
+      <span class="ico">◎</span>总览</button>
+    <button class="nav-item" data-page="lines" onclick="switchPage('lines')">
+      <span class="ico">▤</span>线路与凭证</button>
+    <button class="nav-item" data-page="models" onclick="switchPage('models')">
+      <span class="ico">⇄</span>模型</button>
+    <button class="nav-item" data-page="usage" onclick="switchPage('usage')">
+      <span class="ico">▥</span>用量</button>
+    <button class="nav-item" data-page="settings" onclick="switchPage('settings')">
+      <span class="ico">⚙</span>设置</button>
+    <div class="foot">本地模型网关 · Go</div>
+  </aside>
 
-  <div class="checkin-bar">
-    <button class="primary" onclick="doCheckin()">一键签到</button>
-    <button onclick="doIntlCheckin()">国际活跃上报</button>
-    <span class="chip no" id="checkin-chip">…</span>
-    <span class="sum" id="checkin-sum"></span>
-  </div>
-
-  <div class="grid" id="grid"></div>
-
-  <div class="tile agg-card">
-    <div class="tile-head"><span class="dot" id="agg-dot"></span>
-      <span class="tile-name">Codex 聚合线路<span class="tag">:8790 · 用 Codex 时才启动</span></span>
-      <span class="tile-port" id="agg-count"></span></div>
-    <div class="tile-btns">
-      <button class="primary" onclick="act('agg/start')">启动聚合</button>
-      <button onclick="act('agg/stop')">停止聚合</button>
-    </div>
-    <div class="agg-row">
-      <select id="agg-line" onchange="aggLoadLineModels()">
-        <option value="intl">国际 WorkBuddy</option>
-        <option value="dom">国内 WorkBuddy</option>
-        <option value="qoder">Qoder</option>
-        <option value="trae">Trae</option>
-      </select>
-      <select id="agg-model"><option value="">—</option></select>
-      <button onclick="aggAdd()">添加到 Codex</button>
-    </div>
-    <div id="agg-list"></div>
-  </div>
-
-  <div class="tile usage-card">
-    <div class="tile-head">
-      <span class="tile-name">Token 用量<span class="tag"> · Codex 聚合口 · 每次请求实测</span></span>
-      <span class="usage-sum" id="usage-sum"></span></div>
-    <div class="agg-row">
-      <select id="usage-days" onchange="usageRefresh()">
-        <option value="7">近 7 天</option>
-        <option value="14" selected>近 14 天</option>
-        <option value="30">近 30 天</option>
-        <option value="0">全部</option>
-      </select>
-      <button onclick="usageRefresh()">刷新用量</button>
-      <span class="usage-note" id="usage-note">统计从聚合口(:8790)取样，直连各线路端口的请求不计入</span>
-    </div>
-    <div class="usage-cols">
-      <div>
-        <div class="usage-h">按天</div>
-        <div class="usage-item head"><div class="usage-line"><span class="k">日期</span><span class="n">请求</span>
-          <span class="n">输入</span><span class="n muted">缓存</span><span class="n">输出</span><span class="n sum">合计</span></div></div>
-        <div id="usage-day-list"></div>
-      </div>
-      <div>
-        <div class="usage-h">按模型</div>
-        <div class="usage-item head"><div class="usage-line"><span class="k wide">线路 · 模型</span><span class="n">请求</span>
-          <span class="n">输入</span><span class="n muted">缓存</span><span class="n">输出</span><span class="n sum">合计</span></div></div>
-        <div id="usage-model-list"></div>
+  <main class="main">
+    <div class="topbar">
+      <span class="page-title" id="page-title">总览</span>
+      <div class="top-actions">
+        <button onclick="refreshAll()">刷新</button>
+        <button class="danger" onclick="exitHub()">退出</button>
       </div>
     </div>
-  </div>
 
-  <div class="foot-hint">各代理均为 OpenAI 兼容接口 · 额度不自动查询，每个平台单独点该瓦片上的「刷新额度」</div>
+    <!-- ===== 页 1 · 总览 ===== -->
+    <div class="page" id="page-dash">
+      <div class="hero">
+        <div class="hero-verdict" id="hero-verdict"><span class="mark">…</span><span id="hero-text">检测中…</span><span class="act" id="hero-act"></span></div>
+        <div class="hero-gw" id="hero-gw" onclick="switchPage('settings')" style="cursor:pointer">
+          <span class="name">统一网关 :8790</span>
+          <span id="hero-gw-state">检测中…</span>
+        </div>
+        <div class="hero-gw">
+          <span>Codex <span id="cc-codex">—</span></span>
+          <span>Claude Code <span id="cc-claude">—</span></span>
+          <span>Claude Desktop <span id="cc-desktop">—</span></span>
+          <span class="spacer"></span>
+          <span>目录模型 <span class="mono" id="hero-models">—</span></span>
+          <span>上下文窗口 <span class="mono" id="hero-ctx">—</span></span>
+        </div>
+      </div>
+
+      <div id="attention"></div>
+
+      <div class="line-list" id="line-list"></div>
+
+      <div class="checkin-bar">
+        <button class="primary" onclick="doCheckin()">一键签到</button>
+        <button onclick="doIntlCheckin()">国际活跃上报</button>
+        <span class="chip no" id="checkin-chip">…</span>
+        <span class="tags" id="checkin-tags"></span>
+      </div>
+
+      <div class="foot-hint">客户端全部走 :8790 统一网关 · 额度不自动查询（风控），在「线路与凭证」页手动刷新</div>
+    </div>
+
+    <!-- ===== 页 2 · 线路与凭证 ===== -->
+    <div class="page" id="page-lines" hidden>
+      <div class="filter-bar">
+        <span class="seg" id="line-filter">
+          <button class="on" data-f="all" onclick="setLineFilter('all')">全部</button>
+          <button data-f="up" onclick="setLineFilter('up')">运行中</button>
+          <button data-f="down" onclick="setLineFilter('down')">已停止</button>
+        </span>
+        <span class="spacer"></span>
+        <button class="text" onclick="loadCredits(true)">刷新全部额度</button>
+        <button class="danger sm" onclick="stopAll()">全部停止</button>
+      </div>
+      <div class="grid" id="lines-grid"></div>
+    </div>
+
+    <!-- ===== 页 3 · 模型 ===== -->
+    <div class="page" id="page-models" hidden>
+      <div class="card">
+        <div class="card-h"><span class="t">客户端接入地址</span>
+          <span class="tag">所有客户端都走这一个网关口</span></div>
+        <table class="agg-table">
+          <thead><tr><th style="width:200px">客户端类型</th><th>填写内容</th><th class="op" style="width:64px"></th></tr></thead>
+          <tbody>
+            <tr><td>DSH / 任意 OpenAI 兼容客户端<br><span style="color:var(--faint);font-size:11px">也适用于 cherry studio、nextchat 等</span></td>
+              <td><div style="font-family:var(--mono);font-size:12px">API 地址：<b>http://127.0.0.1:8790/v1</b><br>
+                API Key：<b>hub-local</b>（任意非空值即可）<br>
+                模型名：目录里的模型，格式为 ccs-线路/模型名，如 <b>ccs-intl/deepseek-v4.1-flash</b>（= 国际 · deepseek-v4.1-flash），完整列表见下方目录表</div></td>
+              <td class="op"><button class="text sm" onclick="copyText('http://127.0.0.1:8790/v1')">复制地址</button></td></tr>
+            <tr><td>Codex</td>
+              <td><div style="font-family:var(--mono);font-size:12px">~/.codex/config.toml → [model_providers.aihub]<br>
+                base_url = http://127.0.0.1:8790/v1（wire_api = "responses"）<br>
+                顶部 model_provider = "aihub"　→ 已由「设置·接管」自动完成</div></td>
+              <td class="op"><button class="text sm" onclick="copyText('[model_providers.aihub]\nname = &quot;AIHub&quot;\nbase_url = &quot;http://127.0.0.1:8790/v1&quot;\nwire_api = &quot;responses&quot;\nrequires_openai_auth = true')">复制配置</button></td></tr>
+            <tr><td>Claude Code / CLI</td>
+              <td><div style="font-family:var(--mono);font-size:12px">~/.claude/settings.json → env<br>
+                ANTHROPIC_BASE_URL = http://127.0.0.1:8790<br>
+                ANTHROPIC_AUTH_TOKEN = hub-local　→ 已由「设置·接管」自动完成</div></td>
+              <td class="op"><button class="text sm" onclick="copyText('ANTHROPIC_BASE_URL=http://127.0.0.1:8790\nANTHROPIC_AUTH_TOKEN=hub-local')">复制配置</button></td></tr>
+            <tr><td>Claude Desktop</td>
+              <td><div style="font-family:var(--mono);font-size:12px">3P 网关 profile（自动写入）：<br>
+                inferenceGatewayBaseUrl = http://127.0.0.1:8790/claude-desktop<br>
+                模型菜单：claude-sonnet-5 / claude-opus-5 / claude-fable-5 / claude-haiku-4-5</div></td>
+              <td class="op"><button class="text sm" onclick="copyText('http://127.0.0.1:8790/claude-desktop')">复制地址</button></td></tr>
+          </tbody>
+        </table>
+        <div class="ctx-row" style="margin-top:8px">
+          <span class="hint">统一网关 :8790 同时提供三种协议：/v1/responses（Codex）、/v1/messages（Claude 系）、/v1/chat/completions（OpenAI 兼容）。手填后重启对应客户端生效。</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span class="t">目录模型（客户端可见列表）</span>
+          <span class="tag" id="gw-chip">统一网关 —</span></div>
+        <div class="agg-row">
+          <select id="agg-line" onchange="aggLoadLineModels()">
+            <option value="intl">国际 WorkBuddy</option>
+            <option value="dom">国内 WorkBuddy</option>
+            <option value="qoder">Qoder</option>
+            <option value="trae">Trae</option>
+            <option value="zcode">Zcode</option>
+            <option value="oc">OpenCode 免费档</option>
+          </select>
+          <select id="agg-model"><option value="">—</option></select>
+          <button class="primary sm" onclick="aggAdd()">加入目录</button>
+        </div>
+        <table class="agg-table">
+          <thead><tr><th style="width:34%">模型标识（含元数据）</th><th>真实模型 · 线路 · 倍率</th><th style="width:120px">状态</th><th class="op" style="width:70px">操作</th></tr></thead>
+          <tbody id="agg-list"></tbody>
+        </table>
+        <div class="ctx-row" style="margin-top:10px">
+          <span class="hint">动态路由已内置：任意「线路.模型」「ccs-线路/模型」都可直接用，无需加入目录；目录只决定客户端模型列表展示。Codex 端改配置后需重开会话。</span>
+        </div>
+      </div>
+
+      <details class="rollback" id="probe-details">
+        <summary>探测新模型 <span class="tag">倍率/免费只标有依据的数据</span></summary>
+        <div class="rb-body">
+          <div class="agg-row">
+            <button class="primary sm" onclick="probeModels()" id="probe-btn">探测</button>
+            <span class="tag" id="probe-note">逐线路对比目录与上游（qoder/zcode 实时目录；dom/intl 尽力而为）</span>
+          </div>
+          <div id="probe-result"></div>
+        </div>
+      </details>
+
+      <details class="rollback" id="ratios-details">
+        <summary>倍率覆盖表 <span class="tag">以客户端实际显示为准，手动更新</span></summary>
+        <div class="rb-body">
+          <div class="rb-note">各平台促销频繁变动，这里维护你的倍率覆盖表（优先于内置表与 Qoder 官方目录）。
+            格式：{"线路":{"模型":倍率}}，0 = 免费，0.06 = 0.06x。没有的模型在探测/目录里显示 —（不瞎编）。</div>
+          <textarea id="ratios-json" class="zkey" rows="8" style="font-family:var(--mono)"></textarea>
+          <div class="agg-row" style="margin-top:8px">
+            <button class="primary sm" onclick="saveRatios()">保存倍率</button>
+            <button class="sm" onclick="loadRatios()">重新加载</button>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <!-- ===== 页 4 · 用量 ===== -->
+    <div class="page" id="page-usage" hidden>
+      <div class="filter-bar">
+        <span class="seg" id="usage-seg">
+          <button data-d="1" onclick="setUsageDays(1)">今天</button>
+          <button class="on" data-d="7" onclick="setUsageDays(7)">近 7 天</button>
+          <button data-d="30" onclick="setUsageDays(30)">近 30 天</button>
+          <button data-d="0" onclick="setUsageDays(0)">全部</button>
+        </span>
+        <span class="spacer"></span>
+        <span class="tag">统计走 :8790 网关的请求</span>
+        <button class="text" onclick="loadUsage()">刷新</button>
+      </div>
+      <div id="usage-body"><div class="gw-desc" id="usage-empty">加载中…</div></div>
+    </div>
+
+    <!-- ===== 页 5 · 设置 ===== -->
+    <div class="page" id="page-settings" hidden>
+      <div class="card">
+        <div class="card-h"><span class="t">客户端接管</span>
+          <span class="tag">改配置文件并自动备份 *.bak-hubgo-时间戳</span></div>
+        <table class="agg-table">
+          <thead><tr><th>客户端</th><th>配置文件</th><th>当前指向</th><th class="op" style="width:150px">操作</th></tr></thead>
+          <tbody>
+            <tr><td>Codex</td><td style="font-family:var(--mono);font-size:11.5px">~/.codex/config.toml</td><td id="st-codex">—</td><td class="op"><button class="sm" onclick="takeover('codex')">接管</button> <button class="sm" onclick="restoreClient('codex')">恢复官方</button></td></tr>
+            <tr><td>Claude Code / CLI<span style="color:var(--faint)">（若未安装可忽略）</span></td><td style="font-family:var(--mono);font-size:11.5px">~/.claude/settings.json</td><td id="st-claude">—</td><td class="op"><button class="sm" onclick="takeover('claude')">接管</button> <button class="sm" onclick="restoreClient('claude')">恢复官方</button></td></tr>
+            <tr><td>Claude Desktop</td><td style="font-family:var(--mono);font-size:11.5px">~/.config/Claude-3p/</td><td id="st-desktop">未接管</td><td class="op"><button class="sm" onclick="takeover('desktop')">接管</button></td></tr>
+          </tbody>
+        </table>
+        <div class="ctx-row" style="margin-top:8px">
+          <span class="hint">接管 = 配置指向 :8790（Codex 的官方登录身份与官方模型 gpt-* 保留，经网关透传与第三方模型共存）；恢复官方 = 回到纯官方直连。均自动备份，改动重开客户端生效。</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span class="t">网关参数</span></div>
+        <div class="ctx-row">
+          <span>向 Codex 宣告的上下文窗口：</span>
+          <span class="cur" id="ctx-cur">—</span>
+        </div>
+        <div class="ctx-row" style="margin-top:8px">
+          <select id="ctx-sel" onchange="ctxSet()">
+            <option value="1000000">1M（默认）</option>
+            <option value="950000">950K</option>
+            <option value="900000">900K</option>
+            <option value="800000">800K</option>
+            <option value="600000">600K</option>
+            <option value="400000">400K</option>
+            <option value="200000">200K</option>
+            <option value="128000">128K</option>
+            <option value="custom">自定义…</option>
+          </select>
+          <span class="hint" style="font-size:11.5px;color:var(--faint)">调低让 Codex 更早自动压缩，避免逼近上游 1M 硬顶时 400。Codex 端重开会话生效。</span>
+        </div>
+      </div>
+    </div>
+  </main>
 </div>
 
+<div id="toast"></div>
+
 <script>
+// quota:true = 这条线路有「账号额度」可查（后端 creditKeys 里就有它）。
+// OpenCode 免费档走匿名公开凭据（Bearer public），上游没有账号额度这回事；
+// MiMo/Zcode 也不在 /api/credits 覆盖范围内 —— 给它们画一行「额度未查询」
+// 加一个点了只会回「未知平台」的按钮，是噪音（用户 2026-10-17 指出）。
+// 两边一致性由 TestServiceQuotaFlagsMatchCreditKeys 钉住。
 const SERVICES = [
-  { key:'dom',   name:'国内 WorkBuddy', port:8787 },
-  { key:'intl',  name:'国际 WorkBuddy AI', port:8799, cred:true },
-  { key:'qoder', name:'Qoder CN（阿里）', port:8797 },
-  { key:'trae',  name:'Trae CN（字节）', port:8795 },
-  { key:'mimo',  name:'MiMo（小米）', port:8798 },
-  { key:'zcode', name:'Zcode（Z.ai）', port:8796, zkey:true },
+  { key:'dom',   name:'国内 WorkBuddy', cred:true,  quota:true },
+  { key:'intl',  name:'国际 WorkBuddy AI', cred:true,  quota:true },
+  { key:'qoder', name:'Qoder CN（阿里）', quota:true },
+  { key:'trae',  name:'Trae CN（字节）', quota:true },
+  { key:'mimo',  name:'MiMo（小米）' },
+  { key:'zcode', name:'Zcode（Z.ai）', zkey:true },
+  { key:'oc',    name:'OpenCode 免费档' },
 ];
-let state = null, credits = null, nicks = {}, credStatus = null;
-const CREDIT_KEYS = ['dom','intl','qoder','trae'];
-const msgEl = document.getElementById('msg');
+const HUBGO_LINES = {
+  'hubgo-dom':  { name:'国内 WorkBuddy' },
+  'hubgo-intl': { name:'国际 WorkBuddy' },
+  'hubgo-qoder':{ name:'Qoder' },
+  'hubgo-trae': { name:'Trae' },
+  'hubgo-zcode':{ name:'Zcode' },
+};
+let state = null, credits = null, nicks = {}, usageData = null;
+// credStatus 按线路分组：{ dom:[…], intl:[…] }。以前只有一个数组（国际专用），
+// 国内接同一套卡片看板时必须先把它参数化，否则两条线的凭证会互相覆盖。
+let credStatus = {};
+let usageDays = 7, usagePrev = null;
+let lineFilter = 'all';
+let desktopTakenOver = false;
+const msgEl = null;
 
+// ---------- toast（取代顶栏 #msg） ----------
 function showMsg(text, err) {
-  msgEl.textContent = text || '';
-  msgEl.className = err ? 'err' : '';
+  if (!text) return;
+  const box = document.getElementById('toast');
+  const item = document.createElement('div');
+  item.className = 'toast-item' + (err ? ' err' : '');
+  item.innerHTML = '<span style="flex:1">' + text + '</span><span class="t-close">×</span>';
+  item.querySelector('.t-close').onclick = function () { item.remove(); };
+  box.appendChild(item);
+  setTimeout(function () { item.remove(); }, err ? 8000 : 5000);
 }
 
-function creditRow(s) {
-  const span = '<span id="credit-' + s.key + '">额度 —</span>';
-  if (CREDIT_KEYS.indexOf(s.key) < 0) return '<div class="tile-credit">' + span + '</div>';
-  return '<div class="tile-credit">' + span +
-    '<button class="credit-ref" onclick="loadCredits(true,\'' + s.key + '\')">刷新额度</button></div>';
-}
-function ensureTiles() {
-  const grid = document.getElementById('grid');
-  if (grid.children.length) return;
-  grid.innerHTML = SERVICES.map(function (s) {
-    let extra = '';
-    if (s.cred) extra += '<span class="cred-radios" id="cred-row"></span><div class="cred-alert" id="cred-alert"></div>';
-    if (s.zkey) extra += '<input type="password" class="zkey" id="zcode-apikey" placeholder="可选 API Key，留空自动读桌面端凭据">';
-    return '<div class="tile">' +
-      '<div class="tile-head"><span class="dot" id="dot-' + s.key + '"></span>' +
-      '<span class="tile-name">' + s.name + '</span>' +
-      '<span class="tile-port">:' + s.port + '</span></div>' +
-      '<div class="tile-acct" id="acct-' + s.key + '"></div>' +
-      creditRow(s) +
-      '<div class="tile-btns">' + extra +
-      '<button class="primary" onclick="act(\'' + s.key + '/start\')">启动</button>' +
-      '<button onclick="act(\'' + s.key + '/stop\')">停止</button>' +
-      (s.cred ? '<span class="spacer"></span><button onclick="act(\'intl/switch\')">换凭证并重启</button>' : '') +
-      '</div></div>';
-  }).join('');
-}
-
-function updateTiles() {
-  if (!state) return;
-  SERVICES.forEach(function (s) {
-    const d = state[s.key] || { up:false, ok:false, detail:'' };
-    const dot = document.getElementById('dot-' + s.key);
-    const acct = document.getElementById('acct-' + s.key);
-    if (!dot) return;
-    const tileEl = dot.closest('.tile');
-    if (d.up && d.ok) {
-      dot.className = 'dot on';
-      if (tileEl) { tileEl.classList.add('on'); tileEl.classList.remove('warn'); }
-      acct.className = 'tile-acct';
-      const nick = nicks[s.key];
-      acct.textContent = '账号 ' + (nick || d.detail || '—');
-    } else if (d.up) {
-      dot.className = 'dot warn';
-      if (tileEl) { tileEl.classList.add('warn'); tileEl.classList.remove('on'); }
-      acct.className = 'tile-acct';
-      acct.textContent = d.detail || '端口占用 /health 异常';
-    } else {
-      dot.className = 'dot';
-      if (tileEl) { tileEl.classList.remove('on'); tileEl.classList.remove('warn'); }
-      acct.className = 'tile-acct off';
-      acct.textContent = '已停止';
-    }
-    const el = document.getElementById('credit-' + s.key);
-    if (!el) return;
-    const c = credits && credits[s.key];
-    if (!c || !c.text) {
-      el.textContent = '额度未查询';
-      el.className = 'stale';
-    } else if (!c.ok) {
-      el.textContent = c.text;
-      el.className = c.text === '查询中…' ? 'stale' : 'bad';
-    } else {
-      // 国际版带 diff：「较 10-11 +30」——直接回答「昨天上报的活跃到账了吗」，
-      // 不必去官网翻积分明细。用 innerHTML 是为了给差额上色。
-      var diffHtml = '';
-      if (c.diff) {
-        var up = c.diff.indexOf('+') >= 0;
-        var flat = c.diff.indexOf('持平') >= 0;
-        diffHtml = ' <span class="credit-diff' + (up ? ' up' : (flat ? '' : ' down')) + '">' +
-          c.diff + '</span>';
-      }
-      el.innerHTML = c.text + (c.fetched_at ? '（' + c.fetched_at + '）' : '') + diffHtml;
-      el.className = '';
-    }
+// ---------- 页面切换 ----------
+const PAGE_TITLES = { dash:'总览', lines:'线路与凭证', models:'模型', usage:'用量', settings:'设置' };
+function switchPage(name) {
+  document.querySelectorAll('.page').forEach(function (p) { p.hidden = true; });
+  document.getElementById('page-' + name).hidden = false;
+  document.querySelectorAll('.nav-item').forEach(function (b) {
+    b.classList.toggle('active', b.dataset.page === name);
   });
-  renderCreds();
-}
-
-// 国际版凭证区：单选 + 可用性徽标。
-//
-// 2026-10-12 新增：显示每个账号「能不能用 / 限流到几点 / 余额」。
-// 原先只有单选按钮，被限到几点得靠用户记忆（上游 6004 文案里带恢复时刻，
-// 但只出现在报错那一刻）。数据来自 /api/intl/creds（见 rate_limit.go）。
-//
-// 重建条件用「选中项 + 各账号状态指纹」，任一变化才重建——避免每次
-// 2 秒轮询都重建 DOM 打断用户正在点的单选。
-function credsSig(list) {
-  return (list || []).map(function (c) {
-    return c.name + ':' + c.state + ':' + (c.until || '') + ':' + (c.ok ? '1' : '0');
-  }).join('|');
-}
-
-// 倒计时本地刷新用的定时器（每 30 秒重算一次剩余时长文案）。
-// 为什么不在 credsSig 里放 remain_txt：它是「还剩 N 分钟」，随时间自然变化，
-// 放进去会导致每轮都重建 DOM。改为「不重建结构、只更新文本」。
-let credTickTimer = null;
-
-function renderCreds() {
-  const row = document.getElementById('cred-row');
-  const alert = document.getElementById('cred-alert');
-  if (!row || !state) return;
-  const list = credStatus || [];
-  if (!list.length) return;
-  const sig = state.intl_cred + '#' + credsSig(list);
-  if (row.dataset.sig !== sig) {
-    row.dataset.sig = sig;
-    row.innerHTML = '<span>凭证：</span>';
-    list.forEach(function (c) {
-      const lab = document.createElement('label');
-      lab.className = 'cred-item';
-      lab.dataset.name = c.name;
-      lab.title = credTitle(c);
-      const inp = document.createElement('input');
-      inp.type = 'radio';
-      inp.name = 'cred';
-      inp.value = c.name;
-      inp.checked = (c.name === state.intl_cred);
-      inp.onchange = function () { setCred(c.name); };
-      lab.appendChild(inp);
-      lab.appendChild(document.createTextNode(c.name));
-      // 状态徽标：可用(绿✓) / 限流(黄，显示倒计时) / 风控(红)
-      const b = document.createElement('span');
-      b.className = 'cred-badge';
-      lab.appendChild(b);
-      row.appendChild(lab);
-    });
-  }
-  // 徽标文本每次刷新（含倒计时）
-  list.forEach(function (c) {
-    const lab = row.querySelector('.cred-item[data-name="' + c.name + '"]');
-    if (!lab) return;
-    lab.title = credTitle(c);
-    const b = lab.querySelector('.cred-badge');
-    if (!b) return;
-    b.className = 'cred-badge ' + credCls(c);
-    b.textContent = credBadgeText(c);
-  });
-  renderCredAlert(alert, list);
-
-  // 本地定时刷新倒计时（不请求后端；纯前端重算）
-  if (credTickTimer) clearInterval(credTickTimer);
-  if (list.some(function (c) { return !c.ok && c.until && c.upstream_reset; })) {
-    credTickTimer = setInterval(function () {
-      (credStatus || []).forEach(function (c) {
-        const lab = row.querySelector('.cred-item[data-name="' + c.name + '"]');
-        if (!lab) return;
-        const b = lab.querySelector('.cred-badge');
-        if (b) b.textContent = credBadgeText(c);
-      });
-      renderCredAlert(document.getElementById('cred-alert'), credStatus || []);
-    }, 30000);
-  }
-}
-
-function credCls(c) {
-  if (c.ok) return 'ok';
-  if (c.state === '风控') return 'bad';
-  if (c.state === '限流') return 'warn';
-  return '';
-}
-
-// 徽标文案：可用显示 ✓；被限时显示「限流到 10:24」——把恢复时刻直接摆在
-// 界面上，不再只塞进悬停提示（用户反馈：看不见恢复时刻与剩余时间）。
-function credBadgeText(c) {
-  if (c.ok) return '✓';
-  if (c.state === '风控') return '风控';   // 风控没有上游恢复时刻，不编时间
-  if (c.until && c.upstream_reset) return '限流到 ' + c.until;
-  if (c.until) return '限流中';            // 有本地兜底时间但不来自上游
-  return c.state;
-}
-
-function credTitle(c) {
-  const parts = [];
-  if (c.nick) parts.push(c.nick);
-  if (c.reason) parts.push(c.reason);
-  if (c.until && c.upstream_reset) {
-    // 上游明确给了恢复时刻，可以承诺"到点恢复"
-    parts.push('上游称 ' + c.until + ' 恢复' + (c.remain_txt ? '（' + c.remain_txt + '）' : ''));
-  } else if (c.until) {
-    // 本地兜底：只是我们暂不重试的时长，不是上游承诺
-    parts.push('本地暂缓 ' + c.remain_txt + ' 后重试（上游未给恢复时刻）');
-  }
-  if (c.remain >= 0) parts.push('余额 ' + Math.round(c.remain) + '/' + Math.round(c.total));
-  return parts.join(' · ') || c.name;
-}
-
-// 详情行：把「谁被限到几点、还剩多久」写成一句话直显在凭证区下方。
-// 只列不可用的账号；全部可用时给一句绿色的确认。
-function renderCredAlert(el, list) {
-  if (!el) return;
-  const bad = list.filter(function (c) { return !c.ok; });
-  if (!bad.length) {
-    el.className = 'cred-alert ok';
-    el.textContent = '✓ 全部可用';
-    return;
-  }
-  el.className = 'cred-alert warn';
-  el.textContent = bad.map(function (c) {
-    if (c.state === '风控') {
-      // 11140 上游从不给恢复时刻（实测只回"内容未通过安全审核"），
-      // 所以不写"恢复 X 点"——那是假信息。只说明现状与建议。
-      return c.name + ' 账号级风控：推理被拦（账号本身正常），上游未给恢复时刻，建议换其它凭证';
-    }
-    if (c.until && c.upstream_reset) {
-      return c.name + ' 限流至 ' + c.until + (c.remain_txt ? '，' + c.remain_txt : '');
-    }
-    if (c.until) {
-      return c.name + ' 限流中（' + c.remain_txt + '后本地重试；上游未给恢复时刻）';
-    }
-    return c.name + ' ' + c.state;
-  }).join('　');
-}
-
-// 签到结果压缩：「签到成功，+100 积分」→「✓ +100」，「已停用」→「停用」。
-// 认不出的原样保留（宁可长一点，也不要丢信息）。
-function shortCheckin(s) {
-  if (!s) return '';
-  if (s.indexOf('签到成功') >= 0) {
-    const m = s.match(/\+\s*([\d,]+)/);
-    return '✓' + (m ? ' ' + m[1] : '');
-  }
-  // 国际版是「活跃上报」（积分次日到账），文案里没有「签到成功」字样，
-  // 单独认一下，否则会落到末尾兜底被截断成「活跃已上报（+30 积分次日…」。
-  if (s.indexOf('活跃已上报') >= 0) {
-    const m = s.match(/\+\s*([\d,]+)/);
-    return '✓ 活跃' + (m ? ' ' + m[1] : '');
-  }
-  if (s.indexOf('已停用') >= 0) return '停用';
-  if (s.indexOf('未开放') >= 0) return '未开放';
-  if (s.indexOf('未启用') >= 0) return '停用';
-  return s.length > 14 ? s.slice(0, 14) + '…' : s;
-}
-
-function renderCheckin() {
-  const chip = document.getElementById('checkin-chip');
-  const sum = document.getElementById('checkin-sum');
-  const c = state && state.checkin;
-  if (!c || !c.date) {
-    chip.textContent = '今日未签';
-    chip.className = 'chip no';
-    sum.textContent = '尚未签到过';
-    return;
-  }
-  const today = new Date();
-  const todayStr = today.getFullYear() + '-' +
-    String(today.getMonth() + 1).padStart(2, '0') + '-' +
-    String(today.getDate()).padStart(2, '0');
-  // 压缩成一行短文案：原来「2026-10-12 10:46:02：国内 签到成功，+100 积分；
-  // Qoder 已停用；Trae 签到成功」要占满整行，扫一眼抓不到重点。
-  // 完整原文挂 title，悬停仍可看全。
-  const parts = [];
-  if (c.dom) parts.push('国内 ' + shortCheckin(c.dom));
-  if (c.intl) parts.push('国际 ' + shortCheckin(c.intl));
-  if (c.qoder) parts.push('Qoder ' + shortCheckin(c.qoder));
-  if (c.trae) parts.push('Trae ' + shortCheckin(c.trae));
-  sum.textContent = c.date.slice(5) + ' ' + (c.time || '').slice(0, 5) + ' · ' + parts.join(' · ');
-  sum.title = c.date + ' ' + (c.time || '') + '：' +
-    [c.dom && '国内 ' + c.dom, c.intl && '国际 ' + c.intl, c.qoder && 'Qoder ' + c.qoder, c.trae && 'Trae ' + c.trae]
-      .filter(Boolean).join('；');
-  if (c.date === todayStr && c.ok) {
-    chip.textContent = '今日已签';
-    chip.className = 'chip ok';
-  } else if (c.date === todayStr) {
-    chip.textContent = '今日部分成功';
-    chip.className = 'chip warn';
-  } else {
-    chip.textContent = '今日未签';
-    chip.className = 'chip no';
-  }
-}
-
-function render() {
-  ensureTiles();
-  updateTiles();
-  renderCheckin();
-  renderAgg();
-}
-
-// ---------- Codex 聚合线路（:8790 启停 + 模型白名单管理） ----------
-function ratioBadge(txt) {
-  if (!txt) return '';
-  return '<span class="ratio' + (txt === '免费' ? ' free' : '') + '">' + txt + '</span>';
-}
-// 模型下拉（#agg-model）只在「页面加载」和「切换线路」时取过一次，而
-// /api/agg/line_models 的答案会随线路启停改变（线路没起来时只回一句提示）。
-// 于是启动线路后下拉仍停在旧提示上，必须手动刷新页面才恢复——2026-10-12 用户报的
-// 就是这个。这里记住上次取数时的「线路 + 该线路是否在跑」，轮询发现翻转就补拉。
-// 只在翻转时补拉（而不是每轮都拉）：否则线路没起来时会每 2 秒重试一次，
-// 下拉反复闪「加载中…」。
-let aggLineSig = null;
-let aggUpSig = null;
-
-function aggSig() {
-  const line = document.getElementById('agg-line').value;
-  const up = !!(state && state[line] && state[line].up);
-  return line + '|' + (up ? '1' : '0');
-}
-
-function renderAgg() {
-  if (!state) return;
-  const a = state.agg || { up: false, models: 0 };
-  const dot = document.getElementById('agg-dot');
-  dot.className = a.up ? 'dot on' : 'dot';
-  const aggTile = dot.closest('.tile');
-  if (aggTile) aggTile.classList.toggle('on', !!a.up);
-  document.getElementById('agg-count').textContent = a.up ? (a.models + ' 个模型') : '';
-
-  const sig = aggSig();
-  if (sig !== aggLineSig) {
-    aggLineSig = sig;
-    aggLoadLineModels();
-  }
-
-  // 任一条线路启停都要更新白名单的灰显（纯本地重渲染，不打接口）
-  const upSig = ['dom', 'intl', 'qoder', 'trae'].map(function (k) {
-    return k + ((state[k] && state[k].up) ? '1' : '0');
-  }).join(',');
-  if (upSig !== aggUpSig) {
-    aggUpSig = upSig;
-    renderAggList();
-  }
-}
-let aggLoadSeq = 0;
-
-async function aggLoadLineModels() {
-  const line = document.getElementById('agg-line').value;
-  const sel = document.getElementById('agg-model');
-  const keep = sel.value;   // 重取时保住用户当前选中的模型
-  const seq = ++aggLoadSeq;
-  sel.innerHTML = '<option value="">加载中…</option>';
-  try {
-    const r = await fetch('/api/agg/line_models?line=' + line, { signal: AbortSignal.timeout(8000) });
-    const d = await r.json();
-    if (seq !== aggLoadSeq) return;   // 期间又切了线路/又补拉了一轮，丢弃过期结果
-    if (!d.ok) { sel.innerHTML = '<option value="">' + (d.msg || '暂无模型') + '</option>'; return; }
-    const ratios = d.ratios || {};
-    sel.innerHTML = (d.models || []).map(function (m) {
-      return '<option value="' + m + '">' + m + (ratios[m] ? ' · ' + ratios[m] : '') + '</option>';
-    }).join('') || '<option value="">该线路无模型</option>';
-    if (keep) sel.value = keep;
-  } catch (e) { if (seq === aggLoadSeq) sel.innerHTML = '<option value="">加载失败</option>'; }
-}
-// 白名单数据（模型 + 倍率）只在增删/加载时变；而「依赖线路在不在跑」随状态变。
-// 所以把数据缓存下来，渲染拆成两步：拉数据后存缓存，再按当前 state 本地重渲染。
-// 这样状态轮询发现线路启停时，能立刻更新灰显而不必重新打接口。
-let aggModelsCache = null;
-
-// 白名单行：依赖线路没启动的置灰并标注——否则用户会选到必失败的模型，
-// 直到请求报 line_not_running 才发现（2026-10-12 实测 4 个里 3 个是这种）。
-function renderAggList() {
-  const box = document.getElementById('agg-list');
-  if (!box) return;
-  if (!aggModelsCache) {
-    box.innerHTML = '<div class="agg-item">加载中…</div>';
-    return;
-  }
-  const models = aggModelsCache.models || [];
-  const ratios = aggModelsCache.ratios || {};
-  box.innerHTML = models.map(function (m) {
-    const up = !!(state && state[m.line] && state[m.line].up);
-    return '<div class="agg-item' + (up ? '' : ' down') + '"' +
-      (up ? '' : ' title="该模型所在线路（' + (aggLineLabel(m.line)) + '）未启动，现在用它会被拒绝。先在上方启动那条线路。"') + '>' +
-      '<span class="slug">' + m.slug + '</span>' +
-      '<span>' + (m.display || '') + '</span>' + ratioBadge(ratios[m.slug]) +
-      (up ? '' : '<span class="off-tag">线路未启动</span>') +
-      '<span style="flex:1"></span>' +
-      '<button onclick="aggRemove(\'' + m.slug + '\')">删除</button></div>';
-  }).join('') || '<div class="agg-item">还没有模型：选好线路点「添加到 Codex」（Codex 端重开会话生效）</div>';
-}
-
-function aggLineLabel(line) {
-  const sel = document.getElementById('agg-line');
-  if (sel) {
-    for (const o of sel.options) {
-      if (o.value === line) return o.textContent;
-    }
-  }
-  return line;
-}
-
-async function aggRefresh() {
-  try {
-    const r = await fetch('/api/agg/models', { signal: AbortSignal.timeout(5000) });
-    aggModelsCache = await r.json();
-    renderAggList();
-  } catch (e) { /* 忽略 */ }
-}
-async function aggAdd() {
-  const line = document.getElementById('agg-line').value;
-  const model = document.getElementById('agg-model').value;
-  if (!model) { showMsg('先选线路并确保该线路已启动，才有模型可选', true); return; }
-  await post('agg/add', { line: line, model: model });
-  aggRefresh();
-}
-async function aggRemove(slug) {
-  await post('agg/remove', { slug: slug });
-  aggRefresh();
+  document.getElementById('page-title').textContent = PAGE_TITLES[name] || '';
+  if (name === 'lines') loadCredStatus(false);
+  if (name === 'usage') loadUsage();
+  if (name === 'settings') { renderClients(); loadCtx(); }
 }
 
 async function post(path, body) {
@@ -748,239 +690,1013 @@ async function post(path, body) {
   }
   refresh();
 }
-
 function act(path) { post(path, {}); }
 
-// 全部停止会连 Codex 聚合口一起停掉（聚合口正给 Codex 供流时会当场断流），
-// 破坏力与「退出」相当，所以和退出一样加二次确认。
-function stopAll() {
-  if (!confirm('确定停止全部代理？\n\n会同时停掉 Codex 聚合口（:8790）——如果 Codex 正在通过它对话，会立刻断流。')) return;
-  post('stop_all', {});
-}
-function setCred(name) { post('intl/cred', { cred: name }); }
-
-// 国际活跃上报单独一个按钮：给**所有**国际凭证各报一次，不碰国内/Trae。
-// 国际版的活跃按账号计，原先混在一键签到里只能覆盖「当前选中的凭证」，
-// 要覆盖多个账号就得反复切凭证+点签到（每次都顺带重打国内/Trae）。
-async function doIntlCheckin() {
-  showMsg('正在给全部国际凭证上报活跃…');
-  try {
-    const r = await fetch('/api/intl/checkin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-      signal: AbortSignal.timeout(120000)
-    });
-    const d = await r.json();
-    showMsg(d.msg, !d.ok);
-  } catch (e) {
-    showMsg('国际活跃上报失败：' + e, true);
-  }
-  refresh();
-}
-
-async function doCheckin() {
-  showMsg('正在签到…');
-  try {
-    const r = await fetch('/api/checkin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-      signal: AbortSignal.timeout(60000)
-    });
-    const d = await r.json();
-    showMsg(d.msg, !d.ok);
-  } catch (e) {
-    showMsg('签到请求失败：' + e, true);
-  }
-  refresh();
-}
-
-async function startZcode() {
-  const apiKey = document.getElementById('zcode-apikey').value.trim();
-  try {
-    const r = await fetch('/api/zcode/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: apiKey }),
-      signal: AbortSignal.timeout(30000)
-    });
-    const d = await r.json();
-    showMsg(d.msg, !d.ok);
-  } catch (e) {
-    showMsg('请求失败：' + e, true);
-  }
-  refresh();
-}
-
-function exitHub() {
-  if (!confirm('确定退出控制台？（会同时停止全部代理）')) return;
-  showMsg('正在退出…');
-  fetch('/api/exit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-    signal: AbortSignal.timeout(5000)
-  }).catch(function () {});
-  setTimeout(function () {
-    document.body.innerHTML =
-      '<div style="font-family:Microsoft YaHei,sans-serif;padding:40px;color:#333">' +
-      '<h2>控制台已退出</h2><p>全部代理已停止，此页面可以关闭。</p></div>';
-  }, 1500);
-}
-
+// ---------- 主轮询 ----------
 async function refresh() {
   try {
     const r = await fetch('/api/status', { signal: AbortSignal.timeout(5000) });
     state = await r.json();
     render();
-  } catch (e) {
-    showMsg('控制台连接中断：' + e, true);
-  }
+  } catch (e) { /* 控制台连接中断：保留旧画面 */ }
 }
-
-// 昵称较慢（可能读凭据/刷新 token），与高频状态轮询分离；结果并入瓦片文案。
 async function refreshNick() {
   try {
     const r = await fetch('/api/nick', { signal: AbortSignal.timeout(10000) });
     const n = await r.json();
     let changed = false;
-    for (const k in n) {
-      if (n[k] && n[k] !== nicks[k]) { nicks[k] = n[k]; changed = true; }
+    for (const k in n) { if (n[k] && n[k] !== nicks[k]) { nicks[k] = n[k]; changed = true; } }
+    if (changed) render();
+  } catch (e) { /* 忽略 */ }
+}
+
+// ---------- 总览 ----------
+function lineUp(key) { return !!(state && state[key] && state[key].up); }
+
+function renderOverview() {
+  if (!state) return;
+  // 客户端接管状态（横条）
+  const gwUp = state.agg && state.agg.up;
+  const codexOk = clients.codex_provider === 'aihub';
+  const claudeOk = (clients.claude_base_url || '').indexOf(':8790') >= 0;
+  document.getElementById('cc-codex').textContent = clients.codex_provider ? (codexOk ? '✓ 已接管' : '未接管（' + clients.codex_provider + '）') : '—';
+  document.getElementById('cc-claude').textContent = clients.claude_base_url ? (claudeOk ? '✓ 已接管' : '未接管') : '—';
+  document.getElementById('cc-desktop').textContent = desktopTakenOver ? '✓ 已接管' : '未接管';
+  const running = SERVICES.filter(function (s) { return lineUp(s.key); }).length;
+  document.getElementById('hero-models').textContent = gwUp ? (state.agg.models + ' 个') : '—';
+  document.getElementById('hero-ctx').textContent = ctxWindow ? fmtTok(ctxWindow) : '—';
+
+  // 结论行
+  const v = document.getElementById('hero-verdict');
+  const t = document.getElementById('hero-text');
+  const a = document.getElementById('hero-act');
+  if (!gwUp) {
+    v.className = 'hero-verdict bad';
+    t.textContent = '✗ 不能干活：统一网关未启动';
+    a.innerHTML = '<button class="primary sm" onclick="act(\'agg/start\')">启动网关</button>';
+  } else if (!codexOk) {
+    v.className = 'hero-verdict bad';
+    t.textContent = '⚠ 网关运行中，但 Codex 未接管（指向 ' + (clients.codex_provider || '—') + '）';
+    a.innerHTML = '<button class="sm" onclick="switchPage(\'settings\')">去设置</button>';
+  } else if (running === 0) {
+    v.className = 'hero-verdict bad';
+    t.textContent = '✗ 不能干活：没有已启用的线路';
+    a.innerHTML = '<button class="primary sm" onclick="switchPage(\'lines\')">去启用线路</button>';
+  } else {
+    v.className = 'hero-verdict ok';
+    t.textContent = '✓ 可以干活：网关运行中 · ' + running + '/' + SERVICES.length + ' 线路可用';
+    a.innerHTML = '';
+  }
+  // 网关行第二行
+  document.getElementById('hero-gw-state').textContent = gwUp
+    ? ('运行中 · 目录 ' + state.agg.models + ' 个模型')
+    : '未启动';
+
+  // 需要关注
+  const att = [];
+  ['dom','intl'].forEach(function (line) {
+    (credStatus[line] || []).forEach(function (c) {
+      if (c.state === '风控') att.push({ name: c.name, why: '风控 · 推理被拦，建议换其它凭证' });
+      else if (!c.ok && c.until) att.push({ name: c.name, why: (c.state || '') + '：' + credWhy(c) });
+    });
+  });
+  (credits || {});
+  // 从 SERVICES 的 quota 标记推出来，别再抄一份清单（抄了就会和后端 creditKeys 漂移）
+  SERVICES.filter(function (x) { return x.quota; }).forEach(function (x) {
+    const k = x.key;
+    const c = credits && credits[k];
+    if (c && c.ok === false && c.text && c.text !== '查询中…') att.push({ name: k, why: '额度查询失败：' + c.text });
+  });
+  const box = document.getElementById('attention');
+  if (!att.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+  box.style.display = '';
+  box.innerHTML = '<div class="att-title">需要关注</div>' + att.map(function (x) {
+    return '<div class="att-item" onclick="gotoLine(\'' + x.name + '\')"><span>⚠</span>' +
+      '<b>' + x.name + '</b><span class="why">' + x.why + '</span></div>';
+  }).join('');
+}
+
+function gotoLine(name) {
+  switchPage('lines');
+  const key = ['dom','intl'].find(function (l) { return (credStatus[l] || []).some(function (c) { return c.name === name; }); }) || 'intl';
+  setTimeout(function () {
+    const tile = document.getElementById('stile-' + key);
+    if (tile) tile.classList.remove('collapsed');
+    if (key === 'intl') {
+      const box = document.getElementById('cred-list');
+      const sum = document.getElementById('cred-sum');
+      if (box) box.classList.add('open');
+      if (sum) sum.classList.add('open');
     }
-    if (changed) updateTiles();
-  } catch (e) { /* 下次轮询再试 */ }
+  }, 60);
 }
 
-// 拉全部国际凭证的可用性（哪个能用 / 限流到几点 / 余额）。
-// 上游查询有成本，所以只在「页面加载」和「点刷新额度/右上刷新」时拉，
-// 不跟着 2 秒状态轮询走（与额度本身的风控口径一致，2026-10-08 用户拍板）。
-async function loadCredStatus(force) {
+// ---------- 总览线路 6 行 ----------
+function renderLineList() {
+  const box = document.getElementById('line-list');
+  if (!box || !state) return;
+  box.innerHTML = SERVICES.map(function (s) {
+    const d = state[s.key] || { up:false, ok:false, detail:'' };
+    const up = d.up;
+    const st = up ? (d.ok ? '运行中' : (d.detail || '异常')) : '已停止';
+    const acct = up ? ('账号 ' + (nicks[s.key] || d.detail || '—')) : '—';
+    let credit = '未查询';
+    const c = credits && credits[s.key];
+    if (c && c.text) {
+      if (c.ok) credit = c.text + (c.fetched_at ? '（' + c.fetched_at + '）' : '');
+      else credit = c.text;
+    }
+    let diff = '';
+    if (c && c.diff) {
+      const isUp = c.diff.indexOf('+') >= 0, flat = c.diff.indexOf('持平') >= 0;
+      diff = '<span class="credit-diff' + (isUp ? ' up' : (flat ? '' : ' down')) + '">' + c.diff + '</span>';
+    }
+    const cs = credStatus[s.key] || [];
+    const intlSum = cs.length
+      ? (' · 凭证 ' + cs.filter(function (x) { return x.ok; }).length + '/' + cs.length + '可用') : '';
+    return '<div class="line-row' + (up ? '' : ' stopped') + '" onclick="gotoLineCard(\'' + s.key + '\')">' +
+      '<span class="lname"><span class="dot' + (up ? (d.ok ? ' on' : ' warn') : '') + '"></span><span class="nm">' + s.name + '</span></span>' +
+      '<span class="lstate' + (up && d.ok ? ' on' : '') + '">' + st + intlSum + '</span>' +
+      '<span class="lacct">' + acct + '</span>' +
+      '<span class="lcredit">' + credit + diff + '</span>' +
+      '<span class="loper">' + (up
+        ? '<button class="sm" onclick="event.stopPropagation();act(\'' + s.key + '/stop\')">停用</button>'
+        : '<button class="primary sm" onclick="event.stopPropagation();act(\'' + s.key + '/start\')">启用</button>') +
+      '</span></div>';
+  }).join('');
+}
+function gotoLineCard(key) { switchPage('lines'); setTimeout(function () {
+  const tile = document.getElementById('stile-' + key);
+  if (tile) { tile.classList.remove('collapsed'); tile.scrollIntoView({ block: 'center' }); }
+}, 60); }
+
+// ---------- 签到（沿用） ----------
+function shortCheckin(s) {
+  if (!s) return '';
+  if (s.indexOf('签到成功') >= 0) {
+    const m = s.match(/\+\s*([\d,]+)/);
+    return '✓' + (m ? ' ' + m[1] : '');
+  }
+  if (s.indexOf('活跃已上报') >= 0) {
+    const m = s.match(/\+\s*([\d,]+)/);
+    return '✓ 活跃' + (m ? ' ' + m[1] : '');
+  }
+  if (s.indexOf('已停用') >= 0) return '停用';
+  if (s.indexOf('未开放') >= 0) return '未开放';
+  if (s.indexOf('未启用') >= 0) return '停用';
+  return s.length > 14 ? s.slice(0, 14) + '…' : s;
+}
+function renderCheckin() {
+  const chip = document.getElementById('checkin-chip');
+  const tags = document.getElementById('checkin-tags');
+  const c = state && state.checkin;
+  const lines = [
+    ['国内', c && c.dom], ['国际', c && c.intl],
+    ['Qoder', c && c.qoder], ['Trae', c && c.trae],
+  ];
+  // 签到记录必须是今天的才算数。旧实现只对主芯片做日期判断、四个线路芯片
+  // 直接渲染持久化的上次结果，导致新一天没签也顶着昨天的「✓ 100」
+  // （2026-10-15 用户报：昨日签过，今日未签却显示已签）。
+  const today = new Date();
+  const todayStr = today.getFullYear() + '-' +
+    String(today.getMonth() + 1).padStart(2, '0') + '-' +
+    String(today.getDate()).padStart(2, '0');
+  const fresh = !!(c && c.date === todayStr);
+  const lastDetail = c && c.date
+    ? '上次签到：' + c.date + (c.time ? ' ' + c.time : '') + '　' +
+      [c.dom && '国内 ' + c.dom, c.intl && '国际 ' + c.intl, c.qoder && 'Qoder ' + c.qoder, c.trae && 'Trae ' + c.trae]
+        .filter(Boolean).join('；')
+    : '';
+  if (!fresh) {
+    chip.textContent = '今日未签'; chip.className = 'chip no';
+    chip.title = lastDetail;
+    tags.innerHTML = lines.map(function (l) { return '<span class="chip no">' + l[0] + ' —</span>'; }).join('');
+    return;
+  }
+  tags.innerHTML = lines.map(function (l) {
+    const s = l[1] || '';
+    const cls = s.indexOf('签到成功') >= 0 || s.indexOf('活跃已上报') >= 0 ? 'ok' : 'no';
+    return '<span class="chip ' + cls + '" title="' + (s || '未签到') + '">' +
+      l[0] + ' ' + shortCheckin(s || '—') + '</span>';
+  }).join('');
+  chip.title = lastDetail;
+  if (c.ok) { chip.textContent = '今日已签'; chip.className = 'chip ok'; }
+  else { chip.textContent = '今日部分成功'; chip.className = 'chip warn'; }
+}
+async function doCheckin() {
+  showMsg('正在签到…');
   try {
-    const r = await fetch('/api/intl/creds' + (force ? '?force=1' : ''), { signal: AbortSignal.timeout(30000) });
-    const d = await r.json();
-    if (d && d.creds) { credStatus = d.creds; renderCreds(); }
-  } catch (e) { /* 忽略：下次刷新再试 */ }
+    const r = await fetch('/api/checkin', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:'{}', signal: AbortSignal.timeout(60000) });
+    const d = await r.json(); showMsg(d.msg, !d.ok);
+  } catch (e) { showMsg('签到请求失败：' + e, true); }
+  refresh();
+}
+async function doIntlCheckin() {
+  showMsg('正在给全部国际凭证上报活跃…');
+  try {
+    const r = await fetch('/api/intl/checkin', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:'{}', signal: AbortSignal.timeout(120000) });
+    const d = await r.json(); showMsg(d.msg, !d.ok);
+  } catch (e) { showMsg('国际活跃上报失败：' + e, true); }
+  refresh();
 }
 
+// ---------- 线路与凭证页 ----------
+function ensureLineTiles() {
+  const box = document.getElementById('lines-grid');
+  if (box.children.length) return;
+  box.innerHTML = SERVICES.map(svcTile).join('');
+  loadCredStatus(false);
+}
+function svcTile(s) {
+  let extra = '';
+  if (s.zkey) extra += '<input type="password" class="zkey" id="zcode-apikey" placeholder="可选 API Key，留空自动读桌面端凭据">';
+  const credSum = s.cred
+    ? '<button class="cred-sum" id="cred-sum-' + s.key + '" onclick="toggleCreds(\'' + s.key + '\')"><span class="arrow">▶</span>' +
+      '<span id="cred-sum-text-' + s.key + '">凭证 —</span><span class="cred-risk-dot" id="cred-risk-dot-' + s.key + '" style="display:none"></span></button>' +
+      '<div class="cred-list" id="cred-list-' + s.key + '"></div>'
+    : '';
+  return '<div class="tile" id="stile-' + s.key + '">' +
+    '<div class="tile-head" onclick="toggleTileCollapse(\'' + s.key + '\')">' +
+    '<span class="dot" id="sdot-' + s.key + '"></span>' +
+    '<span class="tile-name">' + s.name + '</span>' +
+    '<span class="tile-port" id="stile-state-' + s.key + '">—</span>' +
+    '<span class="fold-arrow">▾</span></div>' +
+    '<div class="tile-body">' +
+    '<div class="tile-acct off" id="sacct-' + s.key + '">—</div>' +
+    credSum +
+    (s.quota ? '<div class="tile-credit"><span id="credit-' + s.key + '">额度 —</span>' +
+      '<button class="credit-ref text" onclick="loadCredits(true,\'' + s.key + '\')">刷新额度</button></div>' : '') +
+    extra +
+    '<div class="tile-btns">' +
+    '<button id="tile-primary-' + s.key + '" class="sm" onclick="act(\'' + s.key + '/start\')">启用</button>' +
+    '<span class="spacer"></span>' +
+    (s.cred ? '<button class="text" onclick="act(\'' + s.key + '/switch\')">换凭证并重启</button>' : '') +
+    (s.key === 'intl' || s.key === 'dom' ? '<span class="golink" onclick="gotoModels(\'' + s.key + '\')">在模型页查看线路模型 →</span>' : '') +
+    '</div></div></div>';
+}
+function updateLineTiles() {
+  if (!state) return;
+  SERVICES.forEach(function (s) {
+    const d = state[s.key] || { up:false, ok:false, detail:'' };
+    const dot = document.getElementById('sdot-' + s.key);
+    const acct = document.getElementById('sacct-' + s.key);
+    const st = document.getElementById('stile-state-' + s.key);
+    const tile = document.getElementById('stile-' + s.key);
+    const pri = document.getElementById('tile-primary-' + s.key);
+    if (!dot) return;
+    if (d.up && d.ok) {
+      dot.className = 'dot on';
+      if (st) st.textContent = '运行中';
+      if (acct) { acct.className = 'tile-acct'; acct.textContent = '账号 ' + (nicks[s.key] || d.detail || '—'); }
+      if (pri) { pri.textContent = '停用'; pri.className = 'sm'; } // 运行中：停用不鼓励
+    } else if (d.up) {
+      dot.className = 'dot warn';
+      if (st) st.textContent = '异常';
+      if (acct) { acct.className = 'tile-acct'; acct.textContent = d.detail || '/health 异常'; }
+    } else {
+      dot.className = 'dot';
+      if (st) st.textContent = '已停止';
+      if (acct) { acct.className = 'tile-acct off'; acct.textContent = '—'; }
+      if (pri) { pri.textContent = '启用'; pri.className = 'primary sm'; } // 停止：启用是下一步
+    }
+    // 已停止折叠成单行；但用户手动展开过就别再给他折回去
+    // （否则刷新一次就重新锁上，额度还是看不见）。
+    if (tile) tile.classList.toggle('collapsed', !d.up && tile.dataset.open !== '1');
+    // 额度
+    const el = document.getElementById('credit-' + s.key);
+    if (!el) return;
+    const c = credits && credits[s.key];
+    if (!c || !c.text) { el.textContent = '额度未查询'; el.className = 'stale'; }
+    else if (!c.ok) { el.textContent = c.text; el.className = c.text === '查询中…' ? 'stale' : 'bad'; }
+    else {
+      let diffHtml = '';
+      if (c.diff) {
+        const isUp = c.diff.indexOf('+') >= 0, flat = c.diff.indexOf('持平') >= 0;
+        diffHtml = ' <span class="credit-diff' + (isUp ? ' up' : (flat ? '' : ' down')) + '">' + c.diff + '</span>';
+      }
+      let burnHtml = '';
+      if (c.burned) burnHtml = ' <span class="credit-burn" title="标 0.00x 的免费模型正在扣积分（活动可能只覆盖每日限量/官方客户端）。建议停用或换模型。">⚠ 今日已扣 ' + c.burn.toFixed(2) + ' 积分（免费疑似失效）</span>';
+      el.innerHTML = c.text + (c.fetched_at ? '（' + c.fetched_at + '）' : '') + diffHtml + burnHtml;
+      el.className = '';
+    }
+  });
+}
+function setLineFilter(f) {
+  lineFilter = f;
+  document.querySelectorAll('#line-filter button').forEach(function (b) {
+    b.classList.toggle('on', b.dataset.f === f);
+  });
+  applyLineFilter();
+}
+function applyLineFilter() {
+  SERVICES.forEach(function (s) {
+    const tile = document.getElementById('stile-' + s.key);
+    if (!tile) return;
+    const up = lineUp(s.key);
+    tile.style.display = (lineFilter === 'up' && !up) || (lineFilter === 'down' && up) ? 'none' : '';
+  });
+}
+function stopAll() {
+  if (!confirm('确定停止全部线路服务？\n\n正在使用各线路的客户端会立刻断流。')) return;
+  post('stop_all', {});
+}
+
+// ---------- 凭证（国际抽屉 + 国内下拉，沿用既有规则） ----------
+function credsSig(list) {
+  return (list || []).map(function (c) {
+    return c.name + ':' + c.state + ':' + (c.until || '') + ':' + (c.ok ? '1' : '0') +
+      ':' + (c.model_limits || []).map(function (m) { return m.model + '@' + m.until; }).join(',');
+  }).join('|');
+}
+let credTickTimer = null;
+function renderCreds(line) {
+  const box = document.getElementById('cred-list-' + line);
+  const sumText = document.getElementById('cred-sum-text-' + line);
+  const riskDot = document.getElementById('cred-risk-dot-' + line);
+  const list = credStatus[line] || [];
+  const cur = (state && state[line + '_cred']) || '';
+  if (sumText) {
+    sumText.textContent = list.length
+      ? ('凭证 ' + list.filter(function (c) { return c.ok; }).length + '/' + list.length + ' 可用')
+      : '凭证 —';
+  }
+  if (riskDot) riskDot.style.display = list.some(function (c) { return !c.ok && c.state === '风控'; }) ? '' : 'none';
+  if (!box || !state) return;
+  if (!list.length) { box.innerHTML = ''; return; }
+  const sig = cur + '#' + credsSig(list);
+  if (box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.innerHTML = '';
+    list.forEach(function (c) {
+      const card = document.createElement('label');
+      card.className = 'cred-card';
+      card.dataset.name = c.name;
+      const inp = document.createElement('input');
+      // name 必须按线路分开：单选框的分组是**整个文档**范围内按 name 算的，
+      // 不是按容器。两条线都叫 'cred' 时，国内和国际的凭证会互相顶掉 checked，
+      // 表现就是「卡片高亮了但圆圈是空的、看不出在用哪个」（2026-10-17 引入）。
+      inp.type = 'radio'; inp.name = 'cred-' + line; inp.value = c.name;
+      inp.checked = (c.name === cur);
+      inp.onchange = function () { setCred(line, c.name); };
+      card.appendChild(inp);
+      const cn = document.createElement('span'); cn.className = 'cn'; cn.textContent = c.name; card.appendChild(cn);
+      const badge = document.createElement('span'); badge.className = 'cred-badge'; card.appendChild(badge);
+      const nick = document.createElement('span'); nick.className = 'nick'; card.appendChild(nick);
+      const bal = document.createElement('span'); bal.className = 'bal'; card.appendChild(bal);
+      const why = document.createElement('span'); why.className = 'why'; card.appendChild(why);
+      box.appendChild(card);
+    });
+  }
+  list.forEach(function (c) {
+    const card = box.querySelector('.cred-card[data-name="' + c.name + '"]');
+    if (!card) return;
+    card.classList.toggle('sel', c.name === cur);
+    // 选中态有两个地方要同步：卡片样式（这里）和单选框本身。以前只在创建时
+    // 设过一次 checked，之后 cur 变了但 sig 没变（或反过来）就会两者不一致。
+    const radio = card.querySelector('input[type="radio"]');
+    if (radio) radio.checked = (c.name === cur);
+    card.classList.toggle('bad', !c.ok && c.state === '风控');
+    card.classList.toggle('warn', (!c.ok && c.state !== '风控') || (c.ok && c.model_limits && c.model_limits.length));
+    card.title = credTitle(c);
+    const badge = card.querySelector('.cred-badge');
+    if (badge) { badge.className = 'cred-badge ' + credCls(c); badge.textContent = credBadgeText(c); }
+    const nick = card.querySelector('.nick');
+    if (nick) nick.textContent = c.nick || '';
+    const bal = card.querySelector('.bal');
+    if (bal) bal.textContent = (c.remain >= 0 ? Math.round(c.remain) + '/' + Math.round(c.total) : '');
+    const why = card.querySelector('.why');
+    if (why) why.textContent = credWhy(c);
+  });
+  if (credTickTimer) clearInterval(credTickTimer);
+  if (list.some(function (c) { return (!c.ok && c.until) || (c.model_limits && c.model_limits.length); })) {
+    credTickTimer = setInterval(function () {
+      list.forEach(function (c) {
+        const card = box.querySelector('.cred-card[data-name="' + c.name + '"]');
+        if (!card) return;
+        const badge = card.querySelector('.cred-badge');
+        if (badge) badge.textContent = credBadgeText(c);
+        const why = card.querySelector('.why');
+        if (why) why.textContent = credWhy(c);
+      });
+    }, 30000);
+  }
+}
+function credCls(c) {
+  if (c.ok) return (c.model_limits && c.model_limits.length) ? 'warn' : 'ok';
+  if (c.state === '风控') return 'bad';
+  if (c.state === '限流') return 'warn';
+  return '';
+}
+// modelLimitTxt 一条模型级限流的人话：哪个模型、限到几点、还剩多久。
+// 「上游称」三个字不能省：upstream_reset=false 时那个 until 只是我们自己的
+// 提前重试闸门，不是上游承诺的恢复时刻，写成「16:38 恢复」就是骗人
+// （既往拍板：限流不编恢复时刻）。
+function modelLimitTxt(m) {
+  if (!m) return '';
+  let t = m.model;
+  if (m.upstream_reset && m.upstream_until) t += ' 上游称 ' + m.upstream_until + ' 恢复';
+  else if (m.until) t += ' 本地暂缓至 ' + m.until;
+  else t += ' 限流中';
+  if (m.remain_txt) t += '（' + m.remain_txt + '）';
+  return t;
+}
+function modelLimitsTxt(list) {
+  return (list || []).map(modelLimitTxt).filter(Boolean).join('；');
+}
+function credBadgeText(c) {
+  if (c.ok) return (c.model_limits && c.model_limits.length) ? '可用·模型限流' : '✓ 可用';
+  if (c.state === '风控') return '风控';
+  if (c.until && c.upstream_reset) return '限流到 ' + c.until;
+  if (c.until) return '限流中';
+  return c.state;
+}
+function credWhy(c) {
+  // 账号通道是通的、只有个别模型被限：以前这里直接 return ''，界面上只剩一个
+  // 「可用·模型限流」的黄标，既不说是哪个模型也不说到几点（用户 2026-10-16 就问了
+  // 这一句）。数据后端一直有，是前端没显示。
+  if (c.ok) return (c.model_limits && c.model_limits.length) ? '模型限流：' + modelLimitsTxt(c.model_limits) : '';
+  if (c.state === '风控') return '账号级风控：推理被拦（账号正常），上游未给恢复时刻，建议换其它凭证';
+  if (c.until && c.upstream_reset) return '上游称 ' + c.until + ' 恢复' + (c.remain_txt ? '（' + c.remain_txt + '）' : '');
+  if (c.until) return '限流中（' + (c.remain_txt || '') + '后本地重试；上游未给恢复时刻）';
+  return c.reason || c.state;
+}
+function credTitle(c) {
+  const parts = [];
+  if (c.nick) parts.push(c.nick);
+  if (c.reason) parts.push(c.reason);
+  if (c.until && c.upstream_reset) parts.push('上游称 ' + c.until + ' 恢复' + (c.remain_txt ? '（' + c.remain_txt + '）' : ''));
+  else if (c.until) parts.push('本地暂缓 ' + c.remain_txt + ' 后重试（上游未给恢复时刻）');
+  // 悬停也要能看到模型级限流：黄标只写「模型限流」等于没说。
+  if (c.model_limits && c.model_limits.length) parts.push('模型限流：' + modelLimitsTxt(c.model_limits));
+  if (c.remain >= 0) parts.push('余额 ' + Math.round(c.remain) + '/' + Math.round(c.total));
+  return parts.join(' · ') || c.name;
+}
+function toggleCreds(line) {
+  const box = document.getElementById('cred-list-' + line);
+  const sum = document.getElementById('cred-sum-' + line);
+  if (!box) return;
+  const open = box.classList.toggle('open');
+  if (sum) sum.classList.toggle('open', open);
+}
+function setCred(line, name) { post(line + '/cred', { cred: name }); }
+
+// 停用的线路默认折叠成一行，但整行可点：折叠时必须还能展开，
+// 否则「刷新额度」这些控件永远碰不到（用户 2026-10-17 报「未启动线路无法查额度」）。
+function toggleTileCollapse(key) {
+  const tile = document.getElementById('stile-' + key);
+  if (!tile) return;
+  const open = tile.classList.toggle('collapsed') === false;
+  tile.dataset.open = open ? '1' : '0';
+}
+
+// ---------- 模型页 ----------
+let aggModelsCache = null;
+let aggLineSig = null;
+let aggLoadSeq = 0;
+function ratioBadge(txt) {
+  if (!txt) return '';
+  return '<span class="ratio' + (txt === '免费' ? ' free' : '') + '">' + txt + '</span>';
+}
+function metaSub(mt) {
+  if (!mt) return '';
+  const parts = [];
+  if (mt.ctx) parts.push('上下文 ' + fmtTok(mt.ctx));
+  if (mt.max_input) parts.push('输入 ≤' + fmtTok(mt.max_input));
+  if (mt.efforts) parts.push('思考 ' + mt.efforts.join('/'));
+  return parts.length ? '<div style="font-size:11px;color:var(--faint);margin-top:1px">' + parts.join(' · ') + '</div>' : '';
+}
+function renderAgg() {
+  if (!state) return;
+  const a = state.agg || { up: false, models: 0 };
+  const chip = document.getElementById('gw-chip');
+  if (chip) {
+    chip.textContent = '统一网关 ' + (a.up ? '● 运行中 · ' + a.models + ' 个模型' : '○ 未启动');
+  }
+  if (window.location.hash.indexOf('line=') >= 0) {
+    const ln = window.location.hash.split('line=')[1].split('&')[0];
+    const sel = document.getElementById('agg-line');
+    if (sel && sel.value !== ln) { sel.value = ln; aggLoadLineModels(); }
+  }
+}
+let aggLoadSeq2 = 0;
+async function aggLoadLineModels() {
+  const line = document.getElementById('agg-line').value;
+  const sel = document.getElementById('agg-model');
+  if (!sel) return;
+  const keep = sel.value;
+  const seq = ++aggLoadSeq2;
+  sel.innerHTML = '<option value="">加载中…</option>';
+  try {
+    const r = await fetch('/api/agg/line_models?line=' + line, { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    if (seq !== aggLoadSeq2) return;
+    if (!d.ok) { sel.innerHTML = '<option value="">' + (d.msg || '暂无模型') + '</option>'; return; }
+    const ratios = d.ratios || {};
+    sel.innerHTML = (d.models || []).map(function (m) {
+      return '<option value="' + m + '">' + slugCN(m) + (ratios[m] ? ' · ' + ratios[m] : '') + '</option>';
+    }).join('') || '<option value="">该线路无模型</option>';
+    if (keep) sel.value = keep;
+  } catch (e) { if (seq === aggLoadSeq2) sel.innerHTML = '<option value="">加载失败</option>'; }
+}
+// 模型标识的显示美化：slug 里的线路代号换成中文（协议值不变，title 里保留完整名）。
+// 目录/白名单返回 intl.deepseek-v4.1-flash 形态，网关记账还有 ccs-dom/xxx 形态，两种都映射。
+const SLUG_CN = {
+  'intl.': '国际·', 'dom.': '国内·', 'qoder.': 'Qoder·', 'trae.': 'Trae·', 'zcode.': 'Zcode·', 'mimo.': 'MiMo·', 'oc.': 'OpenCode免费·',
+  'ccs-intl/': '国际·', 'ccs-dom/': '国内·', 'ccs-qoder/': 'Qoder·', 'ccs-trae/': 'Trae·', 'ccs-zcode/': 'Zcode·', 'ccs-mimo/': 'MiMo·', 'ccs-oc/': 'OpenCode免费·',
+};
+function slugCN(slug) {
+  const s = String(slug || '');
+  for (const k in SLUG_CN) if (s.indexOf(k) === 0) return s.replace(k, SLUG_CN[k]);
+  return s;
+}
+function renderAggList() {
+  const box = document.getElementById('agg-list');
+  if (!box) return;
+  if (!aggModelsCache) { box.innerHTML = '<tr><td colspan="4" style="color:var(--faint)">加载中…</td></tr>'; return; }
+  const models = aggModelsCache.models || [];
+  const ratios = aggModelsCache.ratios || {};
+  const metas = aggModelsCache.meta || {};
+  box.innerHTML = models.map(function (m) {
+    const up = !!(state && state[m.line] && state[m.line].up);
+    const cn = m.line_cn || m.line;
+    return '<tr class="' + (up ? '' : 'down') + '">' +
+      '<td class="slug" title="' + m.slug + '">' + slugCN(m.slug) + metaSub(metas[m.slug]) + '</td>' +
+      '<td>' + m.backend + '（' + cn + '）' + ratioBadge(ratios[m.slug]) + '</td>' +
+      '<td>' + (up ? '<span class="live-tag">线路正常</span>' : '<span class="off-tag">线路未启动</span>') + '</td>' +
+      '<td class="op"><button class="text" onclick="aggRemove(\'' + m.slug + '\')">删除</button></td></tr>';
+  }).join('') || '<tr><td colspan="4" style="color:var(--faint)">目录为空（动态路由不受影响，这里只管理客户端模型列表展示）</td></tr>';
+}
+async function aggRefresh() {
+  try {
+    const r = await fetch('/api/agg/models', { signal: AbortSignal.timeout(5000) });
+    aggModelsCache = await r.json();
+    renderAggList();
+  } catch (e) { /* 忽略 */ }
+}
+async function aggAdd() {
+  const line = document.getElementById('agg-line').value;
+  const model = document.getElementById('agg-model').value;
+  if (!model) { showMsg('先选线路和模型', true); return; }
+  await post('agg/add', { line: line, model: model });
+  aggRefresh();
+}
+async function aggRemove(slug) {
+  await post('agg/remove', { slug: slug });
+  aggRefresh();
+}
+function gotoModels(line) {
+  switchPage('models');
+  setTimeout(function () {
+    const sel = document.getElementById('agg-line');
+    if (sel) { sel.value = line; aggLoadLineModels(); }
+  }, 60);
+}
+
+// ---------- 探测（默认折叠） ----------
+async function probeModels() {
+  const btn = document.getElementById('probe-btn');
+  const box = document.getElementById('probe-result');
+  if (btn) { btn.disabled = true; btn.textContent = '探测中…'; }
+  if (box) box.innerHTML = '<div class="gw-desc">探测中…</div>';
+  try {
+    const r = await fetch('/api/models/probe', { signal: AbortSignal.timeout(30000) });
+    const d = await r.json();
+    renderProbe(d.lines || []);
+  } catch (e) {
+    if (box) box.innerHTML = '<div class="gw-desc">探测失败：' + e + '</div>';
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '探测'; }
+}
+function renderProbe(lines) {
+  const box = document.getElementById('probe-result');
+  if (!box) return;
+  box.innerHTML = '<div class="agg-row"><span class="tag">排序：免费 → 倍率低 → 倍率未知</span></div>' +
+    lines.map(function (l) {
+      const name = (SERVICES.find(function (s) { return s.key === l.line; }) || {}).name || l.line;
+      const up = l.up ? '<span class="live-tag">可达</span>' : '<span class="off-tag">不可达</span>';
+      const head = '<tr><td class="slug" style="width:40%">' + name + '</td><td>' + up +
+        (l.new_count ? ' <span class="ratio free">新模型 ' + l.new_count + '</span>' : '') +
+        (l.free_count ? ' <span class="ratio free">免费 ' + l.free_count + '</span>' : '') +
+        '</td><td class="op"></td></tr>';
+      const rows = (l.models || []).map(function (m) {
+        const shown = m.display ? (m.display + ' <span style="color:var(--faint)">(' + m.id + ')</span>') : m.id;
+        return '<tr' + (m.new ? '' : ' class="down"') + '><td class="slug">' + shown + metaSub(m.meta) + '</td>' +
+          '<td>' + (m.new ? '<span class="ratio free">新</span>' : '') + '</td>' +
+          '<td class="op">' + (m.ratio ? '<span class="ratio' + (m.free ? ' free' : '') + '">' + m.ratio + '</span>' : '<span style="color:var(--faint)">—</span>') + '</td></tr>';
+      }).join('');
+      return '<table class="agg-table" style="margin-bottom:10px"><thead><tr>' +
+        '<th style="width:40%">' + name + (l.note ? ' <span style="font-weight:400;color:var(--faint)">· ' + l.note + '</span>' : '') + '</th><th style="width:60px"></th><th class="op" style="width:90px">倍率</th></tr></thead>' +
+        '<tbody>' + head + rows + '</tbody></table>';
+    }).join('');
+}
+
+// ---------- 复制到剪贴板 ----------
+function copyText(text) {
+  const done = function () { showMsg('已复制：' + text.split('\n')[0]); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+  } else { fallbackCopy(text); done(); }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  ta.remove();
+}
+
+// ---------- 倍率维护 ----------
+async function loadRatios() {
+  const ta = document.getElementById('ratios-json');
+  if (!ta) return;
+  try {
+    const r = await fetch('/api/ratios', { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    ta.value = JSON.stringify(d.user || {}, null, 2);
+  } catch (e) { showMsg('读取倍率失败：' + e, true); }
+}
+async function saveRatios() {
+  const ta = document.getElementById('ratios-json');
+  if (!ta) return;
+  let obj;
+  try { obj = JSON.parse(ta.value); } catch (e) { showMsg('JSON 格式错误：' + e, true); return; }
+  await post('ratios', { ratios: obj });
+  loadRatios();
+}
+
+// ---------- 用量（Plausible 式） ----------
+function setUsageDays(d) {
+  usageDays = d;
+  document.querySelectorAll('#usage-seg button').forEach(function (b) {
+    b.classList.toggle('on', Number(b.dataset.d) === d);
+  });
+  loadUsage();
+}
+async function loadUsage() {
+  if (document.getElementById('page-usage').hidden) return;
+  try {
+    const cur = await fetch('/api/usage?days=' + usageDays, { signal: AbortSignal.timeout(15000) });
+    usageData = await cur.json();
+    usagePrev = null;
+    if (usageDays > 0) {
+      // 环比：并行拉 2N，取前 N 天差值由前端聚合
+      try {
+        const r2 = await fetch('/api/usage?days=' + (usageDays * 2), { signal: AbortSignal.timeout(15000) });
+        usagePrev = await r2.json();
+      } catch (e) { usagePrev = null; }
+    }
+    renderUsage();
+  } catch (e) {
+    document.getElementById('usage-body').innerHTML = '<div class="gw-desc">加载失败：' + e + '</div>';
+  }
+}
+function aggSum(rows) {
+  const s = { reqs:0, in:0, out:0, cached:0, reason:0, fail:0 };
+  (rows || []).forEach(function (d) { s.reqs += d.agg.reqs; s.in += d.agg.in; s.out += d.agg.out;
+    s.cached += d.agg.cached; s.reason += d.agg.reason; s.fail += d.agg.fail; });
+  return s;
+}
+function deltaPct(cur, prev) {
+  if (!prev || prev === 0) return null;
+  return Math.round((cur - prev) / prev * 100);
+}
+function renderUsage() {
+  const body = document.getElementById('usage-body');
+  if (!body) return;
+  if (!usageData || !usageData.ok) {
+    body.innerHTML = '<div class="gw-desc">' + ((usageData && usageData.msg) || '暂无用量数据（走 :8790 网关的请求都会被统计）') + '</div>';
+    return;
+  }
+  const s = usageData.summary;
+  // 环比：prev = 2N 窗口 - N 窗口（按天行日期过滤）
+  let prevDays = [];
+  if (usagePrev && usagePrev.ok && usageDays > 0) {
+    const cut = usageData.from;
+    prevDays = (usagePrev.days || []).filter(function (d) { return d.date < cut; });
+  }
+  const p = aggSum(prevDays);
+  const total = s.in + s.out + s.reason;
+  const pTotal = p.in + p.out + p.reason;
+  const hit = s.in + s.cached > 0 ? Math.round(s.cached / (s.in + s.cached) * 100) : null;
+  const failPct = s.reqs ? (s.fail / s.reqs * 100).toFixed(1) : '0.0';
+  const kpi = [
+    ['总 tokens', fmtTok(total), '输入 ' + fmtTok(s.in) + (s.cached ? ' · 命中 ' + fmtTok(s.cached) : ''), deltaPct(total, pTotal), ''],
+    ['输出 tokens', fmtTok(s.out), '思考 ' + (s.reason ? fmtTok(s.reason) : '—'), deltaPct(s.out, p.out), ''],
+    ['请求数', String(s.reqs), s.fail ? '失败 ' + s.fail + ' 次' : '全部成功', deltaPct(s.reqs, p.reqs), ''],
+    ['缓存命中率', hit === null ? '—' : hit + '%', s.cached ? '命中 ' + fmtTok(s.cached) + ' tokens' : '暂无缓存数据', null,
+      hit === null ? '' : (hit >= 50 ? 'k-ok' : 'k-warn')],
+    ['失败请求', String(s.fail), '占比 ' + failPct + '%', null, s.fail ? 'k-err' : 'k-ok'],
+  ];
+  const kpiHtml = kpi.map(function (k) {
+    let d = '';
+    if (k[3] !== null) d = '<span class="delta ' + (k[3] >= 0 ? 'up' : 'down') + '">' + (k[3] >= 0 ? '▲' : '▼') + Math.abs(k[3]) + '%</span>';
+    return '<div class="kpi ' + (k[4] || '') + '"><div class="k-label">' + k[0] + '</div>' +
+      '<div class="k-value">' + k[1] + d + '</div>' +
+      (k[2] ? '<div class="k-sub">' + k[2] + '</div>' : '') + '</div>';
+  }).join('');
+
+  // 趋势图：按天堆叠柱（输入深 / 输出浅），网格线 + 刻度 + 悬浮提示
+  const days = (usageData.days || []).slice().reverse();
+  let svg = '';
+  if (days.length) {
+    const rawMax = Math.max.apply(null, days.map(function (d) { return d.agg.in + d.agg.out; })) || 1;
+    const maxV = niceMax(rawMax);
+    const W = 1000, H = 190, padL = 42, padR = 8, padT = 12, padB = 26;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const slot = plotW / days.length;
+    const bw = Math.max(5, Math.min(34, slot - 8));
+    let g = '<defs>' +
+      '<linearGradient id="gIn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5b7cff"/><stop offset="1" stop-color="#3b5bfd"/></linearGradient>' +
+      '<linearGradient id="gOut" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c2cfff"/><stop offset="1" stop-color="#8ba0ff"/></linearGradient>' +
+      '</defs>';
+    [0, .5, 1].forEach(function (f) {
+      const y = padT + plotH * (1 - f);
+      g += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="var(--line2)"' + (f ? ' stroke-dasharray="3 4"' : '') + '/>';
+      g += '<text x="' + (padL - 7) + '" y="' + (y + 3.5) + '" font-size="9.5" text-anchor="end" fill="var(--faint)">' + fmtTok(Math.round(maxV * f)) + '</text>';
+    });
+    days.forEach(function (d, i) {
+      const cx = padL + slot * i + slot / 2;
+      const x = cx - bw / 2;
+      const hIn = d.agg.in / maxV * plotH;
+      const hOut = d.agg.out / maxV * plotH;
+      const yIn = padT + plotH - hIn;
+      const yOut = yIn - hOut;
+      const tip = d.date + '：输入 ' + fmtTok(d.agg.in) + ' · 输出 ' + fmtTok(d.agg.out) + ' · ' + d.agg.reqs + ' 请求';
+      g += '<rect x="' + (padL + slot * i) + '" y="' + padT + '" width="' + slot + '" height="' + plotH + '" fill="transparent"><title>' + tip + '</title></rect>';
+      if (hOut > 0.5) g += '<rect x="' + x + '" y="' + yOut + '" width="' + bw + '" height="' + hOut + '" rx="2" fill="url(#gOut)"><title>' + tip + '</title></rect>';
+      if (hIn > 0.5) g += '<rect x="' + x + '" y="' + yIn + '" width="' + bw + '" height="' + hIn + '" rx="2" fill="url(#gIn)"><title>' + tip + '</title></rect>';
+      if (days.length <= 12 && hOut + hIn > 0) {
+        g += '<text x="' + cx + '" y="' + Math.max(padT + 8, yOut - 4) + '" font-size="9.5" text-anchor="middle" fill="var(--muted)">' + fmtTok(d.agg.in + d.agg.out) + '</text>';
+      }
+      const step = days.length <= 8 ? 1 : Math.ceil(days.length / 10);
+      if (i % step === 0 || i === days.length - 1) {
+        g += '<text x="' + cx + '" y="' + (H - 8) + '" font-size="9.5" text-anchor="middle" fill="var(--faint)">' + d.date.slice(5) + '</text>';
+      }
+    });
+    svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' + g + '</svg>';
+  } else {
+    svg = '<div class="empty">暂无按天数据——走 :8790 网关的请求才会被统计</div>';
+  }
+
+  // 榜单：排名徽标 + 线路配色条 + 右侧数值
+  const models = (usageData.models || []).slice(0, 10);
+  const maxM = Math.max.apply(null, models.map(function (m) { return m.agg.in + m.agg.out; })) || 1;
+  const mTotal = models.reduce(function (a, m) { return a + m.agg.in + m.agg.out; }, 0) || 1;
+  const lines = (usageData.lines || []);
+  const maxL = Math.max.apply(null, lines.map(function (l) { return l.agg.in + l.agg.out; })) || 1;
+  const lTotal = lines.reduce(function (a, l) { return a + l.agg.in + l.agg.out; }, 0) || 1;
+  const board = function (rows, total, max, nameFn, colorFn) {
+    return rows.map(function (r, i) {
+      const t = r.agg.in + r.agg.out;
+      const pct = Math.round(t / total * 100);
+      const color = colorFn(r);
+      const nm = nameFn(r);
+      return '<div class="b-row' + (i < 3 ? ' r' + (i + 1) : '') + '">' +
+        '<div class="b-rank">' + (i + 1) + '</div>' +
+        '<div><div class="b-name"><span class="b-dot" style="background:' + color + '"></span>' +
+          '<span class="nm" title="' + nm + '">' + nm + '</span></div>' +
+          '<div class="b-bar"><div style="width:' + Math.max(2, Math.round(t / max * 100)) + '%;background:linear-gradient(90deg,' + color + '66,' + color + ')"></div></div></div>' +
+        '<div class="b-val"><div class="v-tok">' + fmtTok(t) + '</div>' +
+          '<div class="v-sub">' + pct + '% · ' + r.agg.reqs + ' 请求</div></div></div>';
+    }).join('');
+  };
+  const mBoard = board(models, mTotal, maxM, function (r) { return slugCN(r.slug); },
+    function (r) { return lineColor(r.line); });
+  const lBoard = board(lines, lTotal, maxL, function (r) { return r.line_cn || r.line; },
+    function (r) { return lineColor(r.line); });
+
+  body.innerHTML =
+    '<div class="kpi-row">' + kpiHtml + '</div>' +
+    '<div class="trend"><div class="t-head"><span class="t-title">tokens 按天</span>' +
+      '<span class="t-legend"><span class="lg lg-in"><i></i>输入</span>' +
+      '<span class="lg lg-out"><i></i>输出</span></span></div>' + svg + '</div>' +
+    '<div class="board2">' +
+      '<div class="board"><div class="b-head"><span class="b-title">按模型</span>' +
+        '<span class="b-count">' + (models.length ? 'Top ' + models.length : '') + '</span></div>' +
+        (mBoard || '<div class="empty">暂无</div>') + '</div>' +
+      '<div class="board"><div class="b-head"><span class="b-title">按线路</span>' +
+        '<span class="b-count">' + (lines.length ? lines.length + ' 条线路' : '') + '</span></div>' +
+        (lBoard || '<div class="empty">暂无</div>') + '</div>' +
+    '</div>' +
+    '<details class="rollback"><summary>按模型（精确数字）</summary><div class="rb-body">' +
+      modelTable(usageData.models) + '</div></details>' +
+    '<details class="rollback" style="margin-top:10px"><summary>按天（精确数字）</summary><div class="rb-body">' +
+      dayTable(usageData.days) + '</div></details>';
+}
+function modelTable(models) {
+  if (!(models || []).length) return '<div class="gw-desc">暂无</div>';
+  return '<table class="agg-table"><thead><tr><th>模型</th><th>线路</th><th class="op">请求</th><th class="op">输入</th><th class="op">输出</th><th class="op">思考</th><th class="op">失败</th></tr></thead><tbody>' +
+    models.map(function (m) {
+      return '<tr><td class="slug" title="' + m.slug + '">' + slugCN(m.slug) + '</td><td>' + (m.line_cn || m.line) + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + m.agg.reqs + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + fmtTok(m.agg.in) + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + fmtTok(m.agg.out) + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + (m.agg.reason ? fmtTok(m.agg.reason) : '—') + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + (m.agg.fail || '—') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+function dayTable(days) {
+  if (!(days || []).length) return '<div class="gw-desc">暂无</div>';
+  return '<table class="agg-table"><thead><tr><th>日期</th><th class="op">请求</th><th class="op">输入</th><th class="op">输出</th><th class="op">失败</th></tr></thead><tbody>' +
+    days.map(function (d) {
+      return '<tr><td class="slug">' + d.date + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + d.agg.reqs + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + fmtTok(d.agg.in) + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + fmtTok(d.agg.out) + '</td>' +
+        '<td class="op" style="text-align:right;font-family:var(--mono)">' + (d.agg.fail || '—') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+// ---------- 设置页 ----------
+let clients = {};
+function renderClients() {
+  fetch('/api/clients/status', { signal: AbortSignal.timeout(5000) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      clients = d;
+      const codex = document.getElementById('st-codex');
+      const claude = document.getElementById('st-claude');
+      if (codex) codex.textContent = d.codex_provider === 'aihub' ? 'provider=aihub ✓ 已接管' : ('provider=' + (d.codex_provider || '—') + '（未接管）');
+      if (claude) claude.textContent = (d.claude_base_url || '').indexOf(':8790') >= 0 ? 'base=:8790 ✓ 已接管' : ('base=' + (d.claude_base_url || '—') + '（未接管）');
+      const dt = document.getElementById('st-desktop');
+      if (dt) dt.textContent = desktopTakenOver ? '已接管（本次会话内）' : '未接管';
+      renderOverview();
+    })
+    .catch(function () {});
+}
+function takeover(app) {
+  const file = app === 'codex' ? '~/.codex/config.toml' : (app === 'claude' ? '~/.claude/settings.json' : 'Claude Desktop 3P profile');
+  if (!confirm('把 ' + file + ' 切到统一网关 :8790？\n原文件会自动备份（*.bak-hubgo-时间戳）。')) return;
+  const path = app === 'desktop' ? 'claude_desktop/takeover' : 'clients/takeover';
+  fetch('/api/' + path, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(app === 'desktop' ? {} : { app: app }), signal: AbortSignal.timeout(20000) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      showMsg(d.msg, !d.ok);
+      if (d.ok && app === 'desktop') desktopTakenOver = true;
+      renderClients();
+    })
+    .catch(function (e) { showMsg('接管失败：' + e, true); });
+}
+
+// 恢复官方直连：与接管互逆（codex / claude），改动重开客户端生效。
+function restoreClient(app) {
+  const file = app === 'codex' ? '~/.codex/config.toml' : '~/.claude/settings.json';
+  if (!confirm('把 ' + file + ' 恢复为官方直连？\n（移除网关指向，官方登录身份不动，原文件自动备份）')) return;
+  fetch('/api/clients/restore', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ app: app }), signal: AbortSignal.timeout(20000) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { showMsg(d.msg, !d.ok); renderClients(); })
+    .catch(function (e) { showMsg('恢复失败：' + e, true); });
+}
+
+// ---------- 上下文窗口（接回真实 DOM） ----------
+let ctxWindow = null;
+async function loadCtx() {
+  try {
+    const r = await fetch('/api/ctx/window', { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    if (d.ok) { ctxWindow = d.tokens; renderCtx(); }
+  } catch (e) { /* 忽略 */ }
+}
+function renderCtx() {
+  const cur = document.getElementById('ctx-cur');
+  const sel = document.getElementById('ctx-sel');
+  if (!cur || !sel || ctxWindow == null) return;
+  cur.textContent = '当前 ' + fmtTok(ctxWindow) + ' (' + ctxWindow + ')';
+  let matched = false;
+  for (const o of sel.options) { if (o.value === String(ctxWindow)) { matched = true; break; } }
+  sel.value = matched ? String(ctxWindow) : 'custom';
+}
+async function ctxSet() {
+  const sel = document.getElementById('ctx-sel');
+  let v = sel.value;
+  if (v === 'custom') {
+    const s = prompt('输入上下文窗口上限（tokens，8000 ~ 2000000）：', ctxWindow || 1000000);
+    if (!s) { renderCtx(); return; }
+    v = String(parseInt(s, 10) || 0);
+    if (!v || v === '0') { renderCtx(); return; }
+  }
+  try {
+    const r = await fetch('/api/ctx/window', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ tokens: parseInt(v, 10) }), signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    showMsg(d.msg, !d.ok);
+    if (d.ok) { ctxWindow = d.tokens; renderCtx(); }
+  } catch (e) { showMsg('设置失败：' + e, true); }
+}
+
+// ---------- 额度 / 凭证可用性（永不自动轮询） ----------
 async function loadCredits(force, key) {
   try {
     let url = '/api/credits';
-    if (key) {
-      url += '?key=' + encodeURIComponent(key) + (force ? '&force=1' : '');
-    } else if (force) {
-      url += '?force=1';
-    }
+    if (key) url += '?key=' + encodeURIComponent(key) + (force ? '&force=1' : '');
+    else if (force) url += '?force=1';
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await r.json();
     if (!credits) credits = {};
-    if (key) {
-      if (data[key]) credits[key] = data[key];
-    } else {
-      credits = data;
-    }
-    updateTiles();
-    // 强刷后等后台补拉结果回填（只回填该平台）
+    if (key) { if (data[key]) credits[key] = data[key]; }
+    else credits = data;
+    render();
     if (force) {
       if (key) setTimeout(function () { loadCredits(false, key); }, 5000);
       else setTimeout(loadCredits, 5000);
     }
   } catch (e) { /* 忽略 */ }
 }
+async function loadCredStatus(force) {
+  // 国内/国际各拉一次。用 allSettled 而不是 all：一条线的接口挂了不能把另一条
+  // 的看板也一起清空（国内是新加的接口，更要能独立失败）。
+  await Promise.allSettled(['dom','intl'].map(async function (line) {
+    try {
+      const r = await fetch('/api/' + line + '/creds' + (force ? '?force=1' : ''), { signal: AbortSignal.timeout(30000) });
+      const d = await r.json();
+      if (d && d.creds) { credStatus[line] = d.creds; renderCreds(line); }
+    } catch (e) { /* 忽略：保留上一次结果 */ }
+  }));
+  render();
+}
 
-// 顶部「刷新」= 全刷：状态 + 昵称 + 额度 + 用量 + 白名单。
-// 额度仍不自动轮询（风控，2026-10-08），只有这里和各瓦片按钮会主动查。
+function exitHub() {
+  if (!confirm('确定退出控制台？（会同时停止全部服务）')) return;
+  showMsg('正在退出…');
+  fetch('/api/exit', { method:'POST', headers:{'Content-Type':'application/json'},
+    body:'{}', signal: AbortSignal.timeout(5000) }).catch(function () {});
+  setTimeout(function () {
+    document.body.innerHTML =
+      '<div style="font-family:Microsoft YaHei,sans-serif;padding:40px;color:var(--txt)">' +
+      '<h2>控制台已退出</h2><p>全部服务已停止，此页面可以关闭。</p></div>';
+  }, 1500);
+}
+
+function render() {
+  renderOverview();
+  renderLineList();
+  renderCheckin();
+  updateLineTiles();
+  ['dom','intl'].forEach(renderCreds);
+  renderAgg();
+}
+
 function refreshAll() {
   refresh();
   refreshNick();
   loadCredits(true);
   loadCredStatus(true);
-  usageRefresh();
   aggRefresh();
-  aggLoadLineModels();
+  loadUsage();
 }
 
+// fmtTok token 量的中文单位。
+//
+// 原来这里发的是英文 k/M/B，用量统计因此读不出量级：183589227 显示成
+// 「183.59M」（其实是 1.84 亿），而一跨 1e9 又突然换成「B」（=10 亿），
+// 两段完全接不上（用户 2026-10-16 报「直接没有亿这个单位了」）。
+// 中文习惯是 万 / 亿，且 亿 只在 ≥1e8 时才用 —— 9900 万就该读作 9900万，
+// 不能提前进位成 0.99亿。
 function fmtTok(n) {
   n = Number(n) || 0;
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e4) return Math.round(n / 1e3) + 'k';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
-  return String(n);
+  if (n >= 1e8) return trimZero((n / 1e8).toFixed(2)) + '亿';
+  if (n >= 1e4) return trimZero((n / 1e4).toFixed(n >= 1e7 ? 0 : 1)) + '万';
+  return String(Math.round(n));
+}
+// trimZero 去掉小数尾巴上的 0：'12.0' → '12'、'1.84' → '1.84'。
+function trimZero(s) {
+  return String(s).replace(/\.0+$/, '').replace(/(\.\d*[^0])0+$/, '$1');
+}
+// 用量页：线路 → 主题色（图表 / 榜单 / 圆点共用一套）
+var LINE_COLORS = { dom:'#3b5bfd', intl:'#7c5cff', qoder:'#0ea5e9',
+                    trae:'#10b981', zcode:'#f59e0b', official:'#ef4444', agg:'#94a0ae' };
+function lineColor(line) { return LINE_COLORS[line] || '#8ba0ff'; }
+// 坐标轴上限取整到 1 / 2 / 2.5 / 5 × 10^n，刻度线落在整数上
+function niceMax(v) {
+  v = Number(v) || 0;
+  if (v <= 0) return 1;
+  var p = Math.pow(10, Math.floor(Math.log10(v)));
+  var n = v / p;
+  var m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return m * p;
 }
 
-async function usageRefresh() {
-  const days = document.getElementById('usage-days').value;
-  const note = document.getElementById('usage-note');
-  try {
-    const r = await fetch('/api/usage?days=' + days, { signal: AbortSignal.timeout(15000) });
-    const j = await r.json();
-    if (!j.ok) { note.textContent = j.msg || '读取用量失败'; return; }
-    const s = j.summary || {};
-    const cac = s.cached || 0;
-    const hitPct = s.in ? Math.round(cac * 100 / s.in) : 0;
-    // 输入里绝大部分常是缓存命中（折扣计价）。只报「输入」会让人以为烧了上亿 token，
-    // 所以把命中量单独点出来（2026-10-12 实测：输入 148.9M 里 146.6M 是缓存）。
-    document.getElementById('usage-sum').innerHTML =
-      (s.reqs || 0) + ' 次 · 合计 ' + fmtTok(s.total) + ' tok' +
-      (cac ? '<span class="usage-hint">其中 ' + fmtTok(cac) + ' 命中缓存（' + hitPct + '%）</span>' : '');
-    const rows = Number(j.recorded) || 0;
-    note.textContent = j.from
-      ? (j.from + ' → ' + j.to + ' · 累计 ' + rows + ' 条 / ' + j.file_mb + ' MB')
-      : ('还没有记录（用一次 Codex 再刷新）· 累计 ' + rows + ' 条');
-
-    // 归一基准：**每个列表各自**取最大合计（按天 / 按模型分开）。
-    // 段宽 = 值 / 该列表基准，于是每个列表里最大的那行占满整条，行间可直接比长短。
-    // 两个列表共用基准会让「按天」普遍偏短（实测最大才 60%），不好比。
-    const mkSeg = function (list) {
-      let max = 0;
-      list.forEach(function (x) {
-        const t = (x.agg && x.agg.total) || 0;
-        if (t > max) max = t;
-      });
-      return function (v) { return max ? (v * 100 / max).toFixed(2) : '0'; };
-    };
-    const segDays = mkSeg(j.days || []);
-    const segModels = mkSeg(j.models || []);
-
-    const line = function (k, a, wide, title, seg) {
-      const inTok = a.in || 0, cached = a.cached || 0, outTok = a.out || 0;
-      const newIn = Math.max(0, inTok - cached);
-      const fail = a.fail
-        ? '<i class="fail" title="其中 ' + a.fail + ' 次请求失败">✗' + a.fail + '</i>' : '';
-      const bar = '<div class="usage-bar">' +
-        '<i class="b1" style="width:' + seg(newIn) + '%"></i>' +
-        '<i class="b2" style="width:' + seg(cached) + '%"></i>' +
-        '<i class="b3" style="width:' + seg(outTok) + '%"></i></div>';
-      return '<div class="usage-item">' +
-        '<div class="usage-line">' +
-        '<span class="k' + (wide ? ' wide' : '') + '"' + (title ? ' title="' + title + '"' : '') + '>' + k + '</span>' +
-        '<span class="n">' + (a.reqs || 0) + fail + '</span>' +
-        '<span class="n">' + fmtTok(inTok) + '</span>' +
-        '<span class="n muted">' + (cached ? fmtTok(cached) : '—') + '</span>' +
-        '<span class="n">' + fmtTok(outTok) + '</span>' +
-        '<span class="n sum">' + fmtTok(a.total) + '</span>' +
-        '</div>' + bar + '</div>';
-    };
-    document.getElementById('usage-day-list').innerHTML =
-      (j.days || []).map(function (d) { return line(d.date.slice(5), d.agg, false, d.date, segDays); }).join('') ||
-      '<div class="usage-item"><div class="usage-line"><span class="k">—</span></div></div>';
-    document.getElementById('usage-model-list').innerHTML =
-      (j.models || []).map(function (m) { return line(m.line_cn + ' · ' + m.slug, m.agg, true, m.slug, segModels); }).join('') ||
-      '<div class="usage-item"><div class="usage-line"><span class="k">—</span></div></div>';
-  } catch (e) { note.textContent = '用量接口请求失败：' + e; }
-}
-
-ensureTiles();
-refresh().then(function () { renderAggList(); });
-loadCredStatus(false);   // 凭证可用性（哪个能用/限流到几点）
+// ---------- 启动 ----------
+ensureLineTiles();
+render();
+refresh();
 refreshNick();
 aggRefresh();
 aggLoadLineModels();
-usageRefresh();
+// 客户端接管状态启动时就拉一次：否则进过设置页之前 clients 一直是 {}，
+// 总览的结论行会误报「网关运行中，但 Codex 未接管」（2026-10-15 修）。
+renderClients();
 setInterval(refresh, 2000);
 setInterval(refreshNick, 6000);
-// 额度不自动轮询、不自动查询：仅手动点「刷新额度」/右上「刷新」（风控考虑，2026-10-08）
+// 额度/凭证可用性永不自动轮询（2026-10-08 风控拍板）；用量在进入页面时拉取。
+// 例外（2026-10-13）：国际消耗预警需要盯余额水位——只轮询 intl 一条、走后端
+// 5 分钟缓存（creditsOne 非 force 过期才后台补拉，实际约 12 次/小时，单账号
+// 低频），余额下探就黄牌提醒「免费疑似失效」。
+setInterval(function () { loadCredits(false, 'intl'); }, 30000);
 </script>
 </body>
 </html>

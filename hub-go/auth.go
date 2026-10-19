@@ -186,7 +186,7 @@ func (c *CredentialManager) refresh(s *SessionFile, raw map[string]any) error {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := backendClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("刷新 token 网络失败：%v", err)

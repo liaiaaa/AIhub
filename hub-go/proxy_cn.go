@@ -5,8 +5,14 @@ package main
 
 import "path/filepath"
 
-func NewDomProxy() *Proxy {
-	return &Proxy{
+// NewDomProxy 传统解析路径（不指定凭证目录）。
+func NewDomProxy() *Proxy { return NewDomProxyDir("") }
+
+// NewDomProxyDir 指定凭证目录启动国内代理（2026-10-13 国内多凭证）。
+// dir 为空时保持原行为：AuthFilePath 按传统顺序解析
+// （WORKBUDDY_AUTH_DIR → 镜像目录 → 数据根 → 数据根任意子目录）。
+func NewDomProxyDir(dir string) *Proxy {
+	p := &Proxy{
 		Name:          "dom",
 		Port:          DomPort,
 		Backend:       "https://copilot.tencent.com",
@@ -18,7 +24,8 @@ func NewDomProxy() *Proxy {
 			"glm-5.2", "glm-5.1", "glm-5v-turbo",
 			"kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
 			"deepseek-v4-pro", "deepseek-v4-flash",
-			"minimax-m3-pay", "hy3-preview-agent", "auto",
+			"minimax-m3-pay", "hy3-preview-agent",
+			"step-5-preview", "auto",
 		},
 		Aliases:       map[string]string{},
 		AuthFileName:  "workbuddy-desktop.info",
@@ -31,6 +38,8 @@ func NewDomProxy() *Proxy {
 		LogPath:         "converter-cn.log",
 		DirectOnly:      true, // copilot.tencent.com 国内可达，直连不读系统代理
 	}
+	p.AuthDir = dir // 放在字面量外：dir 为空串时行为与原 NewDomProxy 完全一致
+	return p
 }
 
 // DomAuthFilePath 供控制台展示：优先系统 auth 目录的国内登录文件。

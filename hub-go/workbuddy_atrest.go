@@ -39,7 +39,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -77,10 +79,23 @@ var wbCodecInstance = &wbCodec{}
 
 func wbKeyPath() string { return dataPath(wbKeyFileName) }
 
-// loadKeys 读取 wbatrest.key。允许两种写法，都作为候选：
+// wbKeyGlob 备用密钥的文件名模式。见 loadKeys 的密钥环说明。
+const wbKeyGlob = "wbatrest-*.key"
+
+// loadKeys 读密钥环，把所有可用密钥都收进候选列表。
+//
+// 为什么必须是「环」而不是单把：桌面端 5.7.6 的 at-rest 密钥**按安装/移植各自生成**
+// —— Linux 移植版那个 shim 在找不到 ~/.workbuddy-ai/.at-rest-key 时会
+// crypto.randomBytes(32) 现生成一把（见 port-workbuddy-to-linux.sh 生成的
+// resources/app/main.js），于是国内凭据和国际实时凭据用的是**两把不同的密钥**
+// （keyId 9127dea1… 与 44b936df…）。只留一个 wbatrest.key 的话，换密钥就弄坏另一条线。
+//
+// 允许两种写法，各自作为候选：
 //  1. 已派生的 32 字节 AES key 的 base64（推荐，hub-go 现用）
 //  2. 桌面端 loggerGet() 里那串 44 字符 atRestSecretKey 原文
 //     （真正的 AES key 需要再对「字符串本身」做一次 sha256）
+//
+// 主文件 wbatrest.key 缺失不再直接报错：只要有一个备用文件能用就行。
 func (c *wbCodec) loadKeys() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -88,21 +103,41 @@ func (c *wbCodec) loadKeys() error {
 		return c.loadErr
 	}
 	c.loaded = true
-	b, err := os.ReadFile(wbKeyPath())
-	if err != nil {
-		c.loadErr = fmt.Errorf("WorkBuddy 国内凭据已被 5.7.6 加密，缺少解密用密钥文件：%s（内容取自桌面端主进程，见 workbuddy_atrest.go 顶部说明）", wbKeyPath())
-		return c.loadErr
-	}
-	s := string(bytes.TrimSpace(b))
-	raw, derr := base64.StdEncoding.DecodeString(s)
-	if derr != nil || len(raw) != 32 {
-		c.loadErr = fmt.Errorf("凭据解密密钥 %s 格式不对：应为 32 字节密钥的 canonical base64", wbKeyPath())
-		return c.loadErr
-	}
 	c.keyIDOf = map[string][]byte{}
-	c.keys = append(c.keys, raw)
-	if derived := sha256.Sum256([]byte(s)); !bytes.Equal(derived[:], raw) {
-		c.keys = append(c.keys, derived[:])
+
+	files := []string{}
+	if _, err := os.Stat(wbKeyPath()); err == nil {
+		files = append(files, wbKeyPath())
+	}
+	if alt, err := filepath.Glob(dataPath(wbKeyGlob)); err == nil {
+		files = append(files, alt...)
+	}
+	if len(files) == 0 {
+		c.loadErr = fmt.Errorf("WorkBuddy 凭据已被 5.7.6 加密，缺少解密用密钥文件：%s（或 %s；内容取自桌面端主进程，见 workbuddy_atrest.go 顶部说明）", wbKeyPath(), dataPath(wbKeyGlob))
+		return c.loadErr
+	}
+
+	var problems []string
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s：%v", filepath.Base(f), err))
+			continue
+		}
+		s := string(bytes.TrimSpace(b))
+		raw, derr := base64.StdEncoding.DecodeString(s)
+		if derr != nil || len(raw) != 32 {
+			problems = append(problems, fmt.Sprintf("%s 格式不对：应为 32 字节密钥的 canonical base64", filepath.Base(f)))
+			continue
+		}
+		c.keys = append(c.keys, raw)
+		if derived := sha256.Sum256([]byte(s)); !bytes.Equal(derived[:], raw) {
+			c.keys = append(c.keys, derived[:])
+		}
+	}
+	if len(c.keys) == 0 {
+		c.loadErr = fmt.Errorf("没有可用的凭据解密密钥（%s）", strings.Join(problems, "；"))
+		return c.loadErr
 	}
 	return nil
 }

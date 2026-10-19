@@ -54,6 +54,13 @@ func main() {
 	// 按用户要求（2026-10-15）：启动即自动监听（白名单非空且本次运行没被
 	// 手动停过）；各线路仍默认手动开，想用哪条在控制台自己启。
 	hub.aggAutostart()
+	// 线路自动恢复（2026-10-19）：把上次运行过的线路重新拉起来。
+	// 背景：2026-10-19 13:31 重启后只起了 agg+hub，dom/intl/qoder 全丢，
+	// qoder 挂了很久才被发现（聚合网关里两个 qoder 模型持续 503）。
+	// 根因是「线路在跑」这个事实只存在于内存，进程一退就丢，重启时无从得知
+	// 该恢复哪些。现在由 state.json 的 last_lines 记住，这里异步恢复，
+	// 不阻塞控制台起来。用户主动停掉的线路会被 forgetLine 摘掉，不会自己回来。
+	go hub.restoreLines()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", hub.handleRoot)
 	mux.HandleFunc("/api/status", hub.apiStatus)

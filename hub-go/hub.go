@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -28,6 +29,14 @@ type Hub struct {
 	domCred   string // 国内凭证（目录名）；空 = 传统解析（2026-10-13 国内多凭证）
 	checkin   checkinRecord
 	ctxWindow int // 向 Codex 宣告的上下文窗口上限（tokens），0=未设置用默认
+
+	// lastLines 上次运行过的线路（dom/intl/qoder/trae/zcode/mimo/oc），
+	// 随 state.json 持久化，进程启动时自动恢复（2026-10-19）。
+	// 背景：2026-10-19 13:31 重启后只起了 agg+hub，dom/intl/qoder 全丢，
+	// 其中 qoder 一直挂到被发现（聚合网关里两个 qoder 模型持续 503）。
+	// 根因不是 switch 脚本探测有问题——是「线路在跑」这个事实只存在于内存里，
+	// 进程一退就丢，重启时无从得知该恢复哪些。现在把它落到磁盘。
+	lastLines []string
 }
 
 // checkinRecord 最近一次签到结果（逻辑见 checkin.go），随 state.json 持久化，
@@ -62,6 +71,7 @@ func (h *Hub) loadState() {
 		DomCred   string         `json:"dom_cred"`
 		Checkin   *checkinRecord `json:"checkin"`
 		CtxWindow int            `json:"ctx_window"`
+		LastLines []string       `json:"last_lines"`
 	}
 	if json.Unmarshal(b, &st) == nil {
 		if st.IntlCred != "" {
@@ -74,12 +84,159 @@ func (h *Hub) loadState() {
 		if st.CtxWindow > 0 {
 			h.ctxWindow = st.CtxWindow
 		}
+		h.lastLines = sanitizeLineNames(st.LastLines)
 	}
 }
 
 func (h *Hub) saveStateLocked() {
-	b, _ := json.Marshal(map[string]any{"intl_cred": h.intlCred, "dom_cred": h.domCred, "checkin": h.checkin, "ctx_window": h.ctxWindow})
+	b, _ := json.Marshal(map[string]any{
+		"intl_cred": h.intlCred,
+		"dom_cred":  h.domCred,
+		"checkin":   h.checkin,
+		"ctx_window": h.ctxWindow,
+		"last_lines": h.lastLines,
+	})
 	os.WriteFile(dataPath("state.json"), b, 0644)
+}
+
+// ---------- 线路运行记忆（2026-10-19） ----------
+
+// knownLineNames 可被记住/自动恢复的线路名（与 API 的 /api/<name>/start 对应）。
+var knownLineNames = []string{"dom", "intl", "qoder", "trae", "zcode", "mimo", "oc"}
+
+// sanitizeLineNames 过滤未知线路名、去重、保持稳定顺序。
+// 目的：state.json 是用户可手改的，不能因为里面写了个乱七八糟的名字
+// 就去调一个不存在的 /api/<name>/start。
+func sanitizeLineNames(in []string) []string {
+	want := map[string]bool{}
+	for _, n := range knownLineNames {
+		want[n] = true
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, n := range in {
+		n = strings.TrimSpace(n)
+		if n == "" || !want[n] || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	// 按 knownLineNames 的固定顺序输出，避免每次写盘顺序抖动
+	ordered := make([]string, 0, len(out))
+	for _, n := range knownLineNames {
+		if seen[n] {
+			ordered = append(ordered, n)
+		}
+	}
+	return ordered
+}
+
+// rememberLine 记下「这条线路现在在跑」，随 state.json 落盘。
+// 调用点在各线路成功启动之后；停止时用 forgetLine 摘掉。
+func (h *Hub) rememberLine(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cur := make([]string, 0, len(h.lastLines)+1)
+	cur = append(cur, h.lastLines...)
+	cur = append(cur, name)
+	next := sanitizeLineNames(cur)
+	if sameStrings(next, h.lastLines) {
+		return
+	}
+	h.lastLines = next
+	h.saveStateLocked()
+}
+
+// forgetLine 记下「这条线路已停」，重启后不再自动拉起它。
+// 关键：用户主动停掉的线路不该在重启后自己回来。
+func (h *Hub) forgetLine(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	next := make([]string, 0, len(h.lastLines))
+	for _, n := range h.lastLines {
+		if n != name {
+			next = append(next, n)
+		}
+	}
+	if sameStrings(next, h.lastLines) {
+		return
+	}
+	h.lastLines = next
+	h.saveStateLocked()
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// LinesToRestore 返回上次运行过、需要在本次启动时恢复的线路。
+func (h *Hub) LinesToRestore() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.lastLines...)
+}
+
+// restoreLines 进程启动时把上次运行过的线路重新拉起来。
+//
+// 设计取舍：
+//   - 异步执行（main 里 go 调用），任何一条线路启动慢/失败都不阻塞控制台。
+//   - 逐条串行，失败不影响其余（某条凭据过期不该连累其它线路）。
+//   - 成功后 rememberLine 会重复写同一个值，rememberLine 内部做了等值判断，
+//     不会产生多余写盘。
+//   - 恢复失败**不**从 last_lines 里摘掉：失败通常是凭据暂时不可用/上游故障，
+//     下次重启还该再试一次。用户真想停掉就点控制台「停止」，那才会 forgetLine。
+func (h *Hub) restoreLines() {
+	lines := h.LinesToRestore()
+	if len(lines) == 0 {
+		return
+	}
+	logHub("自动恢复上次运行的线路：%v", lines)
+	for _, name := range lines {
+		ok, msg := h.startLineByName(name)
+		if ok {
+			logHub("  ✓ %s 已恢复：%s", name, msg)
+			continue
+		}
+		logHub("  ✗ %s 恢复失败：%s", name, msg)
+	}
+}
+
+// startLineByName 按线路名启动。返回 (是否成功, 说明)。
+// 与 HTTP API 走同一批 startXxx，保证「自动恢复」和「手动点启动」行为一致。
+//
+// zcode 的 API Key 走 startZcode(apiKey)：自动恢复时传空串，
+// 让它按既有优先级自己找（环境变量 / zcode_api_key.txt / 桌面端凭据解密）。
+// 手工粘贴的 Key 只在当次进程内有效，本来就不该指望重启后还能用。
+func (h *Hub) startLineByName(name string) (bool, string) {
+	switch name {
+	case "dom":
+		return h.startDom()
+	case "intl":
+		h.mu.Lock()
+		cred := h.intlCred
+		h.mu.Unlock()
+		return h.startIntl(cred)
+	case "qoder":
+		return h.startQoder()
+	case "trae":
+		return h.startTrae()
+	case "zcode":
+		return h.startZcode("")
+	case "mimo":
+		return h.startMimo()
+	case "oc":
+		return h.startOpencode()
+	}
+	return false, "未知线路：" + name
 }
 
 // contextWindow 返回当前向 Codex 宣告的上下文窗口上限（tokens）。
@@ -146,6 +303,7 @@ func (h *Hub) startDom() (bool, string) {
 	}
 	h.dom = p
 	h.mu.Unlock()
+	h.rememberLine("dom")
 	return true, msg
 }
 
@@ -177,6 +335,7 @@ func (h *Hub) startIntl(cred string) (bool, string) {
 	}
 	h.intl = p
 	h.mu.Unlock()
+	h.rememberLine("intl")
 	return true, msg
 }
 
@@ -233,9 +392,11 @@ func (h *Hub) stopDom() (bool, string) {
 	h.dom = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("dom")
 		return true, "国内已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("dom")
 		return true, "国内已停止"
 	}
 	return false, "国内停止失败"
@@ -247,9 +408,11 @@ func (h *Hub) stopIntl() (bool, string) {
 	h.intl = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("intl")
 		return true, "国际已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("intl")
 		return true, "国际已停止"
 	}
 	return false, "国际停止失败"
@@ -277,6 +440,7 @@ func (h *Hub) startMimo() (bool, string) {
 	}
 	h.mimo = p
 	h.mu.Unlock()
+	h.rememberLine("mimo")
 	return true, msg
 }
 
@@ -286,9 +450,11 @@ func (h *Hub) stopMimo() (bool, string) {
 	h.mimo = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("mimo")
 		return true, "MiMo 已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("mimo")
 		return true, "MiMo 已停止"
 	}
 	return false, "MiMo 停止失败"
@@ -317,6 +483,7 @@ func (h *Hub) startQoder() (bool, string) {
 	}
 	h.qoder = p
 	h.mu.Unlock()
+	h.rememberLine("qoder")
 	return true, msg
 }
 
@@ -341,6 +508,7 @@ func (h *Hub) startTrae() (bool, string) {
 	}
 	h.trae = p
 	h.mu.Unlock()
+	h.rememberLine("trae")
 	return true, msg
 }
 
@@ -350,9 +518,11 @@ func (h *Hub) stopTrae() (bool, string) {
 	h.trae = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("trae")
 		return true, "Trae 已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("trae")
 		return true, "Trae 已停止"
 	}
 	return false, "Trae 停止失败"
@@ -381,6 +551,7 @@ func (h *Hub) startOpencode() (bool, string) {
 	}
 	h.oc = p
 	h.mu.Unlock()
+	h.rememberLine("oc")
 	return true, msg
 }
 
@@ -390,9 +561,11 @@ func (h *Hub) stopOpencode() (bool, string) {
 	h.oc = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("oc")
 		return true, "OpenCode 已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("oc")
 		return true, "OpenCode 已停止"
 	}
 	return false, "OpenCode 停止失败"
@@ -404,9 +577,11 @@ func (h *Hub) stopQoder() (bool, string) {
 	h.qoder = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("qoder")
 		return true, "Qoder 已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("qoder")
 		return true, "Qoder 已停止"
 	}
 	return false, "Qoder 停止失败"
@@ -438,6 +613,7 @@ func (h *Hub) startZcode(apiKey string) (bool, string) {
 	}
 	h.zcode = p
 	h.mu.Unlock()
+	h.rememberLine("zcode")
 	return true, msg
 }
 
@@ -447,9 +623,11 @@ func (h *Hub) stopZcode() (bool, string) {
 	h.zcode = nil
 	h.mu.Unlock()
 	if p == nil {
+		h.forgetLine("zcode")
 		return true, "Zcode 已停止"
 	}
 	if p.Stop() {
+		h.forgetLine("zcode")
 		return true, "Zcode 已停止"
 	}
 	return false, "Zcode 停止失败"

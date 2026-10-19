@@ -27,8 +27,11 @@ dsh 的 `llm-pi-ai` 插件一旦在 profile 里看到 `models:` 列表，就**�
 ========
 - 只改「已存在于 profile 里的模型」，不自动新增。新增模型该不该挂、挂哪条线路
   是人的决定（用户 2026-10-15 明确要求过：候选单不等于聚合白名单）。
-- 只改三个字段：name / contextWindow / maxTokens。input、reasoningEfforts 等
-  属于人工决策，脚本不碰。
+- 更新四个字段：name / contextWindow / maxTokens / reasoningEfforts。
+  input（多模态能力）属人工决策，脚本不碰。
+- reasoningEfforts 必须是**字典**（档位: 实际发送值），不是数组：
+  dsh 的 schema 是 z.dict(...)，写成数组会被整段拒绝，provider 直接消失
+  （2026-10-19 踩过：写成数组后 aihub 的 8 个模型在 dsh 里全没了）。
 - 幂等：内容没变化时不写盘，不制造无意义的 mtime 变化。
 """
 
@@ -166,17 +169,20 @@ def sync_text(text, catalog):
                 # 列表值：整体重写为多行；已有块则先删掉旧列表再插新的
                 if key in fields:
                     li = fields[key]
-                    # 删除旧列表行（含子项）
+                    # 删除旧块：reasoningEfforts 下的所有更深的行（列表或字典都吃）
                     j = li + 1
                     while j < len(lines):
                         s2 = lines[j].strip()
+                        if s2 == "":
+                            j += 1
+                            continue
                         ind2 = len(lines[j]) - len(lines[j].lstrip())
-                        if s2.startswith("- ") and ind2 > (fields["_indent"] + 2):
+                        if ind2 > (fields["_indent"] + 2):
                             j += 1
                             continue
                         break
                     ind = " " * (fields["_indent"] + 2)
-                    newblk = [ind + "reasoningEfforts:"] + [ind + "  - " + v for v in newval]
+                    newblk = [ind + "reasoningEfforts:"] + [ind + "  " + v + ": " + v for v in newval]
                     lines[li:j] = newblk
                     delta = (j - li) - len(newblk)
                     if delta != 0:
@@ -188,7 +194,7 @@ def sync_text(text, catalog):
                 else:
                     ind = " " * (fields["_indent"] + 2)
                     anchor = fields.get("maxTokens", fields.get("contextWindow", fields.get("name", fields["_start"])))
-                    newblk = [ind + "reasoningEfforts:"] + [ind + "  - " + v for v in newval]
+                    newblk = [ind + "reasoningEfforts:"] + [ind + "  " + v + ": " + v for v in newval]
                     lines[anchor + 1:anchor + 1] = newblk
                     for other in field_lines.values():
                         for k2, v2 in list(other.items()):
@@ -218,6 +224,66 @@ def sync_text(text, catalog):
                 changes.append((mid, key, "(缺)", newval))
 
     return "\n".join(lines), changes
+
+
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def assert_reasoning_efforts_are_maps(text):
+    """写入前自检：aihub provider 下每个模型的 reasoningEfforts 必须是**字典**。
+
+    2026-10-19 事故：脚本曾把 reasoningEfforts 写成 YAML 数组
+    （``- low`` 逐项），而 dsh 的 schema 是 z.dict(...)，数组会被整段拒绝，
+    结果是 aihub 的 8 个模型在 dsh 里全部消失、默认模型退回官方 deepseek。
+    这类错误重启后才发现，代价很大，所以在写盘前拦住。
+
+    用缩进扫描而不引入 YAML 库：保住原文注释与 !!js 表达式。
+    """
+    lines = text.split("\n")
+    in_aihub = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if re.match(r"^\s{6}aihub:\s*$", line):
+            in_aihub = True
+            i += 1
+            continue
+        if in_aihub and stripped and indent <= 6 and not stripped.startswith("-"):
+            in_aihub = False
+            i += 1
+            continue
+        if in_aihub:
+            m = re.match(r"^(\s*)reasoningEfforts:\s*(.*)$", line)
+            if m:
+                ind = len(m.group(1))
+                rest = m.group(2).strip()
+                # 同一行写值（{a: b} 或 [] 之类）不在本脚本的生成范围内
+                if rest and not rest.startswith("{"):
+                    raise SystemExit(
+                        f"自检失败：第 {i+1} 行 reasoningEfforts 不是字典形态（{rest!r}）。"
+                        "\n dsh 的 schema 要求 reason 档位写成 `档位: 发送值` 映射，"
+                        "写成数组会让整个 provider 被拒绝。已中止，原文件未改动。"
+                    )
+                # 看下一行是不是数组项 "- xxx"
+                j = i + 1
+                while j < len(lines):
+                    nxt = lines[j]
+                    if nxt.strip() == "":
+                        j += 1
+                        continue
+                    ni = len(nxt) - len(nxt.lstrip())
+                    if ni <= ind:
+                        break
+                    if nxt.strip().startswith("- "):
+                        raise SystemExit(
+                            f"自检失败：第 {j+1} 行 reasoningEfforts 用了数组写法"
+                            f"（{nxt.strip()!r}）。应写成 `档位: 发送值` 映射。"
+                            "已中止，原文件未改动。"
+                        )
+                    j += 1
+        i += 1
 
 
 def main():
@@ -272,6 +338,9 @@ def main():
     if updated == original:
         print("✓ 内容无变化，不写盘")
         return 0
+
+    # 写盘前自检（2026-10-19 事故防呆）
+    assert_reasoning_efforts_are_maps(updated)
 
     backup = f"{path}.bak-sync-{time.strftime('%Y%m%d-%H%M%S')}"
     shutil.copy2(path, backup)

@@ -45,6 +45,10 @@ var (
 	aggList  []aggModel
 	aggSrv   *http.Server // nil = 聚合线路未启动
 	aggSrvMu sync.Mutex
+	// aggServeDone 在 startAggLine 里创建、Serve goroutine 退出时 close。
+	// stopAggLine 等它，确保「停止」返回时后台 goroutine 已经收尾
+	// （那个 goroutine 最后会 logHub → 读全局 hubRoot，2026-10-19 修）。
+	aggServeDone chan struct{}
 )
 
 // aggLineCN 线路中文名（错误提示 / 自动显示名用）；
@@ -285,7 +289,15 @@ func (h *Hub) startAggLine() (bool, string) {
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 20 * time.Second}
 	aggSrv = srv
+	// serveDone 让 stopAggLine 能等 Serve 的 goroutine 真正退出。
+	// 2026-10-19：race detector 发现 Serve 返回后该 goroutine 仍会调 logHub
+	// → dataPath 读 hubRoot，而 stopAggLine 不等它就返回了——停服后立刻读
+	// 全局状态的调用方（测试、退出流程）会与这个尾巴打架。
+	// 这是生产代码的真实时序缺陷，不只是测试问题。
+	done := make(chan struct{})
+	aggServeDone = done
 	go func() {
+		defer close(done)
 		_ = srv.Serve(ln)
 		aggSrvMu.Lock()
 		if aggSrv == srv {
@@ -301,7 +313,9 @@ func (h *Hub) startAggLine() (bool, string) {
 func (h *Hub) stopAggLine() (bool, string) {
 	aggSrvMu.Lock()
 	srv := aggSrv
+	done := aggServeDone
 	aggSrv = nil
+	aggServeDone = nil
 	aggSrvMu.Unlock()
 	if srv == nil {
 		return true, "聚合已停止"
@@ -309,6 +323,15 @@ func (h *Hub) stopAggLine() (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+	// 等 Serve 的 goroutine 收尾（它最后会 logHub 一次，读全局 hubRoot）。
+	// Shutdown 返回后 Serve 通常已返回，这里最多再等 2 秒兜底。
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			logHub("agg Serve goroutine 未在 2s 内退出（继续，不影响停止结果）")
+		}
+	}
 	return true, "聚合已停止"
 }
 

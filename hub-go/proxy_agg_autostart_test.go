@@ -1,6 +1,7 @@
 package main
 
 import (
+	"time"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,11 +29,24 @@ func useTestAggPort(t *testing.T) {
 }
 
 // isolateAggRoot 把数据根换到临时目录，避免污染真实 agg_models.json / usage.jsonl。
+//
+// 2026-10-19：race detector 抓到数据竞争 —— 清理阶段还原 hubRoot 时，
+// startAggLine 起的后台 goroutine 还在 logHub → dataPath 读 hubRoot。
+// 生产代码没有这个问题（hubRoot 进程启动后不再改），是测试自身的时序问题，
+// 但它会让 `go test -race` 永远报红，掩盖真实的并发缺陷。
+// 修法：cleanup 里先停掉聚合口（停 goroutine），再还原 hubRoot。
 func isolateAggRoot(t *testing.T) {
 	t.Helper()
 	old := hubRoot
 	hubRoot = t.TempDir()
-	t.Cleanup(func() { hubRoot = old })
+	t.Cleanup(func() {
+		// 先让后台 goroutine 停干净，再动 hubRoot
+		h := &Hub{}
+		h.stopAggLine()
+		// 给已发出的 goroutine 一点收尾时间（它们只做日志，很快）
+		time.Sleep(50 * time.Millisecond)
+		hubRoot = old
+	})
 }
 
 // 自启后 :8790 必须真的在监听（验收标准第 1 条）
@@ -45,11 +59,6 @@ func TestAggAutostartListens(t *testing.T) {
 	aggSrvMu.Lock()
 	aggSrv, aggUserStopped = nil, false
 	aggSrvMu.Unlock()
-	t.Cleanup(func() {
-		h := &Hub{}
-		h.stopAggLine()
-	})
-
 	h := &Hub{}
 	h.aggAutostart()
 

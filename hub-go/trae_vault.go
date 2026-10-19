@@ -139,15 +139,27 @@ type traeAuthInfo struct {
 // 同 chat 端点）。TCR_USER_DATA_DIR 显式指定优先；最后是数据根下的镜像目录，
 // 规则与 WorkBuddy 一致：把 Windows 的 %APPDATA%\Trae CN\User 原样拷到
 // <数据根>/Trae CN/User 即可（tc 信封是纯算法，跨平台可解，不依赖 DPAPI）。
+// traeUserDataDirs Trae 凭据的候选目录，按优先级排列。
+//
+// 2026-10-19 新增 Linux 原生路径（第 2/3 优先级）：Trae 已出 Linux 版，
+// 数据目录在 ~/.config/Trae CN/User（Electron 惯例），登录后 storage.json
+// 里就是同一套 tc 信封（纯算法跨平台可解，已实测）。原先 Linux 上只找
+// ~/AppData/Roaming（Windows 形状，不存在）和数据根镜像，用户装了 Linux 版
+// 也读不到，只能继续从 Windows 拷文件。
 func traeUserDataDirs() []string {
+	home, _ := os.UserHomeDir()
 	appData := os.Getenv("APPDATA")
 	if appData == "" {
-		home, _ := os.UserHomeDir()
 		appData = filepath.Join(home, "AppData", "Roaming")
 	}
-	dirs := make([]string, 0, 5)
+	dirs := make([]string, 0, 8)
 	if v := os.Getenv("TRAE_USER_DATA_DIR"); v != "" {
 		dirs = append(dirs, v)
+	}
+	// Linux 原生安装（Electron 用户数据目录）。放 Windows 候选前面：
+	// 本机装了 Linux 版就该用本机登录态，它的凭据比拷来的新。
+	for _, name := range []string{"Trae CN", "TRAE SOLO CN"} {
+		dirs = append(dirs, filepath.Join(home, ".config", name, "User"))
 	}
 	for _, d := range [][]string{{appData, "Trae CN", "User"}, {appData, "TRAE SOLO CN", "User"},
 		{hubRoot, "Trae CN", "User"}, {hubRoot, "TRAE SOLO CN", "User"}} {

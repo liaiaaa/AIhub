@@ -465,7 +465,7 @@ const webHTML = `<!DOCTYPE html>
           <button data-f="down" onclick="setLineFilter('down')">已停止</button>
         </span>
         <span class="spacer"></span>
-        <button class="text" onclick="loadCredits(true)">刷新全部额度</button>
+        <button class="text" onclick="refreshQuota()">刷新全部额度</button>
         <button class="danger sm" onclick="stopAll()">全部停止</button>
       </div>
       <div class="grid" id="lines-grid"></div>
@@ -919,7 +919,7 @@ function svcTile(s) {
     '<div class="tile-acct off" id="sacct-' + s.key + '">—</div>' +
     credSum +
     (s.quota ? '<div class="tile-credit"><span id="credit-' + s.key + '">额度 —</span>' +
-      '<button class="credit-ref text" onclick="loadCredits(true,\'' + s.key + '\')">刷新额度</button></div>' : '') +
+      '<button class="credit-ref text" onclick="refreshQuota(\'' + s.key + '\')">刷新额度</button></div>' : '') +
     extra +
     '<div class="tile-btns">' +
     '<button id="tile-primary-' + s.key + '" class="sm" onclick="act(\'' + s.key + '/start\')">启用</button>' +
@@ -1601,6 +1601,20 @@ async function loadCredStatus(force) {
     } catch (e) { /* 忽略：保留上一次结果 */ }
   }));
   render();
+}
+
+// 2026-10-19 修复「积分显示不一致」：
+// 额度有两套独立数据源 —— /api/credits（线路卡片底部「余额 x/y 积分」）
+// 与 /api/dom/creds、/api/intl/creds（凭证卡片上的「1041/3100」）。
+// 原来「刷新额度」「刷新全部额度」都只调 loadCredits，凭证卡片那套要等
+// 切页签或 refreshAll 才更新。于是点一次刷新只变一个数，用户得连点两次
+// 才对齐（2026-10-19 用户实测反馈：「点右上角刷新两次才可以显示一致」）。
+// 现在所有额度刷新入口统一走这里，两套数据源一起拉。
+async function refreshQuota(key) {
+  const jobs = [loadCredits(true, key)];
+  // 凭证卡片只有 dom/intl 有；其它线路（qoder/trae/zcode）跳过
+  if (!key || key === 'dom' || key === 'intl') jobs.push(loadCredStatus(true));
+  await Promise.allSettled(jobs);
 }
 
 function exitHub() {

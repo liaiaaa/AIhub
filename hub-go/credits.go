@@ -23,6 +23,7 @@ package main
 // Zcode 余额不在这里——zcode_quota.go 已实现并展示在状态详情里。
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -429,6 +430,18 @@ func traeCredits() *creditInfo {
 	}
 	body, status, err := httpPostJSON(traeUgHost+"/trae/api/v2/pay/ide_user_ent_usage", headers, []byte("{}"))
 	if err != nil || status != http.StatusOK {
+		// 2026-10-19：401 几乎总是登录态过期，而原来只报「HTTP 401」，
+		// 用户不知道是哪里坏了。这里把 JWT 的过期时刻解出来，直接说清楚。
+		// 实测（2026-10-19 15:09）：token iat=10-05 14:14、exp=10-19 14:14，
+		// 过期 54 分钟后查询返回 401 + {"code":1001,"message":"not able to authenticate you"}。
+		if status == http.StatusUnauthorized {
+			if exp, ok := jwtExpiry(info.Token); ok {
+				return &creditInfo{OK: false, Text: fmt.Sprintf(
+					"Trae 登录态已过期（%s 到期），请在 Trae 桌面端重新登录后重启该线路",
+					exp.Format("01-02 15:04"))}
+			}
+			return &creditInfo{OK: false, Text: "Trae 登录态已过期，请在 Trae 桌面端重新登录后重启该线路"}
+		}
 		return &creditInfo{OK: false, Text: fmt.Sprintf("Trae 额度查询失败（HTTP %d）", status)}
 	}
 	var env struct {
@@ -482,4 +495,25 @@ func fmtCN(f float64) string {
 		out = "-" + out
 	}
 	return out
+}
+
+// jwtExpiry 解出 JWT 载荷里的 exp（不验签，只读声明）。
+// 用途：401 时告诉用户「登录态什么时候到期的」，而不是干巴巴一个 HTTP 401。
+// 解不出来返回 ok=false —— 调用方要能退回到不带时间的文案。
+func jwtExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp float64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(claims.Exp), 0), true
 }

@@ -431,17 +431,7 @@ func (h *Hub) apiClientsStatus(w http.ResponseWriter, r *http.Request) {
 			out["codex_provider"] = m[1]
 		}
 	}
-	if p, err := homeJoin(".claude", "settings.json"); err == nil {
-		if b, err := os.ReadFile(p); err == nil {
-			var doc struct {
-				Env struct {
-					BaseURL string `json:"ANTHROPIC_BASE_URL"`
-				} `json:"env"`
-			}
-			if json.Unmarshal(b, &doc) == nil {
-				out["claude_base_url"] = doc.Env.BaseURL
-			}
-		}
-	}
+	// 2026-10-19：Claude Code / Claude Desktop 已恢复官方直连，控制台不再接管它们，
+	// 所以这里不再回报 claude_base_url（前端也已去掉对应显示）。
 	writeJSON(w, http.StatusOK, out)
 }

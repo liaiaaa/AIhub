@@ -436,8 +436,6 @@ const webHTML = `<!DOCTYPE html>
         </div>
         <div class="hero-gw">
           <span>Codex <span id="cc-codex">—</span></span>
-          <span>Claude Code <span id="cc-claude">—</span></span>
-          <span>Claude Desktop <span id="cc-desktop">—</span></span>
           <span class="spacer"></span>
           <span>目录模型 <span class="mono" id="hero-models">—</span></span>
           <span>上下文窗口 <span class="mono" id="hero-ctx">—</span></span>
@@ -494,17 +492,14 @@ const webHTML = `<!DOCTYPE html>
             <tr><td>Claude Code / CLI</td>
               <td><div style="font-family:var(--mono);font-size:12px">~/.claude/settings.json → env<br>
                 ANTHROPIC_BASE_URL = http://127.0.0.1:8790<br>
-                ANTHROPIC_AUTH_TOKEN = hub-local　→ 已由「设置·接管」自动完成</div></td>
+                ANTHROPIC_AUTH_TOKEN = hub-local<br>
+                <span style="color:var(--faint)">（2026-10-19 起不再自动接管，需手填）</span></div></td>
               <td class="op"><button class="text sm" onclick="copyText('ANTHROPIC_BASE_URL=http://127.0.0.1:8790\nANTHROPIC_AUTH_TOKEN=hub-local')">复制配置</button></td></tr>
-            <tr><td>Claude Desktop</td>
-              <td><div style="font-family:var(--mono);font-size:12px">3P 网关 profile（自动写入）：<br>
-                inferenceGatewayBaseUrl = http://127.0.0.1:8790/claude-desktop<br>
-                模型菜单：claude-sonnet-5 / claude-opus-5 / claude-fable-5 / claude-haiku-4-5</div></td>
-              <td class="op"><button class="text sm" onclick="copyText('http://127.0.0.1:8790/claude-desktop')">复制地址</button></td></tr>
           </tbody>
         </table>
         <div class="ctx-row" style="margin-top:8px">
-          <span class="hint">统一网关 :8790 同时提供三种协议：/v1/responses（Codex）、/v1/messages（Claude 系）、/v1/chat/completions（OpenAI 兼容）。手填后重启对应客户端生效。</span>
+          <span class="hint">统一网关 :8790 同时提供三种协议：/v1/responses（Codex）、/v1/messages（Claude 系）、/v1/chat/completions（OpenAI 兼容）。手填后重启对应客户端生效。<br>
+          2026-10-19 起控制台只保留 Codex 一键接管；Claude Code / Claude Desktop 已恢复官方直连，不再自动改它们的配置。</span>
         </div>
       </div>
 
@@ -582,12 +577,11 @@ const webHTML = `<!DOCTYPE html>
           <thead><tr><th>客户端</th><th>配置文件</th><th>当前指向</th><th class="op" style="width:150px">操作</th></tr></thead>
           <tbody>
             <tr><td>Codex</td><td style="font-family:var(--mono);font-size:11.5px">~/.codex/config.toml</td><td id="st-codex">—</td><td class="op"><button class="sm" onclick="takeover('codex')">接管</button> <button class="sm" onclick="restoreClient('codex')">恢复官方</button></td></tr>
-            <tr><td>Claude Code / CLI<span style="color:var(--faint)">（若未安装可忽略）</span></td><td style="font-family:var(--mono);font-size:11.5px">~/.claude/settings.json</td><td id="st-claude">—</td><td class="op"><button class="sm" onclick="takeover('claude')">接管</button> <button class="sm" onclick="restoreClient('claude')">恢复官方</button></td></tr>
-            <tr><td>Claude Desktop</td><td style="font-family:var(--mono);font-size:11.5px">~/.config/Claude-3p/</td><td id="st-desktop">未接管</td><td class="op"><button class="sm" onclick="takeover('desktop')">接管</button></td></tr>
           </tbody>
         </table>
         <div class="ctx-row" style="margin-top:8px">
-          <span class="hint">接管 = 配置指向 :8790（Codex 的官方登录身份与官方模型 gpt-* 保留，经网关透传与第三方模型共存）；恢复官方 = 回到纯官方直连。均自动备份，改动重开客户端生效。</span>
+          <span class="hint">接管 = 配置指向 :8790（Codex 的官方登录身份与官方模型 gpt-* 保留，经网关透传与第三方模型共存）；恢复官方 = 回到纯官方直连。均自动备份，改动重开客户端生效。<br>
+          2026-10-19 起只接管 Codex：Claude Code 与 Claude Desktop 已恢复官方直连，控制台不再改它们的配置（想手动接入可在上面「接入点」里复制配置）。</span>
         </div>
       </div>
 
@@ -646,7 +640,6 @@ let state = null, credits = null, nicks = {}, usageData = null;
 let credStatus = {};
 let usageDays = 7, usagePrev = null;
 let lineFilter = 'all';
-let desktopTakenOver = false;
 const msgEl = null;
 
 // ---------- toast（取代顶栏 #msg） ----------
@@ -715,13 +708,12 @@ function lineUp(key) { return !!(state && state[key] && state[key].up); }
 
 function renderOverview() {
   if (!state) return;
-  // 客户端接管状态（横条）
+  // 客户端接管状态（横条）。2026-10-19 起只显示 Codex：
+  // Claude Code / Claude Desktop 已恢复官方直连，不再出现在这里。
   const gwUp = state.agg && state.agg.up;
   const codexOk = clients.codex_provider === 'aihub';
-  const claudeOk = (clients.claude_base_url || '').indexOf(':8790') >= 0;
-  document.getElementById('cc-codex').textContent = clients.codex_provider ? (codexOk ? '✓ 已接管' : '未接管（' + clients.codex_provider + '）') : '—';
-  document.getElementById('cc-claude').textContent = clients.claude_base_url ? (claudeOk ? '✓ 已接管' : '未接管') : '—';
-  document.getElementById('cc-desktop').textContent = desktopTakenOver ? '✓ 已接管' : '未接管';
+  const codexEl = document.getElementById('cc-codex');
+  if (codexEl) codexEl.textContent = clients.codex_provider ? (codexOk ? '✓ 已接管' : '未接管（' + clients.codex_provider + '）') : '—';
   const running = SERVICES.filter(function (s) { return lineUp(s.key); }).length;
   document.getElementById('hero-models').textContent = gwUp ? (state.agg.models + ' 个') : '—';
   document.getElementById('hero-ctx').textContent = ctxWindow ? fmtTok(ctxWindow) : '—';
@@ -1517,33 +1509,25 @@ function renderClients() {
     .then(function (d) {
       clients = d;
       const codex = document.getElementById('st-codex');
-      const claude = document.getElementById('st-claude');
       if (codex) codex.textContent = d.codex_provider === 'aihub' ? 'provider=aihub ✓ 已接管' : ('provider=' + (d.codex_provider || '—') + '（未接管）');
-      if (claude) claude.textContent = (d.claude_base_url || '').indexOf(':8790') >= 0 ? 'base=:8790 ✓ 已接管' : ('base=' + (d.claude_base_url || '—') + '（未接管）');
-      const dt = document.getElementById('st-desktop');
-      if (dt) dt.textContent = desktopTakenOver ? '已接管（本次会话内）' : '未接管';
       renderOverview();
     })
     .catch(function () {});
 }
+// 接管：2026-10-19 起只支持 Codex（Claude Code / Claude Desktop 已恢复官方直连）。
 function takeover(app) {
-  const file = app === 'codex' ? '~/.codex/config.toml' : (app === 'claude' ? '~/.claude/settings.json' : 'Claude Desktop 3P profile');
+  const file = '~/.codex/config.toml';
   if (!confirm('把 ' + file + ' 切到统一网关 :8790？\n原文件会自动备份（*.bak-hubgo-时间戳）。')) return;
-  const path = app === 'desktop' ? 'claude_desktop/takeover' : 'clients/takeover';
-  fetch('/api/' + path, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(app === 'desktop' ? {} : { app: app }), signal: AbortSignal.timeout(20000) })
+  fetch('/api/clients/takeover', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ app: app }), signal: AbortSignal.timeout(20000) })
     .then(function (r) { return r.json(); })
-    .then(function (d) {
-      showMsg(d.msg, !d.ok);
-      if (d.ok && app === 'desktop') desktopTakenOver = true;
-      renderClients();
-    })
+    .then(function (d) { showMsg(d.msg, !d.ok); renderClients(); })
     .catch(function (e) { showMsg('接管失败：' + e, true); });
 }
 
-// 恢复官方直连：与接管互逆（codex / claude），改动重开客户端生效。
+// 恢复官方直连：与接管互逆，改动重开客户端生效。
 function restoreClient(app) {
-  const file = app === 'codex' ? '~/.codex/config.toml' : '~/.claude/settings.json';
+  const file = '~/.codex/config.toml';
   if (!confirm('把 ' + file + ' 恢复为官方直连？\n（移除网关指向，官方登录身份不动，原文件自动备份）')) return;
   fetch('/api/clients/restore', { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ app: app }), signal: AbortSignal.timeout(20000) })

@@ -175,7 +175,12 @@ workbuddy / workbuddyai / zcode 的模型补上，实测档位表现：
 
 ## 凭证
 
-- 控制台里单选「<凭证目录A> / <凭证目录B> / <凭证目录C>」，或点「换凭证并重启」；偏好写入 `state.json`。
+- 国内线路也支持多凭证（2026-10-13）：数据根下含 `workbuddy-desktop.info`
+  的一级子目录都会被认作国内凭证目录（内置「国内workbuddy凭证 / CodeBuddy凭证」）。
+  「CodeBuddy凭证」来自 CodeBuddy IDE 的登录态（state.vscdb safeStorage 解密导出，
+  主密钥在 GNOME 密钥环 application="CodeBuddy CN"），是独立账号独立积分池；
+  服务页下拉单选 + 「换凭证并重启」，签到会对**全部**国内凭证各签一次。
+- 国际线路控制台里单选「<凭证目录A> / <凭证目录B> / <凭证目录C> / <凭证目录D>」，或点「换凭证并重启」；偏好写入 `state.json`。
   （三个目录都由 `credDirs()` 提供并在网页上列出；`state.json` 里的 `intl_cred` 记录上次选择。）
 - Qoder 与 MiMo **零配置**：分别从桌面端登录态自动取用，无需手工放文件。
 - Zcode 同样零配置：自动解密 `%USERPROFILE%\.zcode\v2\credentials.json`（AES-256-GCM

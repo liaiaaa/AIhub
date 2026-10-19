@@ -85,7 +85,6 @@ func main() {
 	mux.HandleFunc("/api/ctx/window", hub.apiCtxWindow)
 	mux.HandleFunc("/api/clients/takeover", hub.apiClientsTakeover)
 	mux.HandleFunc("/api/clients/status", hub.apiClientsStatus)
-	mux.HandleFunc("/api/claude_desktop/takeover", hub.apiClaudeDesktopTakeover)
 	mux.HandleFunc("/api/ratios", hub.apiRatios)
 	mux.HandleFunc("/api/clients/restore", hub.apiClientsRestore)
 	mux.HandleFunc("/api/credits", hub.apiCredits)

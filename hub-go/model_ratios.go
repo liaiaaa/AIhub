@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"os"
 	"strconv"
+	"strings"
 )
 
 var modelRatios = map[string]map[string]float64{
@@ -177,6 +178,14 @@ func humanTokens(n int) string {
 	switch {
 	case n >= 1000000 && n%1000000 == 0:
 		return strconv.Itoa(n/1000000) + "M"
+	case n >= 1000000:
+		// 1048576 这类「1M 的二进制近似值」原来会掉进下面的 K 分支，
+		// 显示成「1048K」——用户看到的是个没意义的数字。
+		// 2026-10-19 修：≥1M 一律按 M 保留一位小数（1048576 → 1.0M，去掉末尾 .0）。
+		v := float64(n) / 1048576.0
+		s := strconv.FormatFloat(v, 'f', 1, 64)
+		s = strings.TrimSuffix(s, ".0")
+		return s + "M"
 	case n >= 1000:
 		return strconv.Itoa(n/1000) + "K"
 	}

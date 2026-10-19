@@ -184,3 +184,56 @@ func TestAggNormalizeDisplayLocked(t *testing.T) {
 		t.Errorf("用户手改的显示名被覆盖了：%q", got["dom.glm-5.3-flash"])
 	}
 }
+
+// 2026-10-19 用户报「聚合网关里看不出上下文」：
+// 单线路目录（:8799）的 name 是「模型 · 倍率 · 上下文 1M」，
+// 聚合目录（:8790）当时只拼了「中文名 · 倍率」，上下文丢了。
+// 这条钉住：有上下文数据时，聚合显示名必须把上下文也带出来。
+func TestAggDisplayNameCarriesContext(t *testing.T) {
+	h := &Hub{}
+	// intl.deepseek-v4.1-flash：静态表有 1M 上下文 + 倍率 0（免费）
+	got := aggOpenAIDisplayName(h, aggModel{
+		Line: "intl", Slug: "intl.deepseek-v4.1-flash",
+		Backend: "deepseek-v4.1-flash", Display: "DeepSeek 4.1 Flash（国际）",
+	})
+	for _, want := range []string{"DeepSeek 4.1 Flash（国际）", "免费", "上下文 1M"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("聚合显示名缺 %q：%q", want, got)
+		}
+	}
+	// 没有上下文数据的模型不能凭空编出「上下文」字样（宁缺不编）
+	got2 := aggOpenAIDisplayName(h, aggModel{
+		Line: "intl", Slug: "intl.unknown-model-xyz",
+		Backend: "unknown-model-xyz", Display: "未知模型",
+	})
+	if strings.Contains(got2, "上下文") {
+		t.Fatalf("没有上下文数据时不该编出上下文：%q", got2)
+	}
+	// 没有倍率但有上下文时，不能出现「·  · 上下文」这种空档
+	got3 := aggOpenAIDisplayName(h, aggModel{
+		Line: "intl", Slug: "intl.step-5-preview",
+		Backend: "step-5-preview", Display: "Step 5 Preview（国际）",
+	})
+	if strings.Contains(got3, "·  ·") || strings.Contains(got3, "··") {
+		t.Fatalf("显示名出现空档：%q", got3)
+	}
+}
+
+// humanTokens 回归：1048576 曾显示成「1048K」（没意义的数字）。
+// 2026-10-19 修成 ≥1M 一律按 M 保留一位小数。
+func TestHumanTokensMega(t *testing.T) {
+	cases := map[int]string{
+		1000000: "1M",
+		1048576: "1M",   // 1MiB 应显示 1M，不是 1048K
+		2097152: "2M",   // 2MiB
+		196608:  "196K",
+		262144:  "262K",
+		65536:   "65K",
+		999:     "999",
+	}
+	for in, want := range cases {
+		if got := humanTokens(in); got != want {
+			t.Errorf("humanTokens(%d) = %q，期望 %q", in, got, want)
+		}
+	}
+}

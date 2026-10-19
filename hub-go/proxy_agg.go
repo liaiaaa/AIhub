@@ -791,16 +791,32 @@ func (h *Hub) aggOpenAIModels() map[string]any {
 	return map[string]any{"object": "list", "data": data}
 }
 
-// aggOpenAIDisplayName 生成 OpenAI 形态的显示名：中文名 + 倍率。
+// aggOpenAIDisplayName 生成 OpenAI 形态的显示名：中文名 + 倍率 + 上下文。
 // 优先用白名单里配的 Display（已含「（国内）/（国际）」归属），没有时用
-// 模型名兜底；倍率只在查得到时追加，查不到不编。
+// 模型名兜底；倍率与上下文只在查得到时追加，查不到不编。
+//
+// 2026-10-19 修复：原来只拼倍率、不拼上下文，聚合目录显示成
+// 「DeepSeek 4.1 Flash（国际） · 免费」，而单线路目录是
+// 「deepseek-v4.1-flash · 免费 · 上下文 1M」——用户报「聚合网关里看不出上下文」。
+// 现在与单线路的 ratioName 对齐：有上下文数据就带上，没有就不带（宁缺不编）。
 func aggOpenAIDisplayName(h *Hub, am aggModel) string {
 	base := am.Display
 	if base == "" {
 		base = am.Backend
 	}
-	if r, ok := h.modelRatio(am.Line, am.Backend); ok {
+	r, hasRatio := h.modelRatio(am.Line, am.Backend)
+	ctx := 0
+	if m, ok := h.modelMeta(am.Line, am.Backend); ok {
+		ctx = m.ContextWindow
+	}
+	switch {
+	case hasRatio && ctx > 0:
+		return withCtx(base, ratioLabel(r), ctx)
+	case hasRatio:
 		return base + " · " + ratioLabel(r)
+	case ctx > 0:
+		// 没有倍率数据时不能借 withCtx（它会拼出「base ·  · 上下文 1M」的空档）
+		return base + " · 上下文 " + humanTokens(ctx)
 	}
 	return base
 }

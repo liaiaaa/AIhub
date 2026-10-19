@@ -26,7 +26,11 @@ _backups_disabled/
 *凭证/
 国内workbuddy凭证/
 # WorkBuddy 桌面端 5.7.6 字段加密的本地解密密钥（从桌面端主进程取，见 hub-go/workbuddy_atrest.go）
+# 2026-10-19：原来只写死 wbatrest.key，国际版另取出的 wbatrest-workbuddy-ai.key 因此漏网
+# （git status 里长期是 ??，随时可能被 git add -A 带进去）。改通配覆盖所有同类密钥文件。
 wbatrest.key
+*wbatrest*.key
+*.key
 # Trae 桌面端 storage.json（tc 信封里的登录态，跨平台可解）
 Trae CN/
 
@@ -92,6 +96,18 @@ tools/zcode-relay/zcode-relay-linux
 # ---- 未引用的备份产物 ----
 hub-go/assets/icon-old.png
 
+# ---- 本地工作缓存与临时目录（2026-10-19 补）----
+# .gocache/ 是 Go 构建缓存（258 个目录，体积大且可重建）；.dsh-work/ 是会话临时产物，
+# 里面还躺着 cc-switch-snapshot.db 与 .deb 包。两者都不该进版本库。
+.gocache/
+.dsh-work/
+倍率/
+
+# ---- docs/ 里的阶段备份快照：含桌面端数据库与配置文件，不是源码 ----
+# phase1-backup-*/cc-switch.db 是 cc-switch 的真实 SQLite 库（含供应商配置），
+# 属于「机器状态快照」，只留在磁盘备查，不入库。
+docs/phase1-backup-*/
+
 # ---- 抓凭证工具的本地工作区：绝不能入库 ----
 # work/ 里含 ck.sqlite（整个浏览器的 Cookie 库：Google/ChatGPT/Claude/飞书/
 # GitHub 等全部登录态）、disk_jwts.json（落盘的 JWT）、以及 29M 网页资源。
@@ -100,3 +116,8 @@ tools/grab-workbuddy/work/
 tools/grab-workbuddy/__pycache__/
 __pycache__/
 *.pyc
+
+# ---- 国际线路「燃烧率」台账（含账号 uid 与余额，运行时状态；2026-10-19 补）----
+intl_burn.json
+# 上游模型目录缓存（含 fetched_at 与账号相关的模型清单，运行时状态；2026-10-19 补）
+wb_catalog_intl.json

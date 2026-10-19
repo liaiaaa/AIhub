@@ -679,7 +679,12 @@ func qoderWriteTailFrame(w http.ResponseWriter, flusher http.Flusher, out, think
 	}
 }
 
-func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payload []byte, t0 time.Time, rid string) {
+// streamToClient 真流式转发。
+//
+// 返回值 retryDegraded=true 表示「在写 SSE 头之前就发现上游不可用」，
+// 调用方应改用 degradedStreamToClient 重试一次（2026-10-19 加）。
+// 一旦已开始向客户端写帧，就再没有回退机会，此时一律返回 false。
+func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payload []byte, t0 time.Time, rid string) (retryDegraded bool) {
 	thinkFrames := 0 // 诊断：含 reasoning_content 的帧数
 	// 临时诊断（QODER_DIAG_STREAM=1）：累计 reasoning / content / tool_calls 的实际内容，
 	// 用于定位「客户端到底收到了什么」。默认关闭，不影响正常路径。
@@ -728,9 +733,13 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 		if errors.As(err, &qe) {
 			writeErrEvent(qe.HTTPStatus(), qe.Error())
 		} else {
+			// 尚未写 SSE 头 → 允许调用方降级重试一次
+			if !headersSent {
+				return true
+			}
 			writeErrEvent(http.StatusBadGateway, err.Error())
 		}
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -740,10 +749,14 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 		}
 		if qi, ok := parseQueueFrame(string(b)); ok {
 			writeErrEvent(http.StatusTooManyRequests, (&qoderQueueError{Info: qi}).Error())
-			return
+			return false
+		}
+		// 上游非 200 且尚未写 SSE 头：先不向客户端吐错误，交给调用方降级重试
+		if !headersSent {
+			return true
 		}
 		writeErrEvent(resp.StatusCode, truncate(string(b), 500))
-		return
+		return false
 	}
 
 	ensureHeaders()
@@ -848,6 +861,7 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			p.log.Log("[%s] ◀ DIAG content 全文:\n%s", rid, truncate(diagContent.String(), 2000))
 		}
 	}
+	return false
 }
 
 func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, payload []byte, model string, t0 time.Time, rid string) {
@@ -929,20 +943,37 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 	writeJSON(w, http.StatusOK, res)
 }
 
-// ---------- 网关流式工具消息 bug 自动降级（2026-09-26 实测定案） ----------
+// ---------- 网关流式工具消息 bug 自动降级（2026-09-26 定案，2026-10-19 解除） ----------
 //
-// 根因：Qoder 网关的 DeepSeek 系（dfmodel/dmodel）与 Kimi 系（kmodel）在
+// 【2026-09-26 当时的根因】
+// Qoder 网关的 DeepSeek 系（dfmodel/dmodel）与 Kimi 系（kmodel）在
 // stream=true 且历史含 assistant(tool_calls) 或 role=tool 消息时，100% 返回
 // provider_error（"Error in upstream response" / "Unknown sse issue"）；
 // 同一载荷 stream=false 100% 成功；Qwen/GLM 系流式完全正常（多模型矩阵实测）。
 // 这不是代理格式问题（转发的是标准 OpenAI 格式，网关自身即此语义）。
 //
-// 自动降级：命中该组合时，上游请求改 stream=false 走聚合路径（已验证对
-// dfmodel+工具历史 100% 成功），再把聚合结果以 SSE 帧流回给客户端——
-// 客户端接口无感知（仍是 data: {...} + data: [DONE]）。
-// 关闭开关：环境变量 QODER_AUTO_NOSTREAM=0。
+// 【2026-10-19 实测：上游已修复】
+// 用户反馈「DeepSeek-Flash 半天不输出」。查日志发现 dfmodel 命中降级 19 次。
+// 用探针直接向上游发 stream=true + 工具历史（dfmodel / 思考档 max）：
+//   - 上游 HTTP 200，首字节 0.38s
+//   - 解包后 5928 字节、23 个 data: 帧，unwrap 零报错
+//   - tool_calls 帧完整：10 个增量帧，id/name/arguments/finish_reason=tool_calls 齐全
+// 即：当年那个 provider_error 不再复现。
+//
+// 【为什么必须解除】
+// 降级路径要把整个响应 collectStream 攒完再一次性回灌，实测同一请求：
+//   真流式：首字节 0.207s，总耗时 1.138s（字一个个出来）
+//   降级后：首字节 0.627s，总耗时 0.628s（憋完一次性吐出）
+// 在 DSH/Codex 这类多轮工具调用场景里，这就是用户说的「半天不输出」。
+//
+// 【现在的策略】
+// 默认走真流式。仍保留降级能力作为兜底，但改为「真流式失败后按需回退」：
+// 由 QODER_AUTO_NOSTREAM 控制，默认不再预判式降级。
+//   QODER_AUTO_NOSTREAM=1  → 恢复 2026-09-26 的预判式降级（老行为，应急用）
+//   QODER_AUTO_NOSTREAM=0 或未设 → 真流式（当前默认）
 
-// qoderStreamToolBugModels 受网关流式工具 bug 影响的模型内部 key。
+// qoderStreamToolBugModels 曾受网关流式工具 bug 影响的模型内部 key。
+// 保留此表仅供 QODER_AUTO_NOSTREAM=1 的应急回退路径使用。
 var qoderStreamToolBugModels = map[string]bool{
 	"dfmodel": true,
 	"dmodel":  true,
@@ -968,9 +999,13 @@ func qoderHistoryHasToolMsgs(msgs []any) bool {
 	return false
 }
 
-// qoderAutoNoStreamEnabled 默认开启；QODER_AUTO_NOSTREAM=0 显式关闭。
+// qoderAutoNoStreamEnabled 是否启用「预判式降级」。
+//
+// 2026-10-19 起默认关闭：上游 bug 已不复现，而预判式降级会让
+// DeepSeek/Kimi 系的流式请求变成「憋完一次性吐出」（用户报「半天不输出」）。
+// 需要临时回到老行为时设 QODER_AUTO_NOSTREAM=1。
 func qoderAutoNoStreamEnabled() bool {
-	return os.Getenv("QODER_AUTO_NOSTREAM") != "0"
+	return os.Getenv("QODER_AUTO_NOSTREAM") == "1"
 }
 
 // degradedStreamToClient：上游 stream=false 聚合完整响应后，以 SSE 帧流回给客户端。

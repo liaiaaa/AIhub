@@ -447,12 +447,20 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	if clientStream {
 		if degrade {
 			if p.log != nil {
-				p.log.Log("[%s] ⚠ 网关流式工具bug命中(%s|stream=true|工具历史)：自动降级为非流式聚合后回灌SSE", rid, modelKey)
+				p.log.Log("[%s] ⚠ 网关流式工具bug命中(%s|stream=true|工具历史)：按 QODER_AUTO_NOSTREAM=1 预判式降级为非流式聚合后回灌SSE", rid, modelKey)
 			}
 			p.degradedStreamToClient(w, r, payload, modelName, t0, rid)
 			return
 		}
-		p.streamToClient(w, r, payload, t0, rid)
+		// 2026-10-19：默认走真流式。上游若真的复现当年的 provider_error，
+		// streamToClient 会在「写 SSE 头之前」发现并返回 retryDegraded=true，
+		// 这里再降级重试一次——既能享受真流式，又保留兜底。
+		if p.streamToClient(w, r, payload, t0, rid) {
+			if p.log != nil {
+				p.log.Log("[%s] ⚠ 真流式失败，回退为「非流式聚合后回灌SSE」（%s|工具历史）", rid, modelKey)
+			}
+			p.degradedStreamToClient(w, r, payload, modelName, t0, rid)
+		}
 		return
 	}
 	p.aggregateToClient(w, r, payload, modelName, t0, rid)

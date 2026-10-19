@@ -66,7 +66,28 @@ def fetch_models(url=AGG_URL, timeout=20):
         mo = m.get("max_output_tokens")
         if isinstance(mo, int) and mo > 0:
             entry["maxTokens"] = mo
+        # 思考档位（控制台 /api/agg/models 才有，/v1/models 不带）
         out[mid] = entry
+    return out
+
+
+DSH_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def fetch_efforts(base="http://127.0.0.1:8801", timeout=15):
+    """拉控制台的模型元数据（含 reasoningEfforts）。失败返回空表——
+    档位是附加信息，拿不到不应该阻塞倍率同步。"""
+    try:
+        with urllib.request.urlopen(base + "/api/agg/models", timeout=timeout) as r:
+            d = json.loads(r.read().decode())
+        out = {}
+        for slug, meta in (d.get("meta") or {}).items():
+            vals = [v for v in (meta.get("efforts") or []) if v in DSH_LEVELS]
+            if vals:
+                out[slug] = vals
+        return out
+    except Exception:
+        return {}
     return out
 
 
@@ -126,7 +147,7 @@ def sync_text(text, catalog):
             continue
 
         # 模型块内字段（缩进 > item_indent）
-        fm = re.match(r"^(\s*)(name|contextWindow|maxTokens):\s*(.*)$", line)
+        fm = re.match(r"^(\s*)(name|contextWindow|maxTokens|reasoningEfforts):\s*(.*)$", line)
         if fm and len(fm.group(1)) > item_indent:
             field_lines[cur_id][fm.group(2)] = i
             continue
@@ -137,10 +158,44 @@ def sync_text(text, catalog):
             continue
         want = catalog[mid]
         ind = " " * (fields["_indent"] + 2)
-        for key in ("name", "contextWindow", "maxTokens"):
+        for key in ("name", "contextWindow", "maxTokens", "reasoningEfforts"):
             if key not in want:
                 continue
             newval = want[key]
+            if key == "reasoningEfforts":
+                # 列表值：整体重写为多行；已有块则先删掉旧列表再插新的
+                if key in fields:
+                    li = fields[key]
+                    # 删除旧列表行（含子项）
+                    j = li + 1
+                    while j < len(lines):
+                        s2 = lines[j].strip()
+                        ind2 = len(lines[j]) - len(lines[j].lstrip())
+                        if s2.startswith("- ") and ind2 > (fields["_indent"] + 2):
+                            j += 1
+                            continue
+                        break
+                    ind = " " * (fields["_indent"] + 2)
+                    newblk = [ind + "reasoningEfforts:"] + [ind + "  - " + v for v in newval]
+                    lines[li:j] = newblk
+                    delta = (j - li) - len(newblk)
+                    if delta != 0:
+                        for other in field_lines.values():
+                            for k2, v2 in list(other.items()):
+                                if isinstance(v2, int) and v2 > j - 1:
+                                    other[k2] = v2 - delta
+                    changes.append((mid, key, "(更新)", ",".join(newval)))
+                else:
+                    ind = " " * (fields["_indent"] + 2)
+                    anchor = fields.get("maxTokens", fields.get("contextWindow", fields.get("name", fields["_start"])))
+                    newblk = [ind + "reasoningEfforts:"] + [ind + "  - " + v for v in newval]
+                    lines[anchor + 1:anchor + 1] = newblk
+                    for other in field_lines.values():
+                        for k2, v2 in list(other.items()):
+                            if isinstance(v2, int) and v2 > anchor:
+                                other[k2] = v2 + len(newblk)
+                    changes.append((mid, key, "(缺)", ",".join(newval)))
+                continue
             if key in fields:
                 li = fields[key]
                 old_line = lines[li]
@@ -189,6 +244,8 @@ def main():
         print(f"✗ 拉不到 {args.url}：{e}", file=sys.stderr)
         print("  先确认 aihub 在跑：curl -s http://127.0.0.1:8801/api/status", file=sys.stderr)
         return 1
+
+    catalog.update(fetch_efforts())  # slug -> efforts 列表（叠加进 catalog）
 
     with open(path, encoding="utf-8") as f:
         original = f.read()

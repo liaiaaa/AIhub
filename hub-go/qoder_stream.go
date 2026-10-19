@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -539,6 +540,42 @@ func qoderDumpFailedPayload(rid string, payload []byte, log *FileLogger) {
 	dumpPath := dataPath("qoder-dump-" + rid + "-upstream.json")
 	if err := os.WriteFile(dumpPath, payload, 0644); err == nil {
 		log.Log("[%s] ⚠ 已 dump 失败载荷: %s (%dKB)，可重放定位", rid, dumpPath, len(payload)/1024)
+		qoderPruneDumps(log)
+	}
+}
+
+// qoderDumpKeep 最多保留几份 qoder dump。dump 单份可达 1MB+（整个请求信封），
+// 无上限的话会一直涨（2026-10-19 清理时已积 12 份 26MB）。留最近 5 份足够
+// 对比定位，再老的没有回看价值。
+const qoderDumpKeep = 5
+
+// qoderPruneDumps dump 落盘后清掉超出保留数的旧文件（按修改时间从旧删起）。
+// 只动 qoder-dump-*.json 这一种前缀，碰不到数据根里其它东西；
+// 清理失败只记日志——取证失败不该影响正常请求路径。
+func qoderPruneDumps(log *FileLogger) {
+	matches, err := filepath.Glob(dataPath("qoder-dump-*.json"))
+	if err != nil || len(matches) <= qoderDumpKeep {
+		return
+	}
+	type fileInfo struct {
+		path string
+		mod  time.Time
+	}
+	files := make([]fileInfo, 0, len(matches))
+	for _, p := range matches {
+		if st, err := os.Stat(p); err == nil {
+			files = append(files, fileInfo{p, st.ModTime()})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) }) // 新→旧
+	removed := 0
+	for _, f := range files[qoderDumpKeep:] {
+		if err := os.Remove(f.path); err == nil {
+			removed++
+		}
+	}
+	if removed > 0 && log != nil {
+		log.Log("已清理 %d 份过期 qoder dump（保留最近 %d 份）", removed, qoderDumpKeep)
 	}
 }
 

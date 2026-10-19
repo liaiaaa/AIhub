@@ -439,6 +439,7 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 				dumpPath := dataPath("qoder-dump-" + rid + ".json")
 				os.WriteFile(dumpPath, fb, 0644)
 				p.log.Log("[%s] ▶ DIAG 已 dump 完整请求: %s (%d 字节)", rid, dumpPath, len(fb))
+				qoderPruneDumps(p.log) // DIAG dump 也会积（1MB/份），同样只留最近几份
 			}
 		}
 	}

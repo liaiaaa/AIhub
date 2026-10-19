@@ -120,4 +120,6 @@ __pycache__/
 # ---- 国际线路「燃烧率」台账（含账号 uid 与余额，运行时状态；2026-10-19 补）----
 intl_burn.json
 # 上游模型目录缓存（含 fetched_at 与账号相关的模型清单，运行时状态；2026-10-19 补）
-wb_catalog_intl.json
+# 用通配而非逐个列举：2026-10-19 接上 dom 目录后生成了 wb_catalog_dom.json，
+# 写死 intl 就又漏一个（和凭证目录当初踩的坑一样）。
+wb_catalog_*.json

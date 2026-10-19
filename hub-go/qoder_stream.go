@@ -580,11 +580,19 @@ func qoderPruneDumps(log *FileLogger) {
 }
 
 // qoderBigPayloadHint 大载荷上游错误的客户端提示（拼在错误 message 尾部）。
+//
+// 2026-10-19 措辞修正：原提示断言「上游模型后端拒绝该载荷（重试无效）」，把
+// 失败归因于载荷体积——但同日实测推翻了这个归因：同一会话同一条 1634KB 载荷，
+// dfmodel 连续 provider_error，10 分钟后 qfmodel 原样通过（46.4s 正常出字）；
+// 此前对照实验里 1.6MB/2.1MB/2.9MB/3.9MB 单消息与多轮大载荷也全部通过。
+// 即 provider_error 的真因是**上游对该模型后端的临时故障**，与体积无关；
+// 大载荷 dump 只是因为它最值得取证，不代表它是原因。
+// 文案改为中性：先换同线路其它模型（最快见效），仍失败再考虑压缩/新会话。
 func qoderBigPayloadHint(payloadLen int) string {
 	if payloadLen < qoderBigPayloadBytes {
 		return ""
 	}
-	return fmt.Sprintf("\n\n[hub] 本请求载荷 %.1fMB：上游模型后端拒绝该载荷（重试无效，同账号同时段其他请求正常）。建议在 dsh 压缩上下文或新开会话后重试；失败载荷已自动 dump 供定位。", float64(payloadLen)/(1<<20))
+	return fmt.Sprintf("\n\n[hub] 本请求载荷 %.1fMB。上游网关报 provider_error：已重试仍失败，而同账号同时段其他请求正常——多为该模型后端的临时故障，与载荷体积无关（实测同一会话同一条 1.6MB 载荷，换模型即可通过）。建议：先换同线路其它模型重试；仍失败再压缩上下文或新开会话。失败载荷已 dump 供定位。", float64(payloadLen)/(1<<20))
 }
 
 // qoderUnwrapFrames 把上游包装帧流转成内层 OpenAI SSE 文本。

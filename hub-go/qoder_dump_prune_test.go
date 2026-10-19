@@ -105,3 +105,22 @@ func TestQoderPruneDumpsOnlyTouchesDumps(t *testing.T) {
 		t.Fatal("state.json 被误删了")
 	}
 }
+
+// 2026-10-19 措辞修正的回归钉：provider_error 的真因是上游对模型后端的临时
+// 故障（同会话同载荷换模型即通过），不是载荷体积。提示文案不能再把用户往
+// 「只能压缩/新开会话」上带——先换模型才是最快见效的路。
+func TestQoderBigPayloadHintWording(t *testing.T) {
+	got := qoderBigPayloadHint(1634 << 10)
+	for _, want := range []string{"临时故障", "换同线路其它模型"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("提示缺关键信息 %q：%s", want, got)
+		}
+	}
+	if strings.Contains(got, "上游模型后端拒绝该载荷") {
+		t.Error("旧文案把体积当原因，会误导用户（实测 1.6MB 换模型即通过）")
+	}
+	// 小载荷不带提示（取证门槛 512KB）
+	if got := qoderBigPayloadHint(100 << 10); got != "" {
+		t.Errorf("小载荷不应带大载荷提示：%s", got)
+	}
+}

@@ -1369,9 +1369,23 @@ function renderUsage() {
     prevDays = (usagePrev.days || []).filter(function (d) { return d.date < cut; });
   }
   const p = aggSum(prevDays);
-  const total = s.in + s.out + s.reason;
-  const pTotal = p.in + p.out + p.reason;
-  const hit = s.in + s.cached > 0 ? Math.round(s.cached / (s.in + s.cached) * 100) : null;
+  // 总 tokens = in + out（2026-10-19 修正）。
+  //
+  // 原来算成 in + out + reason，把 reasoning 加了第二遍：reason 取自
+  // completion_tokens_details.reasoning_tokens，是 completion_tokens（=out）的
+  // **子集**。全量实测 20881 条记录里 total == in+out 无一例外，而
+  // in+out+reason 平均高估 0.2%（样本：7455 正确 vs 7548 多算）。
+  const total = s.in + s.out;
+  const pTotal = p.in + p.out;
+  // 缓存命中率 = cached / in（2026-10-19 修正）。
+  //
+  // 原来算成 cached / (in + cached)，把 cached 当成 in 之外的额外量加了第二遍。
+  // 但 OpenAI 语义里 prompt_tokens_details.cached_tokens 是 prompt_tokens 的**子集**
+  // （本次实测 19958 条记录中 cached 从无一条超过 in，0 例外），所以：
+  //   in=3,909,623,323  cached=3,746,632,385
+  //   错误算法 → 48.9%；正确算法 → 95.8%
+  // 抽样单请求命中率也都在 97-99%，与 95.8% 同量级，与 48.9% 不符。
+  const hit = s.in > 0 ? Math.round(s.cached / s.in * 100) : null;
   const failPct = s.reqs ? (s.fail / s.reqs * 100).toFixed(1) : '0.0';
   const kpi = [
     ['总 tokens', fmtTok(total), '输入 ' + fmtTok(s.in) + (s.cached ? ' · 命中 ' + fmtTok(s.cached) : ''), deltaPct(total, pTotal), ''],

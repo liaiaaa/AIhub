@@ -250,6 +250,14 @@ func traePrepareBody(src map[string]any, model string) map[string]any {
 				continue
 			}
 			role, _ := m["role"].(string)
+			// 2026-10-20：dsh（OpenAI 新规范）会发 role=developer，Trae 上游只认
+			// ['system','assistant','user','tool','function']，见了 developer 整包
+			// 拒绝并回 code=4027「developer is not one of ...」。qoder 侧同款问题
+			// 在 qoderNormalizeMessages 里映射 developer→system，这里保持一致。
+			// （用户 16:52 报 Trae 在聚合口和 Codex 里都调不通，根因就是它。）
+			if role == "developer" {
+				m["role"] = "system"
+			}
 			if role == "assistant" {
 				if tcs, ok := m["tool_calls"].([]any); ok {
 					kept := make([]any, 0, len(tcs))

@@ -1059,7 +1059,7 @@ function renderCreds(line) {
     const bal = card.querySelector('.bal');
     if (bal) bal.textContent = (c.remain >= 0 ? Math.round(c.remain) + '/' + Math.round(c.total) : '');
     const why = card.querySelector('.why');
-    if (why) why.textContent = credWhy(c);
+    if (why) why.textContent = credWhy(c) + credExpiryTxt(c.expiries);
   });
   if (credTickTimer) clearInterval(credTickTimer);
   if (list.some(function (c) { return (!c.ok && c.until) || (c.model_limits && c.model_limits.length); })) {
@@ -1103,6 +1103,18 @@ function credBadgeText(c) {
   if (c.until && c.upstream_reset) return '限流到 ' + c.until;
   if (c.until) return '限流中';
   return c.state;
+}
+// credExpiryTxt 限时积分到期提醒（国内凭证卡片）。
+// 2026-10-20 用户要求：另一个会话在领成长中心积分，哪个凭证的积分快到期
+// 就切哪个凭证先用——卡片上必须直接看得见「礼包/补偿 × 几号到期 × 剩多少」。
+function credExpiryTxt(list) {
+  const items = (list || []).map(function (e) {
+    if (!e || !e.end) return '';
+    let t = e.label + ' ' + e.credit + ' 积分 ' + e.end + ' 到期';
+    if (e.remain) t += '（剩 ' + e.remain + '）';
+    return t;
+  }).filter(Boolean).join('；');
+  return items ? ' ⏰ ' + items : '';
 }
 function credWhy(c) {
   // 账号通道是通的、只有个别模型被限：以前这里直接 return ''，界面上只剩一个

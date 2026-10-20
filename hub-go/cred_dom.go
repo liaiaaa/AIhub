@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -149,6 +150,7 @@ func domCredStatusOne(name, dir string, selected bool) intlCredStatus {
 	if remain, total, ok := domCreditsFn(cm, p); ok {
 		st.Remain, st.Total = remain, total
 	}
+	st.Expiries = wbCreditExpiries(cm, p)
 
 	if e, limited := rateLimitFor(st.UID, ""); limited {
 		st.OK = false
@@ -220,4 +222,185 @@ func domCredsStatus(h *Hub, force bool) []intlCredStatus {
 	}
 	wg.Wait()
 	return out
+}
+
+// ---------- 积分到期显示（2026-10-20 用户要求） ----------
+//
+// 背景：用户的另一个会话在跑 WorkBuddy 成长中心领积分，领到的都是**限时积分**
+// （礼包 1500 到 10-31、补偿 500 到 10-22）。哪个凭证的积分快到期就该先用哪个，
+// 但控制台凭证卡片上只有总余额，看不出「里面有多少是几号到期的」。
+//
+// 数据源（两个都是 POST {} 空体，billing 域，UA 必须 WorkBuddy/5.5.4）：
+//   POST /billing/meter/check-gift-claimed  → data{claimed,active,credit_num,end_time}
+//   POST /billing/meter/compensation-status → data{claimed,active,credit_num,end_time}
+// 剩余量与资源包汇总（get-user-resource-summary 的 Packages）按金额对账：
+// CycleTotalCapacity == credit_num 视为同一个包，取它的 CycleRemainCapacity；
+// 对不上就不显示剩余、只给到期日（如某号礼包授予 1500 但包总量是 1000）。
+// 剩余为 0 的包整个隐藏——用完了的积分不存在「到期」，显示反而吓人。
+
+// credExpiry 凭证卡片上的单条到期提醒。
+type credExpiry struct {
+	Label  string `json:"label"`            // 礼包 / 补偿
+	Credit string `json:"credit"`           // 授予积分数
+	End    string `json:"end"`              // MM-DD
+	Remain string `json:"remain,omitempty"` // 该包剩余（能对上资源包时才有）
+}
+
+var (
+	wbExpiryMu    sync.Mutex
+	wbExpiryCache = map[string]wbExpiryEntry{}
+)
+
+type wbExpiryEntry struct {
+	At    time.Time
+	Items []credExpiry
+}
+
+// wbExpiryTTL 到期信息的缓存时长。数据一天变不了几次，卡片刷新又较频繁，
+// 不缓存的话每次刷新都打 3 个上游接口 × 凭证数。
+const wbExpiryTTL = 10 * time.Minute
+
+// wbCreditExpiries 某个国内凭证的限时积分列表（按到期日升序）。
+func wbCreditExpiries(cm *CredentialManager, p *Proxy) []credExpiry {
+	key := p.AuthFilePath()
+	now := time.Now()
+	wbExpiryMu.Lock()
+	if e, ok := wbExpiryCache[key]; ok && now.Sub(e.At) < wbExpiryTTL {
+		wbExpiryMu.Unlock()
+		return e.Items
+	}
+	wbExpiryMu.Unlock()
+
+	items := wbCreditExpiriesFetch(cm, p)
+
+	wbExpiryMu.Lock()
+	wbExpiryCache[key] = wbExpiryEntry{At: now, Items: items}
+	wbExpiryMu.Unlock()
+	return items
+}
+
+func wbCreditExpiriesFetch(cm *CredentialManager, p *Proxy) []credExpiry {
+	headers, err := cm.Headers()
+	if err != nil {
+		return nil
+	}
+	headers["User-Agent"] = "WorkBuddy/5.5.4"
+	headers["X-Product"] = "SaaS"
+	headers["X-IDE-Type"] = "WorkBuddy"
+	_, _, client := p.runtime()
+	if client == nil {
+		client = newBackendClient()
+		client.Timeout = 20 * time.Second
+	}
+	post := func(path string) map[string]any {
+		body, status, err := postJSONWithClient(client, p.Backend+path, headers, []byte("{}"))
+		if err != nil || status != http.StatusOK {
+			return nil
+		}
+		var env struct {
+			Code int            `json:"code"`
+			Data map[string]any `json:"data"`
+		}
+		if json.Unmarshal(body, &env) != nil || env.Code != 0 {
+			return nil
+		}
+		return env.Data
+	}
+
+	var out []credExpiry
+	add := func(label string, d map[string]any) {
+		if d == nil {
+			return
+		}
+		claimed, _ := d["claimed"].(bool)
+		active, _ := d["active"].(bool)
+		if !claimed || !active {
+			return
+		}
+		end := wbShortDate(d["end_time"])
+		if end == "" {
+			return
+		}
+		out = append(out, credExpiry{
+			Label:  label,
+			Credit: flexCreditString(d["credit_num"]),
+			End:    end,
+		})
+	}
+	add("礼包", post("/billing/meter/check-gift-claimed"))
+	add("补偿", post("/billing/meter/compensation-status"))
+	if len(out) == 0 {
+		return nil
+	}
+
+	// 与资源包对剩余量（见块顶注释的对账规则）。
+	if body, status, err := postJSONWithClient(client, p.Backend+"/billing/meter/get-user-resource-summary", headers, []byte("{}")); err == nil && status == http.StatusOK {
+		var sum struct {
+			Data struct {
+				Packages []struct {
+					CycleRemainCapacity flexNum `json:"cycleRemainCapacity"`
+					CycleTotalCapacity  flexNum `json:"cycleTotalCapacity"`
+				} `json:"packages"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &sum) == nil {
+			kept := out[:0]
+			for _, e := range out {
+				grant, errP := strconv.ParseFloat(e.Credit, 64)
+				if errP != nil {
+					kept = append(kept, e)
+					continue
+				}
+				matched := false
+				for _, pkg := range sum.Data.Packages {
+					if float64(pkg.CycleTotalCapacity) != grant {
+						continue
+					}
+					matched = true
+					remain := float64(pkg.CycleRemainCapacity)
+					if remain <= 0 {
+						break // 用完了：整条隐藏
+					}
+					e.Remain = strconv.FormatInt(int64(remain+0.5), 10)
+					kept = append(kept, e)
+					break
+				}
+				if !matched {
+					kept = append(kept, e) // 对不上包：只给到期日
+				}
+			}
+			out = kept
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].End < out[b].End })
+	return out
+}
+
+// wbShortDate "2026-10-31 23:59:59" → "10-31"；解析失败返回空。
+func wbShortDate(v any) string {
+	s, _ := v.(string)
+	if len(s) < 10 {
+		return ""
+	}
+	if s[4] != '-' || s[7] != '-' {
+		return ""
+	}
+	return s[5:10]
+}
+
+// flexCreditString credit_num 在 map[string]any 里是 float64（或字符串），转展示串。
+func flexCreditString(v any) string {
+	switch n := v.(type) {
+	case float64:
+		if n == float64(int64(n)) {
+			return strconv.FormatInt(int64(n), 10)
+		}
+		return strconv.FormatFloat(n, 'f', -1, 64)
+	case string:
+		return n
+	}
+	return ""
 }

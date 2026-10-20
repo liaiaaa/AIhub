@@ -342,6 +342,10 @@ type intlCredStatus struct {
 	// 2026-10-13 用户报：狗/<凭证目录C> deepseek-v4.1-flash 明明限到 11:54/11:01，
 	// 看板探活只用未受限的免费模型试，显示「✓ 可用」，等于没说。
 	ModelLimits []intlModelLimit `json:"model_limits,omitempty"`
+	// Expiries 限时积分到期提醒（国内凭证卡片用；国际版没有礼包/补偿接口，恒空）。
+	// 2026-10-20 用户要求：另一个会话在领 WorkBuddy 成长中心积分，限时积分
+	// 快到期该先用哪个凭证，卡片上要一眼看得见。
+	Expiries []credExpiry `json:"expiries,omitempty"`
 }
 
 // modelLimitsFor 列出该账号当前仍有效的模型级限流（读台账快照，不打上游）。

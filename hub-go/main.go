@@ -61,6 +61,16 @@ func main() {
 	// 该恢复哪些。现在由 state.json 的 last_lines 记住，这里异步恢复，
 	// 不阻塞控制台起来。用户主动停掉的线路会被 forgetLine 摘掉，不会自己回来。
 	go hub.restoreLines()
+	// 启动时自动刷新一次额度（2026-10-20 用户要求）：以前要等前端轮询或手动点
+	// 「刷新额度」才能看到余额/到期，现在起来就拉。异步不阻塞控制台；
+	// creditsSnapshot(force=true) 清五平台缓存，domCredsStatus(force=true)
+	// 清凭证卡片缓存（含积分到期，见 wbCreditExpiries）。
+	go func() {
+		time.Sleep(2 * time.Second)
+		creditsSnapshot(hub, true)
+		domCredsStatus(hub, true)
+		logHub("启动额度已自动刷新（余额 + 凭证状态 + 积分到期）")
+	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", hub.handleRoot)
 	mux.HandleFunc("/api/status", hub.apiStatus)

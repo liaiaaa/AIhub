@@ -526,7 +526,7 @@ func (b *qBodyReader) Close() error               { return b.c.Close() }
 //   1) ▶ REQUEST 日志行永久带上 payload 体积（见 qoder_proxy.go handleChat）；
 //   2) 首帧 provider_error 重试前，大载荷自动 dump（数据目录
 //      qoder-dump-<rid>-upstream.json，即发往网关的最终信封，可直接重放）；
-//   3) 客户端可见错误追加 [hub] 提示（见 qoderBigPayloadHint）。
+//   3) 客户端可见错误追加 [hub] 提示（见 qoderUpstreamHint）。
 
 // qoderBigPayloadBytes 视为「大载荷」的门槛（仅用于取证 dump 与提示措辞）。
 const qoderBigPayloadBytes = 512 << 10
@@ -579,20 +579,34 @@ func qoderPruneDumps(log *FileLogger) {
 	}
 }
 
-// qoderBigPayloadHint 大载荷上游错误的客户端提示（拼在错误 message 尾部）。
+// qoderUpstreamHint 上游 provider_error 的客户端提示（拼在错误 message 尾部）。
 //
-// 2026-10-19 措辞修正：原提示断言「上游模型后端拒绝该载荷（重试无效）」，把
-// 失败归因于载荷体积——但同日实测推翻了这个归因：同一会话同一条 1634KB 载荷，
-// dfmodel 连续 provider_error，10 分钟后 qfmodel 原样通过（46.4s 正常出字）；
-// 此前对照实验里 1.6MB/2.1MB/2.9MB/3.9MB 单消息与多轮大载荷也全部通过。
-// 即 provider_error 的真因是**上游对该模型后端的临时故障**，与体积无关；
-// 大载荷 dump 只是因为它最值得取证，不代表它是原因。
-// 文案改为中性：先换同线路其它模型（最快见效），仍失败再考虑压缩/新会话。
-func qoderBigPayloadHint(payloadLen int) string {
-	if payloadLen < qoderBigPayloadBytes {
-		return ""
+// 演进史（每条都是实测推翻了上一版的归因）：
+//
+//	2026-09 初版：以为「大载荷被上游拒绝」→ 加体积提示 + 大载荷 dump
+//	2026-10-19：同一会话同一条 1634KB 载荷，dfmodel 连续 provider_error、
+//	            10 分钟后 qfmodel 原样通过 → 改口「模型后端临时故障」
+//	2026-10-20：决定性对照（同账号、同时段、同模型）：
+//	              msgs=2   payload=3KB    → 成功（session title）
+//	              msgs=14  payload=61KB   → provider_error
+//	              msgs=117 payload=235KB  → provider_error
+//	              msgs=1517 payload=5.8MB → provider_error
+//	            61KB 就失败、3KB 就成功 → **与载荷体积彻底无关**，
+//	            也推翻了「大载荷才提示」这个门槛：小载荷失败同样需要解释。
+//
+// 所以现在：**所有** provider_error 都给提示（不再按体积设门槛），
+// 措辞聚焦「上游侧临时故障 + 多久自愈 + 该换哪个模型」，
+// 并明确区分「同线路另一个模型也是免费的」——qoder 的 dfmodel 与 qfmodel
+// 当前都在限时免费档，换过去不产生费用，这是用户最需要的行动指引。
+//
+// payloadLen 只用于在提示里附一句体积信息（供排查），不参与是否给提示的判断。
+func qoderUpstreamHint(payloadLen int) string {
+	size := ""
+	if payloadLen > 0 {
+		size = fmt.Sprintf("本请求 %.1fMB。", float64(payloadLen)/(1<<20))
 	}
-	return fmt.Sprintf("\n\n[hub] 本请求载荷 %.1fMB。上游网关报 provider_error：已重试仍失败，而同账号同时段其他请求正常——多为该模型后端的临时故障，与载荷体积无关（实测同一会话同一条 1.6MB 载荷，换模型即可通过）。建议：先换同线路其它模型重试；仍失败再压缩上下文或新开会话。失败载荷已 dump 供定位。", float64(payloadLen)/(1<<20))
+	return "\n\n[hub] 上游网关 provider_error —— 这是 qoder 侧的临时故障，与你的请求大小、内容都无关（实测同账号同时段 3KB 请求成功、61KB 失败，且几分钟后同一载荷重放即可通过）。" + size +
+		"建议：等 1-2 分钟直接重试；若持续失败，切到同线路的 Qwen3.8-Flash —— 它与 DeepSeek-Flash 当前同为限时免费档，换过去不产生费用。"
 }
 
 // qoderUnwrapFrames 把上游包装帧流转成内层 OpenAI SSE 文本。
@@ -842,7 +856,7 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			}
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{
 				"error": map[string]any{
-					"message": errMsg + qoderBigPayloadHint(len(payload)),
+					"message": errMsg + qoderUpstreamHint(len(payload)),
 					"type":    "upstream_error",
 					"code":    "upstream_error",
 				},
@@ -964,7 +978,7 @@ func (p *QoderProxy) aggregateToClient(w http.ResponseWriter, r *http.Request, p
 			msg = truncate(ferr, 500)
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error": map[string]any{"message": truncate(msg, 500) + qoderBigPayloadHint(len(payload)), "type": "upstream_error"},
+			"error": map[string]any{"message": truncate(msg, 500) + qoderUpstreamHint(len(payload)), "type": "upstream_error"},
 		})
 		return
 	}
@@ -1123,7 +1137,7 @@ func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Reque
 		if !isErr {
 			msg = truncate(ferr, 500)
 		}
-		writeErrEvent(http.StatusBadGateway, msg+qoderBigPayloadHint(len(payload)))
+		writeErrEvent(http.StatusBadGateway, msg+qoderUpstreamHint(len(payload)))
 		return
 	}
 	innerStr := qoderRewriteStreamForThinking(inner.String())

@@ -106,21 +106,37 @@ func TestQoderPruneDumpsOnlyTouchesDumps(t *testing.T) {
 	}
 }
 
-// 2026-10-19 措辞修正的回归钉：provider_error 的真因是上游对模型后端的临时
-// 故障（同会话同载荷换模型即通过），不是载荷体积。提示文案不能再把用户往
-// 「只能压缩/新开会话」上带——先换模型才是最快见效的路。
-func TestQoderBigPayloadHintWording(t *testing.T) {
-	got := qoderBigPayloadHint(1634 << 10)
-	for _, want := range []string{"临时故障", "换同线路其它模型"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("提示缺关键信息 %q：%s", want, got)
+// 2026-10-20 回归钉：provider_error 与载荷体积**彻底无关**，所以提示不再
+// 按体积设门槛——小载荷失败同样要给用户解释。
+//
+// 决定性对照（同账号、同时段、同模型 dfmodel）：
+//   msgs=2    payload=3KB    → 成功（session title）
+//   msgs=14   payload=61KB   → provider_error
+//   msgs=117  payload=235KB  → provider_error
+//   msgs=1517 payload=5.8MB  → provider_error
+// 61KB 就失败、3KB 就成功，说明旧门槛（512KB 才提示）是错的。
+func TestQoderUpstreamHintAlwaysExplains(t *testing.T) {
+	// 关键：小载荷也必须给提示（61KB 实测会失败）
+	for _, size := range []int{61 << 10, 235 << 10, 1634 << 10, 5 << 20} {
+		got := qoderUpstreamHint(size)
+		if got == "" {
+			t.Fatalf("载荷 %dKB 失败时不该静默——必须给提示（实测 61KB 就会 provider_error）", size>>10)
+		}
+		for _, want := range []string{"临时故障", "无关", "Qwen3.8-Flash", "免费"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("载荷 %dKB 的提示缺 %q：%s", size>>10, want, got)
+			}
 		}
 	}
-	if strings.Contains(got, "上游模型后端拒绝该载荷") {
-		t.Error("旧文案把体积当原因，会误导用户（实测 1.6MB 换模型即通过）")
+	// 旧归因必须消失
+	got := qoderUpstreamHint(61 << 10)
+	for _, bad := range []string{"拒绝该载荷", "上游模型后端拒绝"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("旧文案把体积当原因：%s", got)
+		}
 	}
-	// 小载荷不带提示（取证门槛 512KB）
-	if got := qoderBigPayloadHint(100 << 10); got != "" {
-		t.Errorf("小载荷不应带大载荷提示：%s", got)
+	// payloadLen=0 也要能给出提示（只是不带体积信息）
+	if g := qoderUpstreamHint(0); g == "" || strings.Contains(g, "0.0MB") {
+		t.Errorf("payloadLen=0 时不该出现 0.0MB，且仍要有提示：%q", g)
 	}
 }

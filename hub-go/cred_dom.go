@@ -133,7 +133,7 @@ func domCreditsRaw(cm *CredentialManager, p *Proxy) (remain, total float64, ok b
 // 判定顺序与 intlCredStatusOne 保持一致：无凭据 → 本地台账 → 真探活。
 // 台账放在探活前面是因为它更快且不消耗额度；但台账没记录**不等于**能用，
 // 所以最后必须真打一次。
-func domCredStatusOne(name, dir string, selected bool) intlCredStatus {
+func domCredStatusOne(name, dir string, selected bool, force bool) intlCredStatus {
 	st := intlCredStatus{Name: name, Remain: -1, Selected: selected, State: "未知"}
 
 	p := NewDomProxyDir(dir)
@@ -150,7 +150,7 @@ func domCredStatusOne(name, dir string, selected bool) intlCredStatus {
 	if remain, total, ok := domCreditsFn(cm, p); ok {
 		st.Remain, st.Total = remain, total
 	}
-	st.Expiries = wbCreditExpiries(cm, p)
+	st.Expiries = wbCreditExpiries(cm, p, force)
 
 	if e, limited := rateLimitFor(st.UID, ""); limited {
 		st.OK = false
@@ -197,10 +197,43 @@ var domProbeInferFn = domProbeInfer
 var domCreditsFn = domCreditsRaw
 
 // domCredsStatus 并发列出全部国内凭证的状态。
+var (
+	domCredsMu    sync.Mutex
+	domCredsCache []intlCredStatus
+	domCredsHave  bool
+)
+
+// domCredsCacheReset 清空凭证卡片缓存。测试隔离用；生产里缓存只被
+// force=true（手动「刷新额度」/ 启动预热）覆盖。
+func domCredsCacheReset() {
+	domCredsMu.Lock()
+	domCredsCache, domCredsHave = nil, false
+	domCredsMu.Unlock()
+}
+
+// domCredsStatus 国内凭证卡片数据。
+//
+// 2026-10-20 用户拍板：**启动时拉一次就够，之后只吃缓存**，手动点「刷新额度」
+// 才真正重打上游。此前每次进线路页都对每个凭证发一串请求（Summary + 余额 +
+// 推理探活 + 积分到期 3 连发），凭证多的时候一开页面就是十几个上游调用。
+// 缓存没有 TTL——过期只由 force 驱动。唯一每读都要刷新的字段是 Selected
+// （切凭证不该等用户手动刷新才高亮），读出时按当前 domCred 现算。
 func domCredsStatus(h *Hub, force bool) []intlCredStatus {
 	h.mu.Lock()
 	selected := h.domCred
 	h.mu.Unlock()
+
+	domCredsMu.Lock()
+	cached, have := domCredsCache, domCredsHave
+	domCredsMu.Unlock()
+	if have && !force {
+		out := make([]intlCredStatus, len(cached))
+		for i, st := range cached {
+			st.Selected = st.Name == selected
+			out[i] = st
+		}
+		return out
+	}
 
 	dirs := domCredDirs()
 	names := make([]string, 0, len(dirs))
@@ -217,10 +250,14 @@ func domCredsStatus(h *Hub, force bool) []intlCredStatus {
 		wg.Add(1)
 		go func(i int, name string) {
 			defer wg.Done()
-			out[i] = domCredStatusOne(name, dirs[name], name == selected)
+			out[i] = domCredStatusOne(name, dirs[name], name == selected, force)
 		}(i, name)
 	}
 	wg.Wait()
+
+	domCredsMu.Lock()
+	domCredsCache, domCredsHave = out, true
+	domCredsMu.Unlock()
 	return out
 }
 
@@ -261,13 +298,17 @@ type wbExpiryEntry struct {
 const wbExpiryTTL = 10 * time.Minute
 
 // wbCreditExpiries 某个国内凭证的限时积分列表（按到期日升序）。
-func wbCreditExpiries(cm *CredentialManager, p *Proxy) []credExpiry {
+// force=true（手动「刷新额度」）绕过 TTL 直接重拉；平时只吃缓存，
+// 配合 domCredsStatus 的进程级缓存，做到「启动拉一次，之后不再动」。
+func wbCreditExpiries(cm *CredentialManager, p *Proxy, force bool) []credExpiry {
 	key := p.AuthFilePath()
 	now := time.Now()
 	wbExpiryMu.Lock()
-	if e, ok := wbExpiryCache[key]; ok && now.Sub(e.At) < wbExpiryTTL {
-		wbExpiryMu.Unlock()
-		return e.Items
+	if !force {
+		if e, ok := wbExpiryCache[key]; ok && now.Sub(e.At) < wbExpiryTTL {
+			wbExpiryMu.Unlock()
+			return e.Items
+		}
 	}
 	wbExpiryMu.Unlock()
 

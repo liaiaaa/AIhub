@@ -53,6 +53,7 @@ func TestDomCredStatusUsesProbe(t *testing.T) {
 
 	h := &Hub{}
 	h.domCred = "甲凭证"
+	domCredsCacheReset() // 进程级缓存会跨测试泄漏，先清（2026-10-20 缓存化后必须）
 	list := domCredsStatus(h, true)
 	if len(list) != 1 {
 		t.Fatalf("应列出 1 个国内凭证，实际 %d：%+v", len(list), list)
@@ -94,6 +95,7 @@ func TestDomCredStatusPrefersLedgerOverProbe(t *testing.T) {
 	domCreditsFn = func(cm *CredentialManager, p *Proxy) (float64, float64, bool) { return -1, -1, false }
 	t.Cleanup(func() { domProbeInferFn, domCreditsFn = oldProbe, oldCred })
 
+	domCredsCacheReset() // 进程级缓存会跨测试泄漏，先清（2026-10-20 缓存化后必须）
 	c := domCredsStatus(&Hub{}, false)[0]
 	if c.OK || c.State != "风控" {
 		t.Fatalf("台账说风控就该标风控：%+v", c)
@@ -118,6 +120,7 @@ func TestDomCredStatusListsModelLimits(t *testing.T) {
 	domCreditsFn = func(cm *CredentialManager, p *Proxy) (float64, float64, bool) { return 10, 20, true }
 	t.Cleanup(func() { domProbeInferFn, domCreditsFn = oldProbe, oldCred })
 
+	domCredsCacheReset() // 进程级缓存会跨测试泄漏，先清（2026-10-20 缓存化后必须）
 	c := domCredsStatus(&Hub{}, false)[0]
 	if !c.OK {
 		t.Fatalf("模型级限流不该把账号判死：%+v", c)
@@ -144,6 +147,7 @@ func TestDomCredStatusProbeFailureCarriesReason(t *testing.T) {
 	domCreditsFn = func(cm *CredentialManager, p *Proxy) (float64, float64, bool) { return -1, -1, false }
 	t.Cleanup(func() { domProbeInferFn, domCreditsFn = oldProbe, oldCred })
 
+	domCredsCacheReset() // 进程级缓存会跨测试泄漏，先清（2026-10-20 缓存化后必须）
 	c := domCredsStatus(&Hub{}, false)[0]
 	if c.OK {
 		t.Fatal("探活失败不该标可用")

@@ -258,10 +258,96 @@ func qoderNormalizeMessages(msgs []any) []any {
 			changed = true
 			continue
 		}
+		// 2026-10-20 关键修复：assistant/tool 的 null content 必须补成空串。
+		//
+		// dsh 发带 tool_calls 的 assistant 消息时 content 是 null（OpenAI 规范
+		// 允许，内容全在 tool_calls 里）。qoder 网关不接受 null，整包拒绝并回：
+		//   "Messages with role 'tool' must be a response to a preceding message
+		//    with 'tool_calls'"
+		// 错误文案指向 tool 配对，实际是 null 触发解析中断 —— 误导性极强。
+		//
+		// 二分定位（同一份真实 dump，只改 content）：
+		//   完整 27 条           → ✗ provider_error
+		//   content=None → ""    → ✅ 通过
+		//   前 21 条（含 None）   → ✗ provider_error
+		//   前 21 条（None→""）  → ✅ 通过
+		//
+		// 只补 assistant/tool：user/system 的 null 语义上不该出现，不静默改写。
+		if (role == "assistant" || role == "tool") && mm["content"] == nil {
+			nm := cloneMap(mm)
+			nm["content"] = ""
+			out = append(out, nm)
+			changed = true
+			continue
+		}
 		out = append(out, m)
 	}
+	// 2026-10-20 第二个修复：补齐未响应的 tool_calls。
+	//
+	// 上游要求每个 assistant.tool_calls 后面必须有对应的 role=tool 消息，
+	// 否则整包拒绝。而实际请求里经常出现「末尾 assistant 带 tool_calls 就结束」
+	// —— 历史被截断、或工具执行到一半客户端就放弃了。dsh 侧这种情况不罕见。
+	//
+	// 二分证据（真实 dump，28 条，末尾 #27 是孤立 tool_calls）：
+	//   完整 28 条          → ✗ provider_error
+	//   去掉最后一条         → ✅ 通过
+	//   补上 tool 响应       → ✅ 通过
+	//
+	// 处理：为每个没被响应的 tool_call_id 补一条 role=tool、content="(无输出)"。
+	// 补在**该 assistant 消息之后**（而不是末尾），保持配对紧邻。
+	out = qoderFillDanglingToolCalls(out)
 	if !changed {
+		// 即便前面的循环没改动，补齐也可能改过长度
+		if len(out) == len(msgs) {
+			return msgs
+		}
+	}
+	return out
+}
+
+// qoderFillDanglingToolCalls 给未被响应的 tool_calls 补上占位 tool 消息。
+// 保持 OpenAI 语义：tool 消息必须紧跟在其 assistant(tool_calls) 之后。
+func qoderFillDanglingToolCalls(msgs []any) []any {
+	if len(msgs) == 0 {
 		return msgs
+	}
+	// 先统计哪些 tool_call_id 已被响应
+	answered := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		if mm, ok := m.(map[string]any); ok {
+			if role, _ := mm["role"].(string); role == "tool" {
+				if id, _ := mm["tool_call_id"].(string); id != "" {
+					answered[id] = true
+				}
+			}
+		}
+	}
+	out := make([]any, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, m)
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := mm["role"].(string); role != "assistant" {
+			continue
+		}
+		tcs, _ := mm["tool_calls"].([]any)
+		for _, tc := range tcs {
+			tm, ok := tc.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := tm["id"].(string)
+			if id == "" || answered[id] {
+				continue
+			}
+			out = append(out, map[string]any{
+				"role":         "tool",
+				"tool_call_id": id,
+				"content":      "(无输出)",
+			})
+		}
 	}
 	return out
 }
@@ -490,7 +576,7 @@ func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log
 			if providerErrs < 2 {
 				resp.Body.Close()
 				if log != nil {
-					log.Log("[%s] ⚠ 上游首帧错误(%s)，重试 %d/2", rid, truncate(data, 120), providerErrs+1)
+					log.Log("[%s] ⚠ 上游首帧错误(%s)，重试 %d/2", rid, truncate(data, 2000), providerErrs+1)
 				}
 				if providerErrs == 0 {
 					qoderDumpFailedPayload(rid, payload, log)
@@ -534,7 +620,12 @@ const qoderBigPayloadBytes = 512 << 10
 // qoderDumpFailedPayload 首帧 provider_error 且载荷较大时，把发往网关的
 // 最终信封原样落盘供重放定位；小载荷/成功路径零开销。
 func qoderDumpFailedPayload(rid string, payload []byte, log *FileLogger) {
-	if len(payload) < qoderBigPayloadBytes || log == nil {
+	// 2026-10-20：不再按体积设门槛。
+	// 原实现只在 payload >= 512KB 时 dump，但实测失败请求常是 235KB ——
+	// 也就是说**所有真实失败样本从来没被保存过**，排查时只能拿到我自己
+	// 构造的成功请求，导致连续误判三次（先怪体积、再怪模型后端、再怪 token 数）。
+	// 失败载荷是最稀缺的排查材料，体积不该成为要不要留的判断条件。
+	if log == nil {
 		return
 	}
 	dumpPath := dataPath("qoder-dump-" + rid + "-upstream.json")
@@ -553,6 +644,11 @@ const qoderDumpKeep = 5
 // 只动 qoder-dump-*.json 这一种前缀，碰不到数据根里其它东西；
 // 清理失败只记日志——取证失败不该影响正常请求路径。
 func qoderPruneDumps(log *FileLogger) {
+	// 排查期可用 QODER_KEEP_DUMPS=1 关闭清理，避免失败样本被自己删掉
+	// （2026-10-20 排查时连续两次把要分析的样本清了，白跑几轮）。
+	if os.Getenv("QODER_KEEP_DUMPS") == "1" {
+		return
+	}
 	matches, err := filepath.Glob(dataPath("qoder-dump-*.json"))
 	if err != nil || len(matches) <= qoderDumpKeep {
 		return

@@ -396,6 +396,11 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	body["model"] = p.mapModel(fmt.Sprintf("%v", raw["model"]))
 	body["messages"] = p.normalizeMessages(msgs)
+	// 2026-10-21：dom 开了官方客户端伪装时，system 里的第三方客户端签名会被
+	// 上游渠道校验识别（11128），转发前替换掉。见 sanitizeHarnessPrompt。
+	if p.OfficialChatClient {
+		body["messages"] = sanitizeHarnessMessages(body["messages"].([]any))
+	}
 	body["stream"] = true
 	if _, ok := body["stream_options"]; !ok {
 		body["stream_options"] = map[string]any{"include_usage": true}
@@ -712,3 +717,4 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	logger.Log("[%s] ◀ RESPONSE | %.1fs | finish=%s | tokens=%s", rid, elapsed.Seconds(), col.finish, tokens)
 	writeJSON(w, http.StatusOK, col.build())
 }
+

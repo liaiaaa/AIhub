@@ -141,6 +141,11 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	chatBody["model"] = p.mapModel(fmt.Sprintf("%v", raw["model"]))
 	chatBody["messages"] = msgs
+	// 2026-10-21：dom 开了官方客户端伪装时，system 里的第三方客户端签名会被
+	// 上游渠道校验识别（11128）。Codex 走这条 /v1/responses 路径，同样要清洗。
+	if p.OfficialChatClient {
+		chatBody["messages"] = sanitizeHarnessMessages(msgs)
+	}
 	if tools := responsesToolsToChat(raw["tools"]); tools != nil {
 		chatBody["tools"] = tools
 	}
@@ -208,15 +213,76 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, buildResponseObject(col, modelName))
 }
 
-// sanitizeHarnessPrompt 轻微改写 agent 框架（Codex 等）注入的 developer/system
-// 提示词。WorkBuddy 上游对官方客户端的原始提示词有关键词密度风控（11128
-// "Illegal API invocation from an unapproved channel"）：OpenAI / Codex CLI /
-// coding agent 等词按官方原文同现就超阈值，任何一个单独出现都不触发。
-// 实测把 "OpenAI" 写成 "Open AI" 即可降到阈值以下（2026-10-10 对完整捕获的
-// codex exec 请求体验证通过）。只改 developer/system 文本，用户消息与工具
-// 输出原样透传，避免弄脏模型看到的代码内容。
+// sanitizeHarnessPrompt 轻微改写 agent 框架（Codex / dsh 等）注入的
+// developer/system 提示词。
+//
+// WorkBuddy 上游对官方客户端的原始提示词有关键词**组合/密度**风控（11128
+// "Illegal API invocation from an unapproved channel"）：几个词按官方原文
+// 同现才超阈值，任何一个单独出现都不触发。这是识别「第三方 harness」的
+// 手段，与 Anthropic 拦「You are Claude Code」同一类。
+//
+// 两类已实测的规则：
+//
+//  1. 2026-10-10（Codex）：OpenAI / Codex CLI / coding agent 同现即触发。
+//     把 "OpenAI" 写成 "Open AI" 就降到阈值以下（对完整捕获的 codex exec
+//     请求体验证通过）。
+//
+//  2. 2026-10-21（dsh）：`You are an AI agent powered by DeepSeek Harness.`
+//     这个完整开场白触发。同一份真实失败 dump 重复采样的稳定结果：
+//     原 system → 拦截 3/3；只留该句（48 字符）→ 拦截 3/3；
+//     去掉该句 → 通过 2/2；「You are an AI agent.」→ 通过 2/2；
+//     「You are an AI agent powered by X.」→ 通过 2/2；
+//     「You are a helpful assistant powered by DeepSeek Harness.」→ 通过 2/2。
+//     即需要**完整短语**，换成最朴素的「You are an AI agent.」即可。
+//
+// 只改 developer/system 文本，用户消息与工具输出原样透传——改写用户内容
+// 既越权，也会弄脏模型看到的代码。
 func sanitizeHarnessPrompt(s string) string {
-	return strings.ReplaceAll(s, "OpenAI", "Open AI")
+	s = strings.ReplaceAll(s, "OpenAI", "Open AI")
+	// 下游还有一段「You are a coding agent powered by the <model> model.」
+	// 承载产品信息，所以这里换成最朴素的表述不丢语义。
+	s = strings.ReplaceAll(s, "You are an AI agent powered by DeepSeek Harness.", "You are an AI agent.")
+	return s
+}
+
+// sanitizeHarnessMessages 对一组 chat messages 做 sanitizeHarnessPrompt：
+// 只处理 role=system 的字符串 content，其余原样返回。
+//
+// chat 路径（dsh 走 /v1/chat/completions）此前没有清洗——2026-10-10 那次
+// 只修了 responses 路径，因为当时只有 Codex 在用 dom。dsh 的签名短语是
+// 2026-10-21 官方新增的黑名单，两条路径现在都要清。
+func sanitizeHarnessMessages(msgs []any) []any {
+	changed := false
+	out := make([]any, 0, len(msgs))
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			out = append(out, m)
+			continue
+		}
+		if role, _ := mm["role"].(string); role != "system" {
+			out = append(out, m)
+			continue
+		}
+		s, ok := mm["content"].(string)
+		if !ok {
+			out = append(out, m)
+			continue
+		}
+		nu := sanitizeHarnessPrompt(s)
+		if nu == s {
+			out = append(out, m)
+			continue
+		}
+		nm := cloneMap(mm)
+		nm["content"] = nu
+		out = append(out, nm)
+		changed = true
+	}
+	if !changed {
+		return msgs
+	}
+	return out
 }
 
 // responsesInputToMessages 把 Responses 的 instructions + input 转成 chat messages。

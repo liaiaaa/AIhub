@@ -177,6 +177,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 让客户端（和用户）看到人话而不是干巴巴的 429。
 func (p *Proxy) doUpstreamRetry429(ctx context.Context, client *http.Client, auth AuthProvider, url string, headers map[string]string, payload []byte, logger *FileLogger, rid string) (*http.Response, error) {
 	resp, err := p.doUpstream(ctx, client, auth, url, headers, payload)
+	if err != nil {
+		return resp, err
+	}
+	// 渠道校验拦截（11128）优先于 429 处理：它是随机拦截、等待短，
+	// 而且和限流是两回事（见本文件末尾 channelBlock 段注释）。
+	resp, err = p.retryChannelBlock(ctx, client, auth, url, headers, payload, logger, rid, resp, err)
 	if err != nil || resp.StatusCode != http.StatusTooManyRequests {
 		return resp, err
 	}
@@ -365,4 +371,132 @@ func isQuotaSignal(code int, msg string) bool {
 	}
 	// 上游换码但文案仍写明频控的，按文案放行。
 	return strings.Contains(msg, "frequency limit") || strings.Contains(msg, "too many requests")
+}
+
+// ---------- 渠道校验拦截（11128）静默重试 ----------
+//
+// 2026-10-21 用户报国内线路报：
+//
+//	400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel",
+//	     "displayMsg":{"zh":"请求被拦截，请重新发送"},
+//	     "displayTips":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的…"}}
+//
+// 查历史频率：10-10 出现 13 次、10-13 出现 6 次、10-21 出现 1 次 —— 不是
+// 持续封禁，是**间歇性的渠道风控**（同一分钟内 msgs=2 的 title 请求能过、
+// msgs=22 的对话被拦；隔一会儿再发同一形状又能过）。
+//
+// 两个直接证据说明「重试就该通过」：
+//  1) 上游 displayMsg 自己写的是「请求被拦截，请重新发送」/「Request blocked.
+//     Please send it again」——明示客户端重发；
+//  2) 实测今天 09:00 之后用同样的请求形状连续 5 次全部通过。
+//
+// 而 hub 之前把 400 原样透传，用户看到报错只能手动重发。这里在 hub 内部
+// 静默重试，客户端无感。等待比 429 短（1.5s 递增），因为它是随机拦截而非
+// 限流窗口，长等无意义。
+
+// channelBlockCode 渠道校验拦截的业务码。
+const channelBlockCode = 11128
+
+// channelBlockRetries 最多重试次数（原始 1 次 + 这里 3 次 = 4 次请求）。
+const channelBlockRetries = 3
+
+// channelBlockWait 第 n 次重试前的等待：1.5s / 3s / 4.5s。
+func channelBlockWait(attempt int) time.Duration {
+	return time.Duration(attempt) * 1500 * time.Millisecond
+}
+
+// channelBlockDisabled 环境变量关闭开关（设为 1 即退回原样透传）。
+const channelBlockDisabledEnv = "AIHUB_NO_CHANNEL_RETRY"
+
+func channelBlockDisabled() bool {
+	return strings.TrimSpace(os.Getenv(channelBlockDisabledEnv)) == "1"
+}
+
+// isChannelBlockBody 判断响应体是不是 11128 渠道拦截。
+// 只认 status 400 + 明确业务码，避免把别的 400 也拿去重试（比如 11115
+// prompt too long 重试多少次都没用）。
+func isChannelBlockBody(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	if !bytes.Contains(body, []byte(`"code":11128`)) {
+		return false
+	}
+	// 同码还有 "conversation id missing" / "first message is not system prompt"
+	// 两种 msg（见 converter-intl.log 历史）。前者是缺会话四头，重试无用，
+	// 该由 withConversationHeaders 解决；后者是消息形状问题，重试也白搭。
+	// 只对「渠道未授权」这一类重试。
+	return bytes.Contains(body, []byte("unapproved channel"))
+}
+
+// retryChannelBlock 命中 11128 时在内部重试；返回最终的 resp。
+//
+// 注意流式：这里只处理「还没向客户端写过任何字节」的阶段（resp 拿回来、
+// 状态码非 200 的分支），所以重试安全。若 11128 出现在 200 之后的 SSE 帧里
+// （intl 2026-10-16 踩过这种形态），本函数管不到，由上层错误帧逻辑处理。
+func (p *Proxy) retryChannelBlock(ctx context.Context, client *http.Client, auth AuthProvider, url string, headers map[string]string, payload []byte, logger *FileLogger, rid string, resp *http.Response, err error) (*http.Response, error) {
+	if err != nil || resp == nil || channelBlockDisabled() {
+		return resp, err
+	}
+	for attempt := 1; ; attempt++ {
+		if resp.StatusCode != http.StatusBadRequest {
+			return resp, nil
+		}
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, retry429BodyLimit))
+		resp.Body.Close()
+		if rerr != nil || !isChannelBlockBody(resp.StatusCode, body) {
+			// 不是渠道拦截：把 body 原样放回去，交给后续逻辑
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			return resp, nil
+		}
+		if attempt > channelBlockRetries {
+			logger.Log("[%s] ✗ 渠道校验拦截（11128）重试 %d 次仍失败 | %s",
+				rid, attempt-1, truncate(string(body), 160))
+			resp.Body = io.NopCloser(bytes.NewReader(annotateChannelBlockGiveUp(body, attempt-1)))
+			return resp, nil
+		}
+		wait := channelBlockWait(attempt)
+		logger.Log("[%s] ⏳ 渠道校验拦截（11128），%.1fs 后重试（第 %d/%d 次）",
+			rid, wait.Seconds(), attempt, channelBlockRetries)
+		if !sleepCtx(ctx, wait) {
+			logger.Log("[%s] ✗ 渠道拦截重试等待中被取消", rid)
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			return resp, nil
+		}
+		var nerr error
+		resp, nerr = p.doUpstream(ctx, client, auth, url, headers, payload)
+		if nerr != nil {
+			return nil, nerr
+		}
+		if resp.StatusCode == http.StatusOK {
+			logger.Log("[%s] ✓ 渠道校验重试成功（第 %d 次，共等 %.1fs）",
+				rid, attempt, float64(attempt)*1.5)
+			return resp, nil
+		}
+	}
+}
+
+// annotateChannelBlockGiveUp 重试也失败时，给客户端一句能行动的说明。
+func annotateChannelBlockGiveUp(body []byte, attempts int) []byte {
+	note := fmt.Sprintf("\n\n[hub] 渠道校验拦截（11128）：已在 hub 内部重试 %d 次仍未通过。"+
+		"这类拦截大多是上游随机风控，隔几分钟再发通常就过；"+
+		"若持续出现，可在控制台换一条线路或换个模型。", attempts)
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return append(body, []byte(note)...)
+	}
+	if dm, ok := m["displayMsg"].(map[string]any); ok {
+		if zh, ok := dm["zh"].(string); ok {
+			dm["zh"] = zh + note
+		} else {
+			dm["zh"] = strings.TrimPrefix(note, "\n\n")
+		}
+	} else {
+		m["hub_hint"] = strings.TrimPrefix(note, "\n\n")
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }

@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"os"
 	"path/filepath"
 	"testing"
@@ -157,26 +158,44 @@ func TestDomCredStatusProbeFailureCarriesReason(t *testing.T) {
 	}
 }
 
-// 探活的请求头必须与推理路径同源：国内线路开了会话头注入，探活漏了就是
+// 探活的请求头必须与推理路径同源：国内线路开了官方客户端伪装，探活漏了就是
 // 「推理能用、看板全红」（2026-10-16 intl 踩过，见 intlProbeHeaders）。
+//
+// 2026-10-21 更新：dom 从「只补会话四头」升级为「整套官方客户端指纹」后，
+// 断言随之改为「探活也必须是官方指纹」，并且直接比对两条路径的关键头——
+// 这才是原测试真正想守住的东西（同源），比列举几个键更抗后续改动。
 func TestDomProbeHeadersMatchInferencePath(t *testing.T) {
 	p := NewDomProxyDir("")
-	p.ConversationHeaders = true
-	h := p.domProbeHeaders(map[string]string{"Authorization": "Bearer t"})
-	// 键名大小写必须与 withConversationHeaders 写的一致（ID 全大写），
+	probe := p.domProbeHeaders(map[string]string{"Authorization": "Bearer t"})
+	infer := p.withConversationHeaders(map[string]string{"Authorization": "Bearer t"})
+
+	// 1) 探活必须带齐会话 id 与对话专项头
+	// 键名大小写必须与 officialChatHeaders 写的一致（ID 全大写），
 	// Go 的 map 键区分大小写，写成 "X-Conversation-Id" 会误判成缺失。
-	for _, k := range []string{"X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID", "X-Request-ID"} {
-		if h[k] == "" {
+	for _, k := range []string{
+		"X-Conversation-ID", "X-Conversation-Request-ID",
+		"X-Conversation-Message-ID", "X-Request-ID",
+		"X-Agent-Intent", "X-Agent-Type", "X-Agent-Purpose",
+		"X-IDE-Name", "X-IDE-Type", "X-IDE-Version", "X-Private-Data",
+	} {
+		if probe[k] == "" {
 			t.Errorf("国内探活头缺 %s", k)
 		}
 	}
-	if h["User-Agent"] != p.UserAgent {
-		t.Errorf("探活 UA 应取线路 UA，得到 %q", h["User-Agent"])
+
+	// 2) 探活 UA 必须与推理路径一致（都是官方内置 CLI 形态），
+	//    不能是线路自己的 codebuddy2openai/2.0 —— 那正是被渠道校验拦的形状。
+	if probe["User-Agent"] != infer["User-Agent"] {
+		t.Errorf("探活 UA 与推理不一致：探活 %q / 推理 %q", probe["User-Agent"], infer["User-Agent"])
 	}
-	// 没开注入的线路不该被动过（dom 目前显式置位，其它线路保持原样）。
-	q := NewDomProxyDir("")
+	if !strings.HasPrefix(probe["User-Agent"], "WorkBuddy/") {
+		t.Errorf("探活 UA 应为官方形态，得到 %q", probe["User-Agent"])
+	}
+
+	// 3) 两个开关都没开的线路不应被动过（其它线路保持原样）
+	q := &Proxy{}
 	if got := q.domProbeHeaders(map[string]string{}); len(got) != 2 {
-		t.Errorf("未置位的线路被加了会话头：%v", got)
+		t.Errorf("未置位的线路被加了头：%v", got)
 	}
 }
 

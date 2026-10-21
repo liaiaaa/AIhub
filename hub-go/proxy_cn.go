@@ -30,6 +30,9 @@ func NewDomProxyDir(dir string) *Proxy {
 		Aliases:       map[string]string{},
 		AuthFileName:  "workbuddy-desktop.info",
 		PrependSystem: false,
+		// 2026-10-20 23:00 起腾讯给对话网关加了第三方客户端渠道校验（11128），
+		// 整套请求指纹按官方桌面端内置 CLI 对齐，见 officialChatHeaders。
+		OfficialChatClient: true,
 		// 客户端没指定思考档位时补最高档（2026-10-08 用户要求，见 default_thinking.go）。
 		// 实测 copilot.tencent.com 对 glm-5.1/glm-5.3/deepseek-v4-flash/minimax-m3-pay/auto
 		// 接受 reasoning_effort=max，不支持的模型会忽略该字段。

@@ -89,6 +89,13 @@ type Proxy struct {
 	// 2026-10-16 起 intl 必需（缺了整条线路全废）。
 	ConversationHeaders bool
 
+	// OfficialChatClient：对话请求**整体**伪装成官方桌面端内置 CLI。
+	// 2026-10-20 23:00 起腾讯给 WorkBuddy 对话网关加了第三方客户端渠道校验
+	// （400 code=11128 Illegal API invocation from an unapproved channel），
+	// 只补会话四头不够，还要 UA、X-Agent-*、X-IDE-*、traceparent 等一整套。
+	// 只在 dom 置位：国际版此前已靠 ConversationHeaders 解决，不动它。
+	OfficialChatClient bool
+
 	// ThinkingDefault：客户端没指定思考档位时补的默认档（见 default_thinking.go）。
 	// 空串 = 不注入，完全透传。
 	ThinkingDefault string
@@ -496,6 +503,9 @@ type authInvalidator interface{ Invalidate() }
 // 只在 ConversationHeaders 置位的信源启用：dom 线路实测不需要，贸然加会改变
 // 一个能正常工作的东西的请求形状，不做这种「顺手统一」。
 func (p *Proxy) withConversationHeaders(h map[string]string) map[string]string {
+	if p.OfficialChatClient {
+		return officialChatHeaders(h)
+	}
 	if !p.ConversationHeaders {
 		return h
 	}
@@ -507,6 +517,79 @@ func (p *Proxy) withConversationHeaders(h map[string]string) map[string]string {
 	out["X-Conversation-Request-ID"] = randHex(16)
 	out["X-Conversation-Message-ID"] = randUUID()
 	out["X-Request-ID"] = randUUID()
+	return out
+}
+
+// 官方国内版桌面端 / 内置 CLI 的版本号。
+// 依据 yreidev/workbuddy2api-panel docs/official-client.md：桌面端
+// WorkBuddy 5.8.3（macOS arm64）、内置 CLI @tencent-ai/codebuddy-code 2.161.0，
+// 网关的 UA 报的就是安装包内置版本。上游若按版本号判渠道，这两个值要对得上。
+const (
+	officialWBVersion  = "5.8.3"
+	officialCLIVersion = "2.161.0"
+)
+
+// officialChatHeaders 把对话请求整体伪装成官方桌面端内置 CLI 发出的。
+//
+// 2026-10-20 23:00 腾讯给 WorkBuddy 对话网关加了第三方客户端渠道校验，症状：
+//
+//	400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel",
+//	     "displayTips":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的"}}
+//
+// 与 2026-10-16 国际版那次（只缺会话四头）不同，这次是整套请求指纹校验，
+// 只补四个头不够。逐项对齐依据见 docs/official-client.md：
+//
+//	UA         WorkBuddy/<版本> <应用名>/<版本> CLI/<cli>
+//	公共头     Accept "application/json, text/plain, */*"、X-Requested-With、
+//	           X-Request-ID（uuidv7 去连字符）、X-Product: SaaS、
+//	           Accept-Encoding "gzip, compress, deflate, br"
+//	对话专项   X-Agent-Intent: craft、X-Agent-Type: main、
+//	           X-Agent-Purpose: conversation、X-IDE-Name/Type: WorkBuddy、
+//	           X-IDE-Version、X-Private-Data: "true"（值带引号）
+//	会话 id    X-Conversation-ID（uuidv7 带连字符 36 位）、
+//	           X-Conversation-Request-ID（去连字符 32 位）、
+//	           X-Conversation-Message-ID 与 X-Request-ID（同一消息 id）
+//	链路头     traceparent、b3、X-B3-TraceId/SpanId/Sampled
+//
+// 官方明确**不发** Origin、Referer、X-CodeBuddy-Request、X-Machine-ID、
+// X-Session-ID，所以这里也不补（CredentialManager 本来就没发）。
+func officialChatHeaders(h map[string]string) map[string]string {
+	now := time.Now()
+	convID := randUUIDv7(now)          // 会话 id：带连字符
+	turnID := uuidv7Hex(now)           // 轮次 id：去连字符
+	msgID := uuidv7Hex(now)            // 消息 id：与 X-Request-ID 同值
+	traceID := uuidv7Hex(now)          // 链路 trace id
+	spanID := randHex(8)               // 16 位十六进制 span
+
+	out := make(map[string]string, len(h)+22)
+	for k, v := range h {
+		out[k] = v
+	}
+	out["User-Agent"] = "WorkBuddy/" + officialWBVersion + " WorkBuddy/" + officialWBVersion + " CLI/" + officialCLIVersion
+	out["Accept"] = "application/json, text/plain, */*"
+	out["Content-Type"] = "application/json"
+	out["Accept-Encoding"] = "gzip, compress, deflate, br"
+	out["X-Requested-With"] = "XMLHttpRequest"
+	out["X-Request-ID"] = msgID
+	out["X-Product"] = "SaaS"
+
+	out["X-Agent-Intent"] = "craft"
+	out["X-Agent-Type"] = "main"
+	out["X-Agent-Purpose"] = "conversation"
+	out["X-IDE-Name"] = "WorkBuddy"
+	out["X-IDE-Type"] = "WorkBuddy"
+	out["X-IDE-Version"] = officialWBVersion
+	out["X-Private-Data"] = `"true"`
+
+	out["X-Conversation-ID"] = convID
+	out["X-Conversation-Request-ID"] = turnID
+	out["X-Conversation-Message-ID"] = msgID
+
+	out["traceparent"] = "00-" + traceID + "-" + spanID + "-01"
+	out["b3"] = traceID + "-" + spanID + "-1-"
+	out["X-B3-TraceId"] = traceID
+	out["X-B3-SpanId"] = spanID
+	out["X-B3-Sampled"] = "1"
 	return out
 }
 
@@ -552,6 +635,15 @@ func (p *Proxy) streamToClient(w http.ResponseWriter, r *http.Request, auth Auth
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		logger.Log("[%s] ✗ HTTP %d | %s", rid, resp.StatusCode, truncate(string(b), 200))
+		// 2026-10-21 排查 11128 渠道校验用：命中时把发往上游的完整信封落盘，
+		// 之前只能靠「构造类似请求」猜触发条件，猜了 4 轮都不中（body 大小、
+		// ACP 标记、system 长度、并发全排除），真正需要的是失败样本本身。
+		if resp.StatusCode == http.StatusBadRequest && bytes.Contains(b, []byte("unapproved channel")) {
+			dumpPath := dataPath("dom-dump-" + rid + "-upstream.json")
+			if err := os.WriteFile(dumpPath, payload, 0600); err == nil {
+				logger.Log("[%s] ⚠ 已 dump 渠道拦截载荷: %s (%dKB)", rid, dumpPath, len(payload)/1024)
+			}
+		}
 		recordRateLimitFromBody(auth, payload, b)
 		b = annotateRiskControl(resp.StatusCode, b)
 		sseError(w, resp.StatusCode, truncate(string(b), 1200))

@@ -456,3 +456,40 @@ func annotateRiskControl(status int, body []byte) []byte {
 	}
 	return out
 }
+
+// randUUIDv7 造 uuidv7：前 48 位是毫秒时间戳，版本位 7，变体位 10xx。
+//
+// 为什么要 v7 而不是 v4（randUUID 造的那个）：官方 WorkBuddy 桌面端/内置 CLI
+// 的会话标识全是 uuidv7 —— X-Conversation-ID 是带连字符的 36 位、
+// X-Conversation-Request-ID / Message-ID / X-Request-ID 是去连字符的 32 位，
+// 且**前 48 位就是时间戳**（官方 sessionManager.create 用 uuidv7()）。
+// 上游 2026-10-20 起加的渠道校验如果要验 id 形状，v4 的随机头会露馅。
+//
+// 依据：yreidev/workbuddy2api-panel docs/official-client.md（10-20 解包
+// WorkBuddy 5.8.3 安装包读出的 generateConversationRequestId /
+// withModelMessageCorrelation 实现）。
+func randUUIDv7(t time.Time) string {
+	var b [16]byte
+	ms := uint64(t.UnixMilli())
+	b[0] = byte(ms >> 40)
+	b[1] = byte(ms >> 32)
+	b[2] = byte(ms >> 24)
+	b[3] = byte(ms >> 16)
+	b[4] = byte(ms >> 8)
+	b[5] = byte(ms)
+	if _, err := rand.Read(b[6:]); err != nil {
+		n := uint64(t.UnixNano())
+		for i := 6; i < 16; i++ {
+			b[i] = byte(n >> (uint(i%8) * 8))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x70 // version 7
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10xx
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// uuidv7Hex 去连字符的 uuidv7（官方轮次/消息 id 用这个形态）。
+func uuidv7Hex(t time.Time) string {
+	return strings.ReplaceAll(randUUIDv7(t), "-", "")
+}

@@ -975,19 +975,61 @@ func (st *respStreamState) sse(w http.ResponseWriter, event string, payload map[
 }
 
 // responsesUsage 把 chat usage 映射成 Responses 的 usage 字段。
+//
+// 2026-10-21 开源审查修：原来直接 u["prompt_tokens"] 等取值，缺字段时
+// map 返回 nil，序列化成 JSON 就是 `"input_tokens": null`。Codex 的 usage
+// 结构是 int64，null 反序列化直接报错，整条响应被判失败 —— 即使正文是对的。
+// 上游不给 usage 的场景不少：错误帧、流被截断、qoder 丢了 stream_options、
+// 纯 tool_call 响应。现在缺字段一律补 0。
 func responsesUsage(u map[string]any) map[string]any {
 	if u == nil {
 		u = map[string]any{}
 	}
+	num := func(k string) any {
+		if v, ok := u[k]; ok && v != nil {
+			return v
+		}
+		return 0
+	}
 	out := map[string]any{
-		"input_tokens":  u["prompt_tokens"],
-		"output_tokens": u["completion_tokens"],
-		"total_tokens":  u["total_tokens"],
+		"input_tokens":  num("prompt_tokens"),
+		"output_tokens": num("completion_tokens"),
+	}
+	// total 缺失时用 in+out 兜底（上游偶有不给 total 的）
+	if v, ok := u["total_tokens"]; ok && v != nil {
+		out["total_tokens"] = v
+	} else {
+		out["total_tokens"] = sumTokens(out["input_tokens"], out["output_tokens"])
 	}
 	if det, ok := u["prompt_tokens_details"].(map[string]any); ok {
-		out["input_tokens_details"] = map[string]any{"cached_tokens": det["cached_tokens"]}
+		cached := any(0)
+		if v, ok := det["cached_tokens"]; ok && v != nil {
+			cached = v
+		}
+		out["input_tokens_details"] = map[string]any{"cached_tokens": cached}
 	}
 	return out
+}
+
+// sumTokens 把两个 usage 数值相加（可能是 json.Number / float64 / int）。
+// 解析不出来就当 0，绝不返回 nil —— Codex 侧会把 null 当失败。
+func sumTokens(a, b any) any {
+	toInt := func(v any) int64 {
+		switch n := v.(type) {
+		case json.Number:
+			if i, err := n.Int64(); err == nil {
+				return i
+			}
+		case float64:
+			return int64(n)
+		case int:
+			return int64(n)
+		case int64:
+			return n
+		}
+		return 0
+	}
+	return toInt(a) + toInt(b)
 }
 
 // buildResponseObject 非流式请求：把聚合好的 chat completion 转成 Responses 对象。

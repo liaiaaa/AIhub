@@ -123,3 +123,18 @@ intl_burn.json
 # 用通配而非逐个列举：2026-10-19 接上 dom 目录后生成了 wb_catalog_dom.json，
 # 写死 intl 就又漏一个（和凭证目录当初踩的坑一样）。
 wb_catalog_*.json
+
+# ---- 2026-10-21 开源审查补漏 ----
+# 下面这几项此前都没被忽略，`git add -A` 会直接把本机隐私提交进仓库：
+#   wbauto/  757MB Chromium profile，含 Cookies / Login Data / Local State
+#            （Local State 是解 Cookie 的密钥）—— 等于把浏览器所有登录态公开
+#   .tmp/    14MB，含 CodeBuddy 扩展的 secret 条目（vscdb）与完整会话 jsonl
+#   dom-dump-*.json  每命中一次 11128 就落一份整份对话正文
+.tmp/
+wbauto/
+dom-dump-*.json
+model_ratios_user.json
+cred-backups/
+*.vscdb
+*.vscdb-journal
+*.jsonl

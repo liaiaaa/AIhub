@@ -13,6 +13,7 @@ package main
 
 import (
 	"bufio"
+	"sort"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -692,6 +693,13 @@ type respToolSlot struct {
 	name      string
 	arguments strings.Builder
 	announced bool
+	// outIndex 这个工具条目在响应 output 里的下标。2026-10-21 开源审查修：
+	// 之前 added / arguments.delta 都用 st.itemIndex（从不递增），closeTools
+	// 却每条 st.itemIndex++ —— 一个响应里出现 ≥2 个 tool_call（或工具在文本
+	// 之前出现，纯工具调用响应必现）时，done 事件的 output_index 与 added
+	// 对不上，Codex 侧会把工具调用丢弃或错配，表现为「模型说要调工具但什么都
+	// 没执行」。现在在首次 announce 时一次性占用并记住下标。
+	outIndex int
 }
 
 // respReasoningSlot 承载上游 delta.reasoning_content（deepseek/GLM 风格思考流）
@@ -743,6 +751,27 @@ func responsesStream(w http.ResponseWriter, body io.Reader, logger *FileLogger, 
 		dec.UseNumber()
 		if dec.Decode(&chunk) != nil {
 			continue
+		}
+		// 上游 HTTP 200 但流里报错：发 response.failed 收尾，不要假装
+		// completed + 空 output（2026-10-21 开源审查修；此前错误帧被静默跳过，
+		// Codex 侧看到的是「成功但什么都没有」，直接归因为模型不输出）。
+		if em, ok := chunk["error"].(map[string]any); ok {
+			msg, typ := errorFrameMessage(em)
+			logger.Log("[%s] ✗ 上游流内报错 | %s", rid, truncate(msg, 200))
+			st.closeReasoning(w)
+			st.closeMessage(w)
+			st.closeTools(w)
+			st.sse(w, "response.failed", map[string]any{
+				"type": "response.failed",
+				"response": map[string]any{
+					"id": respID, "status": "failed",
+					"error": map[string]any{"code": "upstream_error", "message": msg, "type": typ},
+				},
+			})
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
 		}
 		if !created {
 			st.sse(w, "response.created", map[string]any{
@@ -874,9 +903,12 @@ func (st *respStreamState) handleToolCall(w http.ResponseWriter, tc any) {
 		}
 		slot.fcID = "fc_" + randHex(8)
 		slot.announced = true
+		// 一次性占用 output 下标：added / delta / done 三处必须同值。
+		slot.outIndex = st.itemIndex
+		st.itemIndex++
 		st.sse(w, "response.output_item.added", map[string]any{
 			"type":         "response.output_item.added",
-			"output_index": st.itemIndex,
+			"output_index": slot.outIndex,
 			"item": map[string]any{
 				"type": "function_call", "id": slot.fcID,
 				"call_id": slot.callID, "name": slot.name,
@@ -888,7 +920,7 @@ func (st *respStreamState) handleToolCall(w http.ResponseWriter, tc any) {
 		slot.arguments.WriteString(args)
 		st.sse(w, "response.function_call_arguments.delta", map[string]any{
 			"type":    "response.function_call_arguments.delta",
-			"item_id": slot.fcID, "output_index": st.itemIndex, "delta": args,
+			"item_id": slot.fcID, "output_index": slot.outIndex, "delta": args,
 		})
 	}
 }
@@ -914,25 +946,25 @@ func (st *respStreamState) closeTools(w http.ResponseWriter) {
 	if len(st.toolSlots) == 0 {
 		return
 	}
-	idx := make([]int, 0, len(st.toolSlots))
-	for k := range st.toolSlots {
-		idx = append(idx, k)
-	}
-	for _, k := range idx {
-		slot := st.toolSlots[k]
-		if !slot.announced {
-			continue
+	slots := make([]*respToolSlot, 0, len(st.toolSlots))
+	for _, slot := range st.toolSlots {
+		if slot.announced {
+			slots = append(slots, slot)
 		}
+	}
+	// 按 output 下标升序发 done：map 遍历序是随机的，乱序 done 会让客户端
+	// 拼出错误的输出顺序。
+	sort.Slice(slots, func(i, j int) bool { return slots[i].outIndex < slots[j].outIndex })
+	for _, slot := range slots {
 		st.sse(w, "response.output_item.done", map[string]any{
 			"type":         "response.output_item.done",
-			"output_index": st.itemIndex,
+			"output_index": slot.outIndex,
 			"item": map[string]any{
 				"type": "function_call", "id": slot.fcID,
 				"call_id": slot.callID, "name": slot.name,
 				"arguments": slot.arguments.String(), "status": "completed",
 			},
 		})
-		st.itemIndex++
 	}
 	st.toolSlots = map[int]*respToolSlot{}
 }

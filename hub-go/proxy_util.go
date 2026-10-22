@@ -138,6 +138,12 @@ func newBackendClient() *http.Client {
 		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 15 * time.Second,
+		// 2026-10-21 开源审查补：此前这里既无 Client.Timeout 也无
+		// ResponseHeaderTimeout。直连流式线路靠它发请求，上游「接了连接但
+		// 不回包」时 handler 协程会无限挂起，只能等客户端断开触发 ctx 取消
+		// （客户端不主动断就一直占着 goroutine 和连接）。
+		// 只给「等响应头」设上限，不影响流式 body 的读取时长。
+		ResponseHeaderTimeout: 120 * time.Second,
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			if u, _ := http.ProxyFromEnvironment(req); u != nil {
 				if proxyReachable(u) {

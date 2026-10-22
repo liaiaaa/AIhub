@@ -723,6 +723,18 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 			tokens = v.String()
 		}
 	}
+	if col.errMsg != "" {
+		// 上游 HTTP 200 但流里是错误帧：改成 502 交出去，不要让客户端
+		// 拿到「成功 + 空内容」（用户会以为模型不输出，实际是上游报错）。
+		logger.Log("[%s] ✗ 上游流内报错 | %s", rid, truncate(col.errMsg, 200))
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": map[string]any{
+				"message": "上游在流式响应里返回错误：" + col.errMsg,
+				"type":    "upstream_error",
+			},
+		})
+		return
+	}
 	logger.Log("[%s] ◀ RESPONSE | %.1fs | finish=%s | tokens=%s", rid, elapsed.Seconds(), col.finish, tokens)
 	writeJSON(w, http.StatusOK, col.build())
 }

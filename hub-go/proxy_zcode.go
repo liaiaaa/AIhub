@@ -235,6 +235,15 @@ func (p *ZcodeProxy) Start() (bool, string) {
 		stopPort(p.Port)
 	}
 	if err != nil {
+		// 2026-10-21 开源审查修的泄漏：走到这里之前已经起了两个后台 goroutine
+		// （spawnRelayStack+detectRelay、backgroundLoop），还可能拉起了外部
+		// mint/中继进程。原来直接 return，没人 close(stopCh)、没人收中继栈 ——
+		// 一个每 5 分钟醒一次的死循环 goroutine 永久存活，用户重试启动会再拉一套。
+		if p.stopCh != nil {
+			close(p.stopCh)
+			p.stopCh = nil
+		}
+		p.stopSpawnedRelayStack()
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
 
@@ -301,14 +310,19 @@ func (p *ZcodeProxy) logf(format string, args ...any) {
 
 // Stop 关闭本实例的监听并释放端口。
 func (p *ZcodeProxy) Stop() bool {
+	// 2026-10-21 开源审查修的并发 bug：原来只把 server/ln 在锁内置 nil，
+	// stopCh 读出来之后却在锁外 close 再置 nil。控制台双击「停止」或两个
+	// 页面同时点时，两个 goroutine 都在锁内读到同一个非 nil stopCh，
+	// 随后都 close → panic: close of closed channel。
+	// 修法：在锁内一次性完成「取出并置 nil」，只有取到的那个才 close。
 	p.mu.Lock()
-	srv, ln, stopCh := p.server, p.ln, p.stopCh
-	p.server, p.ln = nil, nil
+	srv, ln := p.server, p.ln
+	stopCh := p.stopCh
+	p.server, p.ln, p.stopCh = nil, nil, nil
 	p.mu.Unlock()
 
 	if stopCh != nil {
 		close(stopCh)
-		p.stopCh = nil
 	}
 
 	if srv != nil {

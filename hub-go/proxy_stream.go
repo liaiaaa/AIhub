@@ -28,6 +28,15 @@ type collected struct {
 	contentParts []string
 	reasoning    []string // reasoning_content 片段（Qoder <think> 分流等）
 	toolCalls    map[int]*toolCallSlot
+	// errMsg / errType 上游在【流内部】报的错（HTTP 已是 200，错误放在
+	// data: {"error":{...}} 帧里）。2026-10-21 开源审查补：
+	// 此前所有解析器都只认带 choices 的帧，错误帧被静默跳过，于是
+	// 「上游报错」在客户端表现为「成功但内容为空」——用户归因为
+	// 「模型不输出」，实际是错被吞了。这是本仓库历史上反复出现的事故形态
+	// （qoder_stream.go 里 2026-09-25 的记录就是它），但之前只修了 qoder
+	// 直连路径，聚合 / Responses 两条路径没修。
+	errMsg  string
+	errType string
 }
 
 func collectStream(r io.Reader) *collected {
@@ -48,6 +57,12 @@ func collectStream(r io.Reader) *collected {
 		dec.UseNumber()
 		if dec.Decode(&chunk) != nil {
 			continue
+		}
+		// 上游 HTTP 200 但流里报错：记下来交给调用方改成错误响应，
+		// 不要静默丢帧后返回空内容。
+		if em, ok := chunk["error"].(map[string]any); ok {
+			c.errMsg, c.errType = errorFrameMessage(em)
+			break
 		}
 		if m, ok := chunk["model"].(string); ok && m != "" {
 			c.model = m
@@ -145,4 +160,24 @@ func (c *collected) build() map[string]any {
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finish}},
 		"usage":   usage,
 	}
+}
+
+// errorFrameMessage 从 SSE 错误帧的 error 对象里取 (人类可读信息, 类型)。
+// 上游几种形态都兼容：{"message":...}、"error":{"message":...}、
+// 只有 {"code":..., "msg":...} 的网关包装。
+func errorFrameMessage(em map[string]any) (string, string) {
+	typ, _ := em["type"].(string)
+	if m, ok := em["message"].(string); ok && m != "" {
+		return m, typ
+	}
+	if m, ok := em["msg"].(string); ok && m != "" {
+		return m, typ
+	}
+	if d, ok := em["details"].(string); ok && d != "" {
+		return d, typ
+	}
+	if c, ok := em["code"]; ok && c != nil {
+		return "upstream error code " + fmt.Sprint(c), typ
+	}
+	return "upstream returned an error frame", typ
 }

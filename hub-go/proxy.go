@@ -291,7 +291,7 @@ func (p *Proxy) AuthFilePath() string {
 		}
 	}
 	// 数据根下的子目录：用户习惯把凭据放成「国内workbuddy凭证」这类命名的目录
-	// （和「<凭证目录A> / <凭证目录C>」给国际线路用是同一种组织方式）。
+	// （和「cred-a / cred-c」给国际线路用是同一种组织方式）。
 	// 这里只认**标准文件名**，不走任意 *.info 回退，避免误捡无关目录里的杂文件。
 	if entries, err := os.ReadDir(hubRoot); err == nil {
 		for _, e := range entries {

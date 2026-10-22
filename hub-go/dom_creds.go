@@ -30,7 +30,7 @@ var builtinDomCreds = []string{"国内workbuddy凭证", "CodeBuddy凭证"}
 // 扫描规则与国际线路 credDirs() 对齐（刻意收窄，避免误捡）：
 //   - 只看数据根**下一级**目录；
 //   - 目录里必须存在标准文件名 workbuddy-desktop.info；
-//   - 因此国际凭证目录（<凭证目录A>*/<凭证目录C>/<凭证目录D>）不会被认领。
+//   - 因此国际凭证目录（cred-a*/cred-c/cred-d）不会被认领。
 func domCredDirs() map[string]string {
 	out := map[string]string{}
 	for _, n := range builtinDomCreds {

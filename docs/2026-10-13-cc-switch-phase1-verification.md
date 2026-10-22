@@ -80,7 +80,7 @@ Intl  默认  deepseek-v4.1-flash / hy4-preview  当前不可达（见阻塞项 
 ### A. Intl 线路：上游 www.workbuddy.ai 网络不可达（临时）
 
 - 现象：`ccs-*`/默认模型打到 :8799 后挂起，hub-go 日志 `Post "https://www.workbuddy.ai/v2/chat/completions": context canceled`。
-- 定位：DNS 正常（43.160.158.125），**TCP 443 连接超时**（连续 3 次 ×8s 全超时）；同期 `copilot.tencent.com` 0.03–0.56s 正常。换 Intl 凭据（<凭证目录C>→<凭证目录D>）无效。
+- 定位：DNS 正常（43.160.158.125），**TCP 443 连接超时**（连续 3 次 ×8s 全超时）；同期 `copilot.tencent.com` 0.03–0.56s 正常。换 Intl 凭据（cred-c→cred-d）无效。
 - 时间线：11:43–11:44 Intl 全绿（该时段验证清单 30/35，唯一失败是 Zcode）；11:59 起不可达。
 - 影响范围：仅 Intl 两个模型；Dom/Qoder/Trae 不受影响；老 `:8790` 的 intl slug 同样受影响（同一上游）。
 - 处置：网络恢复后无需改任何配置，重跑 `verify_route.py deepseek` 与 `hy4` 即可。建议观察是否为持续性的国际出口问题。

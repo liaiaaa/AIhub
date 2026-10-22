@@ -14,7 +14,7 @@
 
 ```
 --- FAIL: TestCredDiscovery (0.00s)
-    proxy_intl_test.go:24: <凭证目录C>目录未被识别为有效凭证目录: D:\C\Desktop\workbuddy-hub\<凭证目录C>
+    proxy_intl_test.go:24: cred-c目录未被识别为有效凭证目录: D:\C\Desktop\workbuddy-hub\cred-c
 FAIL
 FAIL	workbuddy-hub	2.656s
 FAIL
@@ -37,4 +37,4 @@ FAIL
 - 采集时 `workbuddy-hub.exe` 正在运行（PID 14176）。
   重构全程**不得移动、覆盖或删除该 exe**。
 - 用户实际使用的凭证来自 C 盘（`%LOCALAPPDATA%\CodeBuddyExtension`），
-  与仓库内 `<凭证目录A>/<凭证目录B>/<凭证目录C>` 三个目录无依赖关系。
+  与仓库内 `cred-a/cred-b/cred-c` 三个目录无依赖关系。

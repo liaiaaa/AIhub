@@ -81,7 +81,7 @@ func resolveHubRoot() string {
 //
 // 只用「权威标志」——即 hub 自己不会在源码目录里生成的东西：
 //   - state.json（hub 偏好，只在数据根写入）
-//   - 任一已知凭证目录（<凭证目录A> / <凭证目录B> / <凭证目录C>，由用户放置）
+//   - 任一已知凭证目录（cred-a / cred-b / cred-c，由用户放置）
 //
 // 刻意【不】把 converter-*.log / hub.log 当作标志：
 // 它们是 hub 自己写出来的，一旦某次把日志写进了某个目录，

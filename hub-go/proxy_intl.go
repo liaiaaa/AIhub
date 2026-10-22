@@ -69,7 +69,7 @@ func NewIntlProxy(authDir string) *Proxy {
 // credDirs 返回国际线路可选的凭证目录：目录名 → 绝对路径。
 //
 // 2026-10-12 起改为「内置三个 + 数据根下自动扫描」，不再硬编码写死：
-// 用户每加一个账号就得改一次源码，是个明显的短板（这次加「<凭证目录D>」就撞上了）。
+// 用户每加一个账号就得改一次源码，是个明显的短板（这次加「cred-d」就撞上了）。
 //
 // 扫描规则（刻意收窄，避免误捡）：
 //   - 只看数据根**下一级**目录；
@@ -123,8 +123,8 @@ func intlCredDirHasFile(dir string) bool {
 }
 
 // dirHasCredential 判断凭证目录里是否有可用的 .info 文件。
-// <凭证目录A>/<凭证目录B> 用标准名 workbuddy-desktop-ai.info；
-// <凭证目录C>里的文件名是 ai-<uuid>.info（uuid 因账号而异），不能按名硬编码检查。
+// cred-a/cred-b 用标准名 workbuddy-desktop-ai.info；
+// cred-c里的文件名是 ai-<uuid>.info（uuid 因账号而异），不能按名硬编码检查。
 func dirHasCredential(dir string) bool {
 	if fileExists(filepath.Join(dir, "workbuddy-desktop-ai.info")) {
 		return true

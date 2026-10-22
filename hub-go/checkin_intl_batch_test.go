@@ -33,9 +33,9 @@ func TestRunIntlCheckinCoversAllCreds(t *testing.T) {
 	hubRoot = t.TempDir()
 	defer func() { hubRoot = old }()
 
-	seedIntlCred(t, "<凭证目录A>", "uid-li1")
-	seedIntlCred(t, "<凭证目录B>", "uid-li2")
-	seedIntlCred(t, "<凭证目录D>", "uid-gou")
+	seedIntlCred(t, "cred-a", "uid-li1")
+	seedIntlCred(t, "cred-b", "uid-li2")
+	seedIntlCred(t, "cred-d", "uid-gou")
 
 	var mu sync.Mutex
 	seen := map[string]int{} // uid -> 上报次数
@@ -71,7 +71,7 @@ func TestRunIntlCheckinCoversAllCreds(t *testing.T) {
 		}
 	}
 	// 结果文案应逐个列出账号
-	for _, n := range []string{"<凭证目录A>", "<凭证目录B>", "<凭证目录D>"} {
+	for _, n := range []string{"cred-a", "cred-b", "cred-d"} {
 		if !strings.Contains(msg, n) {
 			t.Fatalf("结果文案应含 %s：%s", n, msg)
 		}
@@ -146,7 +146,7 @@ func TestRunCheckinExcludesIntl(t *testing.T) {
 	intlReportURL = up.URL + "/v2/report"
 	defer func() { intlReportURL = oldURL }()
 
-	seedIntlCred(t, "<凭证目录A>", "uid-x")
+	seedIntlCred(t, "cred-a", "uid-x")
 
 	h := &Hub{}
 	runCheckin(h) // 国内/Trae 会失败（无凭据），但我们只关心国际有没有被顺手打

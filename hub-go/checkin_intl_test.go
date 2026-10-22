@@ -14,7 +14,7 @@ import (
 // 关键回归点：事件**必须带 userId** —— 开源实现明确「缺失则服务端 200 但静默
 // 丢弃」，这正是用户「次日看不到 30 积分到账」却毫无报错的原因。
 func TestIntlChatRequestEventShape(t *testing.T) {
-	const uid = "9685e9b1-187c-4c05-960b-8e1e35a17a67"
+	const uid = "00000000-0000-4000-8000-000000000000"
 	ev := intlChatRequestEvent(uid, "deepseek-v4.1-flash", "DeepSeek V4.1 Flash")
 
 	if ev["userId"] != uid {

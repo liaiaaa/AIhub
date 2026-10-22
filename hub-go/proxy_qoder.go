@@ -51,9 +51,14 @@ const (
 	// 该名字并非合法 key，会依赖网关的静默兜底行为，故修正。
 	QoderDefaultMd = "qfmodel"
 
-	// runtime-info.exe 的兜底 machineToken（2026-09-22 实测可用的最后已知值；
-	// 正常情况下启动时会现跑 runtime-info.exe 取新鲜值，走不到这里）。
-	qoderMachineTokenFallback = "P1gAuQTUR1HKGk0h8gjRW3heL7u8jHBmj4zp_ElDzDXm-Go0ngjtOr4LAyxhktdGncmW8uAT0PyOT664xF-Vnp0y"
+	// 这里原本硬编码了一个真实的设备 machineToken（88 字符），2026-10-21 开源
+	// 审查发现它既是真实凭据、又会被公开，已删除。兜底改为从环境变量
+	// QODER_MACHINE_TOKEN 读取（见 initQoderAuth）：
+	//   · 正常路径是启动时现跑 runtime-info 取新鲜值，走不到兜底；
+	//   · 取不到时优先用 QODER_MACHINE_TOKEN；
+	//   · 都没有就明确报错让用户自己提供，不再静默用某个人的设备身份。
+	//
+	// 如果你是从旧版本升级：原值已泄露，请到 Qoder 客户端重新登录以轮换设备身份。
 )
 
 // Qoder COSY 体系 RSA 公钥（从桌面端 app 包逆向所得，用于加密会话密钥）。
@@ -141,7 +146,9 @@ func (a *QoderAuth) Reload() error {
 	}
 	mt := qoderMachineToken()
 	if mt == "" {
-		mt = qoderMachineTokenFallback
+		// 2026-10-21：兜底不再是硬编码的真实 token（会随仓库公开），
+		// 改为环境变量注入。两样都没有就留空，由调用方报错。
+		mt = strings.TrimSpace(os.Getenv("QODER_MACHINE_TOKEN"))
 	}
 
 	a.mu.Lock()

@@ -78,14 +78,16 @@ func NewIntlProxy(authDir string) *Proxy {
 //   - 因此「国内workbuddy凭证/」这种放 workbuddy-desktop.info 的目录
 //     **不会**被国际线路认领（那是国内线路的凭证，两套后端两套 token）。
 //
-// 内置的三个始终保留：即便目录暂时为空也出现在控制台列表里，
-// 免得用户以为凭证丢了。
+// 2026-10-21 开源审查：这里原来硬编码作者本机的三个凭证目录名（个人称呼），
+// 开源后会公开这些称呼，而且陌生人的目录名完全不同。改为完全不写死 ——
+// 下面的目录扫描会把数据根下所有含国际凭证文件的目录都认领进来，
+// 用户建什么名字都行。
+//
+// 代价：以前「目录暂时为空也出现在控制台列表里，免得用户以为凭证丢了」，
+// 现在空目录不显示。这是正确的取舍：陌生人第一次启动时不该看到三个
+// 指向不存在路径的空条目。
 func credDirs() map[string]string {
-	out := map[string]string{
-		"<凭证目录A>":  dataPath("<凭证目录A>"),
-		"<凭证目录B>": dataPath("<凭证目录B>"),
-		"<凭证目录C>":  dataPath("<凭证目录C>"),
-	}
+	out := map[string]string{}
 	entries, err := os.ReadDir(hubRoot)
 	if err != nil {
 		return out

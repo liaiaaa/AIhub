@@ -96,7 +96,7 @@ Intl  默认  deepseek-v4.1-flash / hy4-preview  当前不可达（见阻塞项 
 
 1. **Codex 警告 `disable_response_storage is ignored`**：cc-switch 改写 `~/.codex/config.toml` 时写入了已废弃的 `disable_response_storage = true` 键。功能无影响，但新版本 Codex 每次启动都会告警。建议 fork 时在 `build_codex_settings`（`src-tauri/src/deeplink/provider.rs`）中移除该键或做版本适配。
 2. `cc-switch-model-catalog.json` 中 `auto_compact_token_limit` 统一为 900000（Trae 为 180000），与供应商里配置的 contextWindow（1,000,000 / 200,000）不完全一致——压缩触发线比声明窗口低，行为上偏保守，无阻塞。
-3. Intl 线路两个账号（<email>、<nick>）今天有过 `deepseek-v4.1-flash` 用量限流（6004），另 <email> 有账号级风控（11140，至 12:29）。与本次迁移无关，但排障时容易混淆。
+3. Intl 线路两个账号（user@example.com、alice）今天有过 `deepseek-v4.1-flash` 用量限流（6004），另 bob@example.com 有账号级风控（11140，至 12:29）。与本次迁移无关，但排障时容易混淆。
 
 ## 五、复现与运维命令
 

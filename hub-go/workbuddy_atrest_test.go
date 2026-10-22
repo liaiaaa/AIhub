@@ -109,7 +109,7 @@ func TestWBAtRestRoundTrip(t *testing.T) {
 }
 
 func TestWBAtRestPlainFileUntouched(t *testing.T) {
-	b := []byte(`{"account":{"nickname":"hli"},"auth":{"accessToken":"eyJx"}}`)
+	b := []byte(`{"account":{"nickname":"tester"},"auth":{"accessToken":"eyJx"}}`)
 	out, meta, err := wbUnsealBytes(b)
 	if err != nil || meta != nil || string(out) != string(b) {
 		t.Fatalf("明文文件应原样通过：meta=%v err=%v out=%s", meta, err, out)

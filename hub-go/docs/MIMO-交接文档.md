@@ -78,9 +78,9 @@ Phase 2  clientSign = urlencode(base64(sha1("nonce=<nonce>&<ssecurity>")))
 
 ```
 %APPDATA%\Xiaomi MiMo\Partitions\xiaomi-account\Network\Cookies   (SQLite)
-  → .account.xiaomi.com  passToken = "V1:DXmurwq2/..."   (367 字符)
-  → .account.xiaomi.com  userId    = "2547364397"
-  → .account.xiaomi.com  cUserId   = "ikkmvcnS5lVoKi-TpDs5eckPBIo"
+  → .account.xiaomi.com  passToken = "<redacted-passToken>"   (367 字符)
+  → .account.xiaomi.com  userId    = "<redacted-userId>"
+  → .account.xiaomi.com  cUserId   = "<redacted-cUserId>"
 ```
 
 > ⚠️ **该文件被运行中的 MiMo 桌面端独占锁定**（连只读打开都 EBUSY，

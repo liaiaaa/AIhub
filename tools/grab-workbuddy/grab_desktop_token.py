@@ -16,10 +16,10 @@ WorkBuddy 国际站（www.workbuddy.ai）取 hub-go 凭证 —— 官方设备�
       网页 API 本身走 Cookie 会话，不发 Authorization —— 所以 DevTools 里找不到 Bearer 是正常的。
 
 用法：
-  python3 grab_desktop_token.py --out <数据根>/<凭证目录D>/workbuddy-desktop-ai.info
+  python3 grab_desktop_token.py --out <数据根>/cred-d/workbuddy-desktop-ai.info
   # 浏览器已登录哪个账号，就签发哪个账号的票。换账号先在浏览器里切换登录。
   python3 grab_desktop_token.py --no-open      # 只打印授权链接，自己点
-  python3 grab_desktop_token.py --expect <email>   # 校验账号，不符则不落盘
+  python3 grab_desktop_token.py --expect user@example.com   # 校验账号，不符则不落盘
 
 参考：linguo2625469/workbuddy2api-panel  internal/panel/login.go
       Sliverkiss/workbuddy2api           admin/browser_login.py

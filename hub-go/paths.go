@@ -19,6 +19,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"path/filepath"
 )
 
@@ -94,11 +95,21 @@ func looksLikeDataRoot(dir string) bool {
 	}
 	markers := []string{
 		"state.json",
-		"<凭证目录A>", "<凭证目录B>", "<凭证目录C>",
 	}
 	for _, m := range markers {
 		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
 			return true
+		}
+	}
+	// 本程序的数据根里通常有若干「<名字>凭证/」目录（用户在控制台建的账号
+	// 目录）。2026-10-21 开源审查：原来这里写死作者本机的三个目录名，
+	// 既泄露个人称呼，又对陌生人的目录名完全失效。改成「有任意 *凭证
+	// 子目录」也算数据根标志，与 .gitignore 里 `*凭证/` 的口径一致。
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && strings.HasSuffix(e.Name(), "凭证") {
+				return true
+			}
 		}
 	}
 	return false

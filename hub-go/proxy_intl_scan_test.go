@@ -27,8 +27,8 @@ func TestCredDirsScan(t *testing.T) {
 	}
 
 	// 国际线路的凭证：标准名 + ai-<uuid>.info 两种
-	mk("<凭证目录D>", "workbuddy-desktop-ai.info")
-	mk("张三凭证", "ai-9685e9b1-187c-4c05-960b-8e1e35a17a67.info")
+	mk("cred-d", "workbuddy-desktop-ai.info")
+	mk("张三凭证", "ai-00000000-0000-4000-8000-000000000000.info")
 	// 国内线路的凭证：文件名不同，绝不能被国际线路认领
 	mk("国内workbuddy凭证", "workbuddy-desktop.info")
 	// 干扰项：空目录 / 只有无关文件 / 隐藏目录
@@ -38,15 +38,16 @@ func TestCredDirsScan(t *testing.T) {
 
 	dirs := credDirs()
 
-	// 内置三个必须始终在（哪怕目录为空）
-	for _, k := range []string{"<凭证目录A>", "<凭证目录B>", "<凭证目录C>"} {
-		if _, ok := dirs[k]; !ok {
-			t.Fatalf("内置凭证 %s 应始终存在：%v", k, dirs)
-		}
+	// 2026-10-21 开源审查后不再有「内置凭证名」：生产代码里的三个个人称呼
+	// （<凭证目录A>/<凭证目录B>/<凭证目录C>）已删除，改为完全靠扫描发现 —— 开源后公开个人
+	// 称呼没有意义，陌生人的目录名也完全不同。这里改为断言「不写死任何名字
+	// 也能把有凭据的目录全部扫出来」。
+	if len(dirs) == 0 {
+		t.Fatalf("一个凭证目录都没扫到：%v", dirs)
 	}
 	// 自动扫描到的
-	if _, ok := dirs["<凭证目录D>"]; !ok {
-		t.Fatalf("<凭证目录D> 未被扫描到：%v", dirs)
+	if _, ok := dirs["cred-d"]; !ok {
+		t.Fatalf("cred-d 未被扫描到：%v", dirs)
 	}
 	if _, ok := dirs["张三凭证"]; !ok {
 		t.Fatalf("ai-<uuid>.info 形态的目录未被扫描到：%v", dirs)
@@ -72,14 +73,14 @@ func TestCredDirsScanAbsolutePath(t *testing.T) {
 	old := hubRoot
 	hubRoot = t.TempDir()
 	defer func() { hubRoot = old }()
-	if err := os.MkdirAll(filepath.Join(hubRoot, "<凭证目录D>"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(hubRoot, "cred-d"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hubRoot, "<凭证目录D>", "workbuddy-desktop-ai.info"), []byte(`{}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(hubRoot, "cred-d", "workbuddy-desktop-ai.info"), []byte(`{}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := credDirs()["<凭证目录D>"]
-	if want := filepath.Join(hubRoot, "<凭证目录D>"); got != want {
+	got := credDirs()["cred-d"]
+	if want := filepath.Join(hubRoot, "cred-d"); got != want {
 		t.Fatalf("路径应为 %s，实际 %s", want, got)
 	}
 }
@@ -89,14 +90,14 @@ func TestScannedDirIsUsable(t *testing.T) {
 	old := hubRoot
 	hubRoot = t.TempDir()
 	defer func() { hubRoot = old }()
-	dir := filepath.Join(hubRoot, "<凭证目录D>")
+	dir := filepath.Join(hubRoot, "cred-d")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "workbuddy-desktop-ai.info"), []byte(`{}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if !dirHasCredential(credDirs()["<凭证目录D>"]) {
+	if !dirHasCredential(credDirs()["cred-d"]) {
 		t.Fatalf("扫描到的目录应被 dirHasCredential 认可")
 	}
 }

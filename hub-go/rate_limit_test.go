@@ -216,7 +216,7 @@ func (a authWithUID) Summary() (map[string]any, error) {
 }
 
 // 关键回归（2026-10-12 用户报）：**额度查得到 ≠ 能推理**。
-// 实测<凭证目录A>：额度 200、userinfo 200、成长中心 200，但 chat 403 11140。
+// 实测cred-a：额度 200、userinfo 200、成长中心 200，但 chat 403 11140。
 // 此前 intlCredStatusOne 只看额度就标 ✓，等于骗用户。
 // 现在必须真探活一次；探到风控要记进台账，且不能标 OK。
 func TestProbeRiskNotMarkedAvailable(t *testing.T) {
@@ -316,7 +316,7 @@ func TestRateLimitUpstreamResetFlag(t *testing.T) {
 		rateLimitShortUntil(e2.Until), e2.HasUpstreamReset())
 }
 
-// 关键修正（2026-10-13 用户报障）：狗/<凭证目录C>的 deepseek-v4.1-flash 被 6004
+// 关键修正（2026-10-13 用户报障）：cred-d/cred-c 的 deepseek-v4.1-flash 被 6004
 // 限到 11:54/11:01，台账里明明有记录，看板却一直显示「✓ 可用」——因为探活
 // 用的是免费的 hy4-preview（没被限），而模型级台账此前根本没进看板。
 // modelLimitsFor 必须把「哪个模型限到几点」原样交出来。
@@ -357,7 +357,7 @@ func TestModelLimitsForSurfacesModelRateLimit(t *testing.T) {
 }
 
 // 旧版误记清理：11148（工具记录错位）不是限流，重启后不能再从台账里复活
-// （2026-10-13：<凭证目录B> 曾因此被显示成「deepseek 限流到 10:58」）。
+// （2026-10-13：cred-b 曾因此被显示成「deepseek 限流到 10:58」）。
 func TestLoadRateLimitPurgesNonQuotaEntries(t *testing.T) {
 	resetRateLimit(t)
 
@@ -398,14 +398,14 @@ func TestBoardSurfacesModelLimitsWhenAccountProbeOK(t *testing.T) {
 
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "workbuddy-desktop-ai.info"),
-		[]byte(`{"account":{"uid":"uid-dog","nickname":"<email>"}}`), 0600)
+		[]byte(`{"account":{"uid":"uid-dog","nickname":"user@example.com"}}`), 0600)
 
 	reset := time.Now().Add(90 * time.Minute)
 	body := []byte(`{"code":6004,"msg":"usage exceeds frequency limit, your usage will reset at ` +
 		reset.Format("2006-01-02 15:04:05") + ` UTC+8"}`)
 	recordRateLimitFromBody(authWithUID{uid: "uid-dog"}, []byte(`{"model":"deepseek-v4.1-flash"}`), body)
 
-	st := intlCredStatusOne("<凭证目录D>", dir, true)
+	st := intlCredStatusOne("cred-d", dir, true)
 	if !st.OK || st.State != "可用" {
 		t.Fatalf("账号通道应可用（探活桩=OK），实际 ok=%v state=%q", st.OK, st.State)
 	}
@@ -422,9 +422,9 @@ func TestBoardSurfacesModelLimitsWhenAccountProbeOK(t *testing.T) {
 }
 
 // 离线复刻**当前真实** rate_limit.json 过一遍加载路径，验证用户报的现场：
-//   - 狗(4fea40ae)/田(9685e9b1) 的 deepseek-v4.1-flash 模型级限流要能被列出；
-//   - <凭证目录B> 的 11148 假记录要被清掉（那是工具记录错位，不是限流）；
-//   - 已过期的记录（<凭证目录A> 11140 若已过期）不载入。
+//   - cred-d/cred-c 的 deepseek-v4.1-flash 模型级限流要能被列出；
+//   - cred-b 的 11148 假记录要被清掉（那是工具记录错位，不是限流）；
+//   - 已过期的记录（cred-a 11140 若已过期）不载入。
 //
 // 只读取真实文件内容，写进临时目录，不碰生产台账。
 func TestBoardAgainstCurrentRealLedger(t *testing.T) {
@@ -438,10 +438,10 @@ func TestBoardAgainstCurrentRealLedger(t *testing.T) {
 	}
 	os.WriteFile(rateLimitPath(), b, 0644)
 
-	dog := modelLimitsFor("4fea40ae-42b7-47a0-8c74-ec2417047465")
-	tian := modelLimitsFor("9685e9b1-187c-4c05-960b-8e1e35a17a67")
-	t.Logf("<凭证目录D>模型限流: %+v", dog)
-	t.Logf("<凭证目录C>模型限流: %+v", tian)
+	dog := modelLimitsFor("00000000-0000-4000-8000-000000000000")
+	tian := modelLimitsFor("00000000-0000-4000-8000-000000000000")
+	t.Logf("cred-d 模型限流: %+v", dog)
+	t.Logf("cred-c 模型限流: %+v", tian)
 	for i, l := range [][]intlModelLimit{dog, tian} {
 		if len(l) == 0 {
 			continue // 已过恢复时刻属正常（上游 reset 到点）
@@ -452,12 +452,12 @@ func TestBoardAgainstCurrentRealLedger(t *testing.T) {
 			}
 		}
 	}
-	// 这里**不**断言「<凭证目录B> 有没有模型级限流」：rate_limit.json 是活数据，
+	// 这里**不**断言「cred-b 有没有模型级限流」：rate_limit.json 是活数据，
 	// 真实额度限流（6004）随流量出现又消失 —— 2026-10-16 本测试就因此从「零条目」
 	// 变成「有一条合法 6004」而撞挂，而那跟 11148 误记一点关系没有。
 	// 「非额度类 4xx 不该被当成限流」是载入路径的不变量，用固定 fixture 测：
 	// 见 TestRateLimitLoadPurgesNonQuotaCodes。
-	if l := modelLimitsFor("ff2d08ac-f1f1-4b9a-b6ad-4f55716220b5"); len(l) > 0 {
+	if l := modelLimitsFor("00000000-0000-4000-8000-000000000000"); len(l) > 0 {
 		for _, m := range l {
 			if strings.Contains(m.Reason, "11148") {
 				t.Fatalf("11148 误记不该出现在看板: %+v", m)
@@ -473,8 +473,8 @@ func TestRateLimitLoadPurgesNonQuotaCodes(t *testing.T) {
 	resetRateLimit(t)
 	future := time.Now().Add(2 * time.Hour).Format(time.RFC3339Nano)
 	body := `{"entries":{
-	  "ff2d08ac|model|deepseek-v4.1-flash":{"uid":"ff2d08ac","name":"<nick-A>","kind":"model","model":"deepseek-v4.1-flash","code":11148,"reason":"工具记录不完整","until":"` + future + `","hits":1},
-	  "ff2d08ac|model|hy4-preview":{"uid":"ff2d08ac","name":"<nick-A>","kind":"model","model":"hy4-preview","code":6004,"reason":"用量限流(6004)","until":"` + future + `","hits":1}
+	  "00000000|model|deepseek-v4.1-flash":{"uid":"00000000","name":"alice","kind":"model","model":"deepseek-v4.1-flash","code":11148,"reason":"工具记录不完整","until":"` + future + `","hits":1},
+	  "00000000|model|hy4-preview":{"uid":"00000000","name":"alice","kind":"model","model":"hy4-preview","code":6004,"reason":"用量限流(6004)","until":"` + future + `","hits":1}
 	}}`
 	if err := os.WriteFile(rateLimitPath(), []byte(body), 0644); err != nil {
 		t.Fatal(err)
@@ -484,7 +484,7 @@ func TestRateLimitLoadPurgesNonQuotaCodes(t *testing.T) {
 	loadRateLimitLocked()
 	rateLimitState.mu.Unlock()
 
-	limits := modelLimitsFor("ff2d08ac")
+	limits := modelLimitsFor("00000000")
 	if len(limits) != 1 {
 		t.Fatalf("应只留 6004 那条，实际 %d 条: %+v", len(limits), limits)
 	}

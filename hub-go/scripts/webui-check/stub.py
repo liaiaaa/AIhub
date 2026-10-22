@@ -68,9 +68,9 @@ class H(http.server.BaseHTTPRequestHandler):
             out["mimo"] = line(False)
             out["zcode"] = line(False)
             out["agg"] = {"up": S["agg"], "models": 3}
-            out["creds"] = ["<凭证目录A>"]
-            out["intl_cred"] = "<凭证目录A>"
-            out["default_cred"] = "<凭证目录A>"
+            out["creds"] = ["cred-a"]
+            out["intl_cred"] = "cred-a"
+            out["default_cred"] = "cred-a"
             # 用与真实实例同形状的签到记录（含原始措辞，便于验证 title 不丢信息）
             out["checkin"] = {"date": "2026-10-12", "time": "10:46:02",
                               "dom": "签到成功，+100 积分", "qoder": "已停用",
@@ -101,14 +101,14 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/intl/creds":
             # 模拟：一个可用、一个限流中、一个账号级风控
             return self._j({"ok": True, "creds": [
-                {"name": "<凭证目录A>", "nick": "<email>", "uid": "u1",
+                {"name": "cred-a", "nick": "bob@example.com", "uid": "u1",
                  "remain": 160, "total": 190, "ok": False, "state": "风控",
                  "reason": "账号级风控(11140)", "selected": False},
-                {"name": "<凭证目录B>", "nick": "<nick-A>", "uid": "u2",
+                {"name": "cred-b", "nick": "alice", "uid": "u2",
                  "remain": 130, "total": 160, "ok": False, "state": "限流",
                  "until": "20:01", "remain_txt": "还剩 42 分钟",
                  "reason": "用量限流(6004)", "selected": False},
-                {"name": "<凭证目录D>", "nick": "<email>", "uid": "u3",
+                {"name": "cred-d", "nick": "user@example.com", "uid": "u3",
                  "remain": 346, "total": 350, "ok": True, "state": "可用",
                  "selected": True},
             ]})

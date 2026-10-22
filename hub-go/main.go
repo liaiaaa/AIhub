@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -18,7 +19,10 @@ const (
 	IntlPort = 8799
 	HubPort  = 8801
 
-	defaultIntlCred = "<凭证目录B>"
+	// 默认国际凭证目录名。2026-10-21 开源审查：原来写死作者本机的
+	// 「<凭证目录B>」，既公开个人称呼，又让陌生人的 state.json 指向不存在的
+	// 目录、首次启动就异常。改为空 —— 由用户在控制台自己选。
+	defaultIntlCred = ""
 )
 
 // hubRoot（数据根目录：凭证/日志/state.json 的所在处）见 paths.go。
@@ -117,7 +121,7 @@ func main() {
 	mux.HandleFunc("/api/agg/remove", hub.apiAggRemove)
 	mux.HandleFunc("/api/agg/line_models", hub.apiAggLineModels)
 
-	srv := &http.Server{Handler: withCORS(mux), ReadHeaderTimeout: 20 * time.Second}
+	srv := &http.Server{Handler: withConsoleGuard(*port)(mux), ReadHeaderTimeout: 20 * time.Second}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logHub("console serve error: %v", err)
@@ -134,18 +138,95 @@ func main() {
 	select {}
 }
 
-// withCORS 控制台 API 的跨域放行（2026-10-13 融合改造）：
-// Hub Switch 桌面壳（tauri:// 或 http://localhost 来源）的「线路与凭证」页
-// 直接 fetch :8801 API。内核只听 127.0.0.1 且无鉴权，跨域头不扩大攻击面。
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+// consoleWriteOnly 只允许 POST 的控制台端点（防「GET 就能改状态」）。
+//
+// 2026-10-21 开源审查加固。此前 main.go 里这句注释是**错的**：
+//
+//	「内核只听 127.0.0.1 且无鉴权，跨域头不扩大攻击面」
+//
+// CORS 只决定「能不能读到响应」，不决定「请求能不能发出去」。任意网页
+// （包括被注入广告的页面）都能：
+//   - fetch('http://127.0.0.1:8801/api/exit', {method:'POST', mode:'no-cors'})
+//     → 把所有人的 aihub 停掉
+//   - <img src="http://127.0.0.1:8801/api/stop_all">（GET 也生效）
+//     → 静默停服，连 JS 都不用
+//   - POST /api/clients/takeover → 改写用户的 ~/.codex/config.toml 和
+//     ~/.claude/settings.json
+//   - DNS rebinding（代码不校验 Host）→ 连响应都能读走
+//
+// 这里做三件事：① 校验 Host 必须是本机（防 rebinding）；② 有 Origin 就必须是
+// 本机来源（防跨站读写）；③ 状态变更端点只收 POST（挡掉 <img>/<script> 这类
+// 无需 JS 的 GET 触发）。CORS 收窄成回显本机来源，不再发 `*`。
+var consoleWriteOnly = []string{
+	"/api/exit", "/api/stop_all",
+	"/api/agg/start", "/api/agg/stop", "/api/agg/add", "/api/agg/remove",
+	"/api/clients/takeover", "/api/clients/restore", "/api/clients/apply",
+	"/api/ratios", "/api/ctx", "/api/checkin", "/api/stop_all",
+}
+
+func isConsoleWritePath(path string) bool {
+	for _, p := range consoleWriteOnly {
+		if path == p {
+			return true
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+	// /api/<line>/{start,stop,switch,cred} 这类动态路径
+	if strings.HasPrefix(path, "/api/") {
+		for _, suf := range []string{"/start", "/stop", "/switch", "/takeover", "/restore", "/apply", "/claim", "/refresh"} {
+			if strings.HasSuffix(path, suf) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// withConsoleGuard 控制台 API 的本机来源校验与 CORS 收窄。
+func withConsoleGuard(port int) func(http.Handler) http.Handler {
+	hosts := map[string]bool{
+		fmt.Sprintf("127.0.0.1:%d", port): true,
+		fmt.Sprintf("localhost:%d", port): true,
+		// IPv6 环回
+		fmt.Sprintf("[::1]:%d", port): true,
+	}
+	origins := map[string]bool{
+		fmt.Sprintf("http://127.0.0.1:%d", port): true,
+		fmt.Sprintf("http://localhost:%d", port): true,
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// ① Host 校验：挡住 DNS rebinding（攻击者域名解析到 127.0.0.1）
+			if !hosts[r.Host] {
+				http.Error(w, "forbidden: unexpected Host", http.StatusForbidden)
+				return
+			}
+			// ② Origin 校验：挡住跨站请求（同源页面通常不带 Origin，
+			//    带了就必须是本机；Hub Switch 桌面壳的 tauri:// 是自定义
+			//    来源，它读的是路径不含 /api 的页面，这里放行非 http 来源）
+			if o := r.Header.Get("Origin"); o != "" {
+				if !origins[o] && (strings.HasPrefix(o, "http://") || strings.HasPrefix(o, "https://")) {
+					http.Error(w, "forbidden: cross-origin", http.StatusForbidden)
+					return
+				}
+			}
+			// ③ 状态变更只收 POST：挡掉 <img src> / <script src> 这类
+			//    无需 JS 就能发出的 GET
+			if r.Method != http.MethodPost && isConsoleWritePath(r.URL.Path) {
+				http.Error(w, "forbidden: write endpoint requires POST", http.StatusMethodNotAllowed)
+				return
+			}
+
+			if o := r.Header.Get("Origin"); origins[o] {
+				w.Header().Set("Access-Control-Allow-Origin", o)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

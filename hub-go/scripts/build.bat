@@ -6,7 +6,7 @@ rem  Usage: double-click, or run scripts\build.bat from anywhere.
 rem  Output: <project root>\bin\aihub.exe
 rem
 rem  Notes:
-rem   - Go toolchain is fixed at E:\software\go (no C: install, no PATH change).
+rem   - Go toolchain path is configured below (edit GO if yours differs).
 rem   - Build cache also lives on E: to avoid filling C:.
 rem   - %~dp0 is this script's dir (scripts\); root is its parent.
 rem   - IMPORTANT: keep .bat files ASCII-only + CRLF. cmd.exe on a
@@ -24,16 +24,16 @@ cd /d "%ROOT%" || (
 )
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 
-set "GO=E:\software\go\bin\go.exe"
+set "GO=C:\Go\bin\go.exe"
 if not exist "%GO%" (
   echo [ERROR] Go toolchain not found: %GO%
-  echo Please download Go for Windows amd64 and extract to E:\software\go
+  echo Please install Go for Windows amd64 (default C:\Go) or edit GO below
   pause
   exit /b 1
 )
 
-set "GOCACHE=E:\software\go-cache"
-set "GOPATH=E:\software\go-path"
+set "GOCACHE=%LOCALAPPDATA%\aihub\go-cache"
+set "GOPATH=%LOCALAPPDATA%\aihub\go-path"
 if not exist "%GOCACHE%" mkdir "%GOCACHE%"
 if not exist "%GOPATH%" mkdir "%GOPATH%"
 if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"

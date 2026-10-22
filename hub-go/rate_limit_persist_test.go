@@ -37,7 +37,7 @@ func TestModelLimitSurvivesWhileUpstreamPromiseIsLive(t *testing.T) {
 	now := time.Now()
 	writeLedger(t, map[string]*rateLimitEntry{
 		rlKey("uid-A", rlKindModel, "deepseek-v4.1-flash"): {
-			UID: "uid-A", Name: "<nick-A>", Kind: rlKindModel, Model: "deepseek-v4.1-flash",
+			UID: "uid-A", Name: "tester", Kind: rlKindModel, Model: "deepseek-v4.1-flash",
 			Code: 6004, Reason: "用量限流(6004)",
 			Until:   now.Add(-1 * time.Hour), // 本地 2h 闸门已过
 			ResetAt: now.Add(10 * time.Hour), // 上游说明显还在后面

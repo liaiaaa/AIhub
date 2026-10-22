@@ -42,7 +42,9 @@ func TestLooksLikeDataRoot(t *testing.T) {
 
 	// 只有凭证目录也应被识别
 	withCred := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(withCred, "<凭证目录A>"), 0755); err != nil {
+	// 目录名必须以「凭证」结尾 —— looksLikeDataRoot 就是按这个后缀认数据根的
+	// （2026-10-21：原来的名字是作者本机账号，已换成中性名，但后缀约定不变）。
+	if err := os.MkdirAll(filepath.Join(withCred, "测试凭证"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if !looksLikeDataRoot(withCred) {

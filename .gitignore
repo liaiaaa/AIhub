@@ -16,9 +16,6 @@ _backups_disabled/
 # ---- 凭据：绝不入库（含 accessToken / refreshToken）----
 *.info
 *_api_key.txt
-<凭证目录A>/
-<凭证目录B>/
-<凭证目录C>/
 # 数据根下任意「凭证目录」：一律不入库（含 accessToken / refreshToken）。
 # 用通配而非逐个列举——2026-10-12 加「<凭证目录D>」时发现漏了一个：
 # 逐个列举意味着每加一个账号就得改一次 .gitignore，漏一次就把凭据提交进库。

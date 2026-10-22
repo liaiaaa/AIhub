@@ -137,7 +137,7 @@ func domCheckinPath(path string) checkinResult {
 //   - 端点与事件形状照抄开源实现 linguo2625469/workbuddy2api-panel
 //     （internal/upstream/report.go、scripts/probe_active.py）：POST /v2/report，
 //     body 为 [chat_request_send 事件]；**事件必须带 userId，缺失则 200 但静默丢弃**。
-//   - 本机实测（2026-10-12，<凭证目录C>）：上报前 growth/streak 的 days=0，
+//   - 本机实测（2026-10-12，cred-c）：上报前 growth/streak 的 days=0，
 //     上报后 days=1 → 事件被真实接受，非静默丢弃。
 //
 // 风控口径：每号每天 1 次即可（文档「同一账号每日最多获得一次」；开源实现也注明

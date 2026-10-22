@@ -339,7 +339,7 @@ type intlCredStatus struct {
 	Selected      bool   `json:"selected"`         // 是否是当前选中
 	// ModelLimits 模型级限流：账号推理通道通（探活模型可用），但某些模型被
 	// 上游限流（6004 就是按「账号×模型」计的）。必须直显到卡片上——
-	// 2026-10-13 用户报：狗/<凭证目录C> deepseek-v4.1-flash 明明限到 11:54/11:01，
+	// 2026-10-13 用户报：狗/cred-c deepseek-v4.1-flash 明明限到 11:54/11:01，
 	// 看板探活只用未受限的免费模型试，显示「✓ 可用」，等于没说。
 	ModelLimits []intlModelLimit `json:"model_limits,omitempty"`
 	// Expiries 限时积分到期提醒（国内凭证卡片用；国际版没有礼包/补偿接口，恒空）。
@@ -469,7 +469,7 @@ func intlCredStatusOne(name, dir string, selected bool) intlCredStatus {
 	}
 
 	// 台账没记录 ≠ 能用。**必须真探一次**：额度查得到只说明 billing 通，
-	// 与推理通道是两回事（2026-10-12 实测<凭证目录A>：额度 200、userinfo 200、
+	// 与推理通道是两回事（2026-10-12 实测cred-a：额度 200、userinfo 200、
 	// 但 chat 403 11140）。此前这里直接标 ✓ 可用，等于在骗用户。
 	probe, probeDetail := probeInferFn(cm, p)
 	switch probe {
@@ -516,7 +516,7 @@ const (
 // intlProbeInfer 发一个最小推理请求，判断该凭证的**推理通道**是否可用。
 //
 // 为什么必须探活：额度接口（billing）与推理接口（chat）是两条通道，
-// 额度 200 不代表能推理。2026-10-12 实测<凭证目录A>就是这种（额度/userinfo/
+// 额度 200 不代表能推理。2026-10-12 实测cred-a就是这种（额度/userinfo/
 // 成长中心全 200，chat 却 403 11140）。只看额度会把坏号标成"可用"。
 //
 // 成本控制：max_tokens=1、prompt 极短、只读到第一帧就断开——不消耗实质额度

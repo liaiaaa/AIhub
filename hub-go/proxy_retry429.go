@@ -339,7 +339,7 @@ func recordRateLimitFromBody(auth AuthProvider, payload, body []byte) {
 
 	kind, reason := rlKindModel, "限流"
 	if code == 11140 {
-		// 11140 实测是账号级：连 hi/1+1 都被拒（2026-10-12 验证<凭证目录A>），
+		// 11140 实测是账号级：连 hi/1+1 都被拒（2026-10-12 验证cred-a），
 		// 与内容无关，故记为账号级（全模型不可用）。
 		kind, reason = rlKindAccount, "账号级风控(11140)"
 	} else if strings.Contains(msg, "frequency limit") {

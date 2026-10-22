@@ -100,7 +100,7 @@ func TestLiveToolResultImage(t *testing.T) {
 		cands = append(cands, want)
 	}
 	cd := credDirs()
-	for _, k := range []string{"<凭证目录D>", "<凭证目录B>", "<凭证目录C>", "<凭证目录A>"} {
+	for _, k := range []string{"cred-d", "cred-b", "cred-c", "cred-a"} {
 		if v, ok := cd[k]; ok && dirHasCredential(v) {
 			cands = append(cands, k)
 		}

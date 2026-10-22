@@ -4,7 +4,7 @@
 
 用法：
   python3 build_credential.py --token '<accessToken>' [--refresh '<refreshToken>'] \
-      --out /home/<user>/opt/AI_test/hub-go/<凭证目录D>/workbuddy-desktop-ai.info
+      --out /home/<user>/opt/AI_test/hub-go/cred-d/workbuddy-desktop-ai.info
   # 也支持环境变量：WB_ACCESS_TOKEN / WB_REFRESH_TOKEN
 
 做的事：

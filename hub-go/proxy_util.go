@@ -429,7 +429,7 @@ func fileExists(path string) bool {
 
 // 2026-10-07 实测定论：WorkBuddy 上游的 403 {"code":11140,"msg":"request illegal"}
 // 是【账号级风控】——同一请求（哪怕只是"你好"）在被标记账号上必挂，
-// 换<凭证目录B>/<凭证目录C>立刻通过，与消息内容（含 GitHub 链接）无关。
+// 换cred-b/cred-c立刻通过，与消息内容（含 GitHub 链接）无关。
 // 但上游文案咬定「内容未通过安全审核」，用户会白白去改写提示词。
 // 这里把人话提示追加进 displayMsg，客户端气泡会直接展示出来。
 

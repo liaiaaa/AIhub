@@ -391,10 +391,43 @@ func modelLimitsFor(uid string) []intlModelLimit {
 //
 // 这是 C 方案的核心：让用户一眼看出「哪个账号现在能用」，而不是靠记忆。
 // 不做自动轮换——只如实汇报，换号由用户决定。
+// intlCredsCache 国际凭证卡片的进程级缓存。
+//
+// 2026-10-21 开源审查修：此前 `intlCredsStatus(h, force)` 的 force 参数
+// **从头到尾没被用过** —— 每次调用都对所有凭证重打上游（Summary + 余额 +
+// 推理探活串行几发）。控制台「刷新额度」传的 ?force=1 因此完全无效，完全是
+// 在骗调用方；而且每进一次线路页就是十几个上游请求，费额度也招风控。
+// 现在对齐 domCredsStatus 的语义：启动预热一次、手动刷新才重拉，唯一每读
+// 现算的字段是 Selected（切凭证要高亮）。
+var (
+	intlCredsMu    sync.Mutex
+	intlCredsCache []intlCredStatus
+	intlCredsHave  bool
+)
+
+// intlCredsCacheReset 清空缓存。测试隔离用；生产里只被 force=true 覆盖。
+func intlCredsCacheReset() {
+	intlCredsMu.Lock()
+	intlCredsCache, intlCredsHave = nil, false
+	intlCredsMu.Unlock()
+}
+
 func intlCredsStatus(h *Hub, force bool) []intlCredStatus {
 	h.mu.Lock()
 	selected := h.intlCred
 	h.mu.Unlock()
+
+	intlCredsMu.Lock()
+	cached, have := intlCredsCache, intlCredsHave
+	intlCredsMu.Unlock()
+	if have && !force {
+		out := make([]intlCredStatus, len(cached))
+		for i, st := range cached {
+			st.Selected = st.Name == selected
+			out[i] = st
+		}
+		return out
+	}
 
 	dirs := credDirs()
 	names := make([]string, 0, len(dirs))
@@ -415,6 +448,10 @@ func intlCredsStatus(h *Hub, force bool) []intlCredStatus {
 		}(i, name)
 	}
 	wg.Wait()
+
+	intlCredsMu.Lock()
+	intlCredsCache, intlCredsHave = out, true
+	intlCredsMu.Unlock()
 	return out
 }
 

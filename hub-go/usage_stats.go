@@ -46,7 +46,17 @@ type usageTap struct {
 	code  int
 	head  bool
 	usage map[string]any
+	// tail 上一块数据的尾部，留给下一次 pick 拼帧用。
+	// 2026-10-21 开源审查修：原来只在「单次 Write 的 chunk 内」做
+	// LastIndex("usage") + 括号配对。SSE 帧跨 32KB 边界时配对必然失败，
+	// usage 被静默丢掉（用量统计少记），而正文里出现 "usage" 这个词时还可能
+	// 配出垃圾对象。保留尾部后跨块帧也能配出来。
+	tail []byte
 }
+
+// usageTailKeep 每次保留多少尾部字节参与下一次拼帧。SSE 的 usage 对象通常
+// 几十字节；16KB 足够跨两次 32KB 分块，又不会让缓冲无限增长。
+const usageTailKeep = 16 << 10
 
 func (t *usageTap) Header() http.Header { return t.w.Header() }
 
@@ -97,12 +107,25 @@ func (t *usageTap) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (t *usageTap) pick(p []byte) {
-	i := bytes.LastIndex(p, usageKey)
-	if i < 0 {
-		return
+	// 把上一次的尾部拼在前面，跨 chunk 的帧才配得出来。
+	var buf []byte
+	if len(t.tail) > 0 {
+		buf = make([]byte, 0, len(t.tail)+len(p))
+		buf = append(buf, t.tail...)
+		buf = append(buf, p...)
+	} else {
+		buf = p
 	}
-	if u := usageObjectAt(p, i); u != nil {
-		t.usage = u
+	if i := bytes.LastIndex(buf, usageKey); i >= 0 {
+		if u := usageObjectAt(buf, i); u != nil {
+			t.usage = u
+		}
+	}
+	// 保留尾部：从 buf 末尾往前取 usageTailKeep 字节。
+	if len(buf) > usageTailKeep {
+		t.tail = append(t.tail[:0], buf[len(buf)-usageTailKeep:]...)
+	} else {
+		t.tail = append(t.tail[:0], buf...)
 	}
 }
 

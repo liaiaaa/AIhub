@@ -134,7 +134,10 @@ func writeCodexCatalogFile(h *Hub) (string, error) {
 	for i, it := range items {
 		e, err := cloneJSONMap(tpl[i%len(tpl)])
 		if err != nil {
-			e = tpl[i%len(tpl)]
+			// 2026-10-21 开源审查修：原来 clone 失败直接拿模板本体当条目，
+			// 后面几行会往里写 slug/display_name/limit —— 原地污染共享模板，
+			// 之后所有条目拿到的都是被改过的同一份。改成新建空 map。
+			e = map[string]any{}
 		}
 		e["slug"] = it.slug
 		e["display_name"] = it.display

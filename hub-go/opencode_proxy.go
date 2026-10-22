@@ -628,6 +628,16 @@ func opencodePipeStream(w http.ResponseWriter, body io.Reader) map[string]any {
 			fl.Flush()
 		}
 	}
+	// 2026-10-21 开源审查修：此前从不检查 sc.Err()。单条 SSE 行超过
+	// sc.Buffer 上限（4MB）时 Scan() 返回 false，循环安静结束 —— 客户端
+	// 收到的是被截断的流，既没有 [DONE] 也没有任何日志。
+	if err := sc.Err(); err != nil {
+		logHub("[opencode] ✗ 上游流扫描中断（可能单行超 4MB 缓冲）: %v", err)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}
 	return usage
 }
 

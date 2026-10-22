@@ -22,6 +22,8 @@ package main
 
 import (
 	"bytes"
+	"sync/atomic"
+	"encoding/binary"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -285,7 +287,13 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 
 	// 4. payload → 标准 base64
 	ridBytes := make([]byte, 16)
-	rand.Read(ridBytes)
+	if _, rerr := rand.Read(ridBytes); rerr != nil {
+		// 2026-10-21 开源审查修：原先忽略错误。rand.Read 失败时这 16 字节
+		// 全是 0，每个请求拿到同一个 requestId —— 上游若按 id 去重会把
+		// 不同请求当成同一个。退化为时间戳 + 计数器保证唯一。
+		binary.BigEndian.PutUint64(ridBytes[:8], uint64(time.Now().UnixNano()))
+		binary.BigEndian.PutUint64(ridBytes[8:], uint64(qoderRidSeq.Add(1)))
+	}
 	requestID := hex.EncodeToString(ridBytes)
 	payloadBytes, _ := json.Marshal(map[string]string{
 		"version":     "v1",
@@ -340,3 +348,6 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 	}
 	return headers, nil
 }
+
+// qoderRidSeq 仅用于 rand.Read 失败时的兜底 requestId 生成。
+var qoderRidSeq atomic.Uint64

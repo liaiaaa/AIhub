@@ -445,14 +445,16 @@ func (p *Proxy) retryChannelBlock(ctx context.Context, client *http.Client, auth
 		body, rerr := io.ReadAll(io.LimitReader(resp.Body, retry429BodyLimit))
 		resp.Body.Close()
 		if rerr != nil || !isChannelBlockBody(resp.StatusCode, body) {
-			// 不是渠道拦截：把 body 原样放回去，交给后续逻辑
-			resp.Body = io.NopCloser(bytes.NewReader(body))
+			// 不是渠道拦截：把 body 原样放回去，交给后续逻辑。
+			// 2026-10-21 开源审查修：只换了 Body 没同步 ContentLength，
+			// 下游 io.Copy / 客户端会按旧长度读，出现提前 EOF 或多读垃圾。
+			setRespBody(resp, body)
 			return resp, nil
 		}
 		if attempt > channelBlockRetries {
 			logger.Log("[%s] ✗ 渠道校验拦截（11128）重试 %d 次仍失败 | %s",
 				rid, attempt-1, truncate(string(body), 160))
-			resp.Body = io.NopCloser(bytes.NewReader(annotateChannelBlockGiveUp(body, attempt-1)))
+			setRespBody(resp, annotateChannelBlockGiveUp(body, attempt-1))
 			return resp, nil
 		}
 		wait := channelBlockWait(attempt)
@@ -460,7 +462,7 @@ func (p *Proxy) retryChannelBlock(ctx context.Context, client *http.Client, auth
 			rid, wait.Seconds(), attempt, channelBlockRetries)
 		if !sleepCtx(ctx, wait) {
 			logger.Log("[%s] ✗ 渠道拦截重试等待中被取消", rid)
-			resp.Body = io.NopCloser(bytes.NewReader(body))
+			setRespBody(resp, body)
 			return resp, nil
 		}
 		var nerr error
@@ -499,4 +501,20 @@ func annotateChannelBlockGiveUp(body []byte, attempts int) []byte {
 		return body
 	}
 	return out
+}
+
+// setRespBody 把已读出的字节塞回 resp.Body，并同步 ContentLength。
+//
+// 2026-10-21 开源审查修：原来只换 Body、ContentLength 还是原始值，而
+// annotateChannelBlockGiveUp 会在 JSON 尾部追加提示文字让 body 变长。
+// 下游若按 ContentLength 读就会提前 EOF 或截断。
+func setRespBody(resp *http.Response, b []byte) {
+	if resp == nil {
+		return
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	resp.ContentLength = int64(len(b))
+	if resp.Header != nil {
+		resp.Header.Set("Content-Length", strconv.Itoa(len(b)))
+	}
 }

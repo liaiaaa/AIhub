@@ -681,6 +681,12 @@ func (p *Proxy) streamToClient(w http.ResponseWriter, r *http.Request, auth Auth
 			}
 		}
 		if rerr != nil {
+			// io.EOF 是正常的流结束；其它错误（连接重置、上游超时）此前被
+			// 静默 break —— 客户端收到半截流，日志里却只有一行「◀ RESPONSE」，
+			// 完全看不出发生过中断。2026-10-21 开源审查补记日志。
+			if rerr != io.EOF {
+				logger.Log("[%s] ✗ 上游流中断 | %v", rid, rerr)
+			}
 			break
 		}
 	}

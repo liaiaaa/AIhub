@@ -6,7 +6,7 @@ package main
 //   - AuthFilePath 的 glob 回退要能解析出真实文件
 //
 // 注意：依赖本机真实凭证目录。测试自身通过 repoRoot() 定位仓库根，
-// 不再硬编码绝对路径（曾因写死 D:\C\Desktop\workbuddy-hub 而在目录改名后失败）。
+// 不再硬编码绝对路径（曾因写死 某个绝对路径 而在目录改名后失败）。
 
 import (
 	"encoding/json"

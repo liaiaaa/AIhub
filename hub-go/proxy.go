@@ -644,9 +644,18 @@ func (p *Proxy) streamToClient(w http.ResponseWriter, r *http.Request, auth Auth
 		// 之前只能靠「构造类似请求」猜触发条件，猜了 4 轮都不中（body 大小、
 		// ACP 标记、system 长度、并发全排除），真正需要的是失败样本本身。
 		if resp.StatusCode == http.StatusBadRequest && bytes.Contains(b, []byte("unapproved channel")) {
-			dumpPath := dataPath("dom-dump-" + rid + "-upstream.json")
-			if err := os.WriteFile(dumpPath, payload, 0600); err == nil {
-				logger.Log("[%s] ⚠ 已 dump 渠道拦截载荷: %s (%dKB)", rid, dumpPath, len(payload)/1024)
+			// 单份上限：超过这个体积基本是无关的超长上下文，落盘只会挤掉
+			// 真正小的失败样本（排查用，不是留档用）。
+			const domDumpMaxBytes = 8 << 20
+			if len(payload) <= domDumpMaxBytes {
+				dumpPath := dataPath("dom-dump-" + rid + "-upstream.json")
+				if err := os.WriteFile(dumpPath, payload, 0600); err == nil {
+					logger.Log("[%s] ⚠ 已 dump 渠道拦截载荷: %s (%dKB)", rid, dumpPath, len(payload)/1024)
+					// 2026-10-21 开源审查补：此前 dom 这条路径没有清理，
+					// 每命中一次 11128 就留一份整份对话，永不删。复用 qoder
+					// 那边抽出的通用清理（保留最近 3 份，AIHUB_KEEP_DUMPS=1 可关）。
+					pruneDumpFiles("dom-dump-*.json", domDumpKeep, "AIHUB_KEEP_DUMPS", logger, "dom")
+				}
 			}
 		}
 		recordRateLimitFromBody(auth, payload, b)
@@ -718,3 +727,8 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	writeJSON(w, http.StatusOK, col.build())
 }
 
+
+// domDumpKeep dom 线路失败样本（渠道拦截载荷）保留份数。
+// 只留最近几份够对比定位；数据根要在开源后随仓库/文档可见，明文对话历史
+// 不能无限堆（此前每命中一次 11128 就留一份整份对话，没有任何清理）。
+const domDumpKeep = 3

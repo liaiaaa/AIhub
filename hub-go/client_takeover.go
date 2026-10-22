@@ -412,7 +412,7 @@ func (h *Hub) apiRatios(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "bad json: " + err.Error()})
 			return
 		}
-		userRatios = req.Ratios
+		userRatiosReplace(req.Ratios)
 		if err := saveUserRatios(); err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "保存失败：" + err.Error()})
 			return
@@ -420,7 +420,7 @@ func (h *Hub) apiRatios(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "倍率已保存（即时生效）"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": userRatios})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": userRatiosSnapshot()})
 }
 func (h *Hub) apiClientsStatus(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"ok": true}

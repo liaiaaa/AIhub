@@ -641,16 +641,25 @@ func qoderDumpFailedPayload(rid string, payload []byte, log *FileLogger) {
 const qoderDumpKeep = 5
 
 // qoderPruneDumps dump 落盘后清掉超出保留数的旧文件（按修改时间从旧删起）。
-// 只动 qoder-dump-*.json 这一种前缀，碰不到数据根里其它东西；
-// 清理失败只记日志——取证失败不该影响正常请求路径。
 func qoderPruneDumps(log *FileLogger) {
 	// 排查期可用 QODER_KEEP_DUMPS=1 关闭清理，避免失败样本被自己删掉
 	// （2026-10-20 排查时连续两次把要分析的样本清了，白跑几轮）。
-	if os.Getenv("QODER_KEEP_DUMPS") == "1" {
+	pruneDumpFiles("qoder-dump-*.json", qoderDumpKeep, "QODER_KEEP_DUMPS", log, "qoder")
+}
+
+// pruneDumpFiles 通用的失败样本清理：只动给定 glob 前缀，按修改时间保留最近
+// keep 份，更早的删掉；失败只记日志（取证清理不该影响正常请求路径）。
+//
+// 2026-10-21 从 qoderPruneDumps 抽出来复用：dom 线路 2026-10-21 加的
+// 「渠道拦截载荷落盘」当时没有清理，每命中一次 11128 就在数据根留一份整份
+// 对话（现场样例 110KB），既不封顶也不过期。开源后这个目录会跟着仓库发出去，
+// 明文对话历史不能无限堆。
+func pruneDumpFiles(glob string, keep int, keepEnv string, log *FileLogger, label string) {
+	if keepEnv != "" && os.Getenv(keepEnv) == "1" {
 		return
 	}
-	matches, err := filepath.Glob(dataPath("qoder-dump-*.json"))
-	if err != nil || len(matches) <= qoderDumpKeep {
+	matches, err := filepath.Glob(dataPath(glob))
+	if err != nil || len(matches) <= keep {
 		return
 	}
 	type fileInfo struct {
@@ -665,13 +674,13 @@ func qoderPruneDumps(log *FileLogger) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) }) // 新→旧
 	removed := 0
-	for _, f := range files[qoderDumpKeep:] {
+	for _, f := range files[keep:] {
 		if err := os.Remove(f.path); err == nil {
 			removed++
 		}
 	}
 	if removed > 0 && log != nil {
-		log.Log("已清理 %d 份过期 qoder dump（保留最近 %d 份）", removed, qoderDumpKeep)
+		log.Log("已清理 %d 份过期 %s dump（保留最近 %d 份）", removed, label, keep)
 	}
 }
 
@@ -1288,7 +1297,14 @@ func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Reque
 	writeSSE(map[string]any{"choices": []any{map[string]any{
 		"index": 0, "delta": map[string]any{}, "finish_reason": finish,
 	}}})
-	writeSSE("[DONE]")
+	// SSE 终止符是裸的 data: [DONE]，必须手写 —— writeSSE 走 mustJSON，
+	// 会把字符串序列化成 data: "[DONE]"（带引号），严格解析的客户端会当成
+	// 一个无 choices 的 JSON 字符串帧忽略掉，只能等连接 EOF 收尾（部分客户端
+	// 直接报 unexpected token）。同文件 streamToClient 里已是正确写法。
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
 
 	elapsed := time.Since(t0)
 	if p.log != nil {

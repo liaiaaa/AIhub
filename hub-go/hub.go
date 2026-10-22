@@ -382,6 +382,11 @@ func (h *Hub) startDomWithCred(cred string) (bool, string) {
 	}
 	h.dom = p
 	h.mu.Unlock()
+	// 2026-10-21 开源审查修的漏项：switchDom 先 stopDom()（里面会
+	// forgetLine("dom")）再走这里，此前这条路径不补 rememberLine，导致
+	// 「换过国内凭证」之后 state.json 的 last_lines 里 dom 已被摘掉，
+	// 下次重启不再自动恢复。startDom 早就有这一行，startDomWithCred 漏了。
+	h.rememberLine("dom")
 	return true, msg
 }
 

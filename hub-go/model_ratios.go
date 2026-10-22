@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"sync"
 	"os"
 	"strconv"
 	"strings"
@@ -103,25 +104,89 @@ var modelRatios = map[string]map[string]float64{
 }
 
 // userRatios 用户覆盖表（model_ratios_user.json），懒加载 + 保存时写盘。
-var userRatios map[string]map[string]float64
+//
+// 并发说明（2026-10-21 开源审查修的 P0）：这张表是**首次访问时懒加载**的，
+// 而读它的路径全在 HTTP 协程里：
+//   - 聚合口 /v1/models、/v1/models?client_version=（Codex 拉目录）
+//   - /api/gateway
+//   - codexCatalogRefresh（启线路时后台刷新）
+// 与此同时 /api/ratios POST 会整张替换。此前完全没有同步，实测 `go test -race`
+// 直接报 loadUserRatios 的读（:111）与写（:114）数据竞争；进一步并发进入
+// json.Unmarshal 原地写 + userRatios[line] 读就是 Go 运行时的
+// "concurrent map read and map write" —— **fatal error，recover 不住，整个进程
+// （所有线路 + 控制台）一起退出**。
+//
+// 修法：一张 RWMutex 保住全部访问点，并且 loadUserRatios 只在局部变量里
+// Unmarshal、最后整体赋值，绝不原地写已被别人读到的 map。
+var (
+	userRatiosMu sync.RWMutex
+	userRatios   map[string]map[string]float64
+)
 
 func userRatiosPath() string { return dataPath("model_ratios_user.json") }
 
 func loadUserRatios() {
-	if userRatios != nil {
+	userRatiosMu.RLock()
+	loaded := userRatios != nil
+	userRatiosMu.RUnlock()
+	if loaded {
 		return
 	}
-	userRatios = map[string]map[string]float64{}
-	b, err := os.ReadFile(userRatiosPath())
-	if err != nil {
+	userRatiosMu.Lock()
+	defer userRatiosMu.Unlock()
+	if userRatios != nil { // 双检：等锁期间别人已经加载完
 		return
 	}
-	_ = json.Unmarshal(b, &userRatios)
+	m := map[string]map[string]float64{}
+	if b, err := os.ReadFile(userRatiosPath()); err == nil {
+		_ = json.Unmarshal(b, &m) // 写局部变量
+	}
+	userRatios = m
 }
 
-// saveUserRatiosLocked 写盘（调用方保证并发安全由 handler 串行化即可）。
+// userRatiosLookup 读一条覆盖倍率。
+func userRatiosLookup(line, model string) (float64, bool) {
+	loadUserRatios()
+	userRatiosMu.RLock()
+	defer userRatiosMu.RUnlock()
+	if m, ok := userRatios[line]; ok {
+		if v, ok := m[model]; ok {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// userRatiosReplace 整张替换（/api/ratios POST）。req 来自 JSON 解码，调用方
+// 此后不再改它，所以直接接管引用即可。
+func userRatiosReplace(m map[string]map[string]float64) {
+	userRatiosMu.Lock()
+	userRatios = m
+	userRatiosMu.Unlock()
+}
+
+// userRatiosSnapshot 深拷贝，供序列化用 —— 绝不把手里的内部 map 交给
+// json.Marshal 在锁外遍历（并发替换时会 fatal）。
+func userRatiosSnapshot() map[string]map[string]float64 {
+	loadUserRatios()
+	userRatiosMu.RLock()
+	defer userRatiosMu.RUnlock()
+	out := make(map[string]map[string]float64, len(userRatios))
+	for line, m := range userRatios {
+		cp := make(map[string]float64, len(m))
+		for k, v := range m {
+			cp[k] = v
+		}
+		out[line] = cp
+	}
+	return out
+}
+
+// saveUserRatios 写盘。持读锁序列化，避免与替换并发。
 func saveUserRatios() error {
+	userRatiosMu.RLock()
 	b, err := json.MarshalIndent(userRatios, "", "  ")
+	userRatiosMu.RUnlock()
 	if err != nil {
 		return err
 	}
@@ -219,11 +284,8 @@ func (h *Hub) modelRatio(line, model string) (float64, bool) {
 			return v, true
 		}
 	}
-	loadUserRatios()
-	if m, ok := userRatios[line]; ok {
-		if v, ok := m[model]; ok {
-			return v, true
-		}
+	if v, ok := userRatiosLookup(line, model); ok {
+		return v, true
 	}
 	if line == "qoder" {
 		if p := h.qoderForAgg(); p != nil {

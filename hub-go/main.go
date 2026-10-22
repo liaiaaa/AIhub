@@ -73,6 +73,7 @@ func main() {
 		time.Sleep(2 * time.Second)
 		creditsSnapshot(hub, true)
 		domCredsStatus(hub, true)
+		intlCredsStatus(hub, true) // 2026-10-21：国际凭证卡片同样启动预热一次
 		logHub("启动额度已自动刷新（余额 + 凭证状态 + 积分到期）")
 	}()
 	mux := http.NewServeMux()

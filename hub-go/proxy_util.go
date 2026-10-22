@@ -64,11 +64,20 @@ func intVal(v any, def int) int {
 	return def
 }
 
+// truncate 按**字符**截断。
+//
+// 2026-10-21 开源审查修：原来按字节切 s[:n]。中文一个字 3 字节，切在中间
+// 会留下半个 UTF-8 序列，后续 json.Marshal 把它替换成 U+FFFD，日志和错误
+// 提示里出现乱码，按关键字搜索日志也搜不到。
 func truncate(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.TrimSpace(s)
-	if len(s) > n {
-		return s[:n] + "…"
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
 	}
 	return s
 }

@@ -95,7 +95,11 @@ func anthropicToChatBody(req map[string]any) (map[string]any, error) {
 				"function": map[string]any{"name": name, "parameters": orEmptyObj(tm["input_schema"])},
 			}
 			if d, ok := tm["description"].(string); ok {
-				entry["function"].(map[string]any)["description"] = d
+				// 2026-10-21 开源审查：补 ok 断言。entry["function"] 是本函数
+				// 刚构造的所以当前安全，但裸断言一旦上游结构变化就是 panic。
+				if fm, ok := entry["function"].(map[string]any); ok {
+					fm["description"] = d
+				}
 			}
 			chatTools = append(chatTools, entry)
 		}
@@ -337,11 +341,14 @@ func (h *Hub) aggAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		anthropicStreamResponse(w, resp.Body, slug, wantThinking)
 		return
 	}
-	// 诊断二：全量读取后喂 collectStream（上一次 4KB 截断造成假空）
-	full, _ := io.ReadAll(resp.Body)
-	logHub("anthropic 非流式诊断2: len=%d tool_calls=%v usage=%v tail=%.160s",
-		len(full), strings.Contains(string(full), `"tool_calls"`), strings.Contains(string(full), `"usage"`),
-		string(full[max(0, len(full)-160):]))
+	// 全量读取后喂 collectStream（早期版本 4KB 截断会造成假空响应）。
+	// 2026-10-21 开源审查：原来无上限 ReadAll + 每个请求都打一条诊断日志
+	// （含响应尾部内容，既污染日志又不该长期留在生产路径）。加上限并删诊断。
+	const anthropicRespMax = 64 << 20
+	full, rerr := io.ReadAll(io.LimitReader(resp.Body, anthropicRespMax))
+	if rerr != nil {
+		logHub("anthropic 非流式读取失败: %v", rerr)
+	}
 	anthropicNonStreamResponse(w, strings.NewReader(string(full)), slug, wantThinking)
 }
 
@@ -409,7 +416,20 @@ func anthropicNonStreamResponse(w http.ResponseWriter, body io.Reader, slug stri
 	// content/tool_calls 全取空；usage 走信封顶层，字段是 json.Number）
 	msg := map[string]any{}
 	finish := ""
-	if ch, ok := asSlice(env["choices"])[0].(map[string]any); ok {
+	// 2026-10-21 开源审查：先判长度再取下标 —— 上游返回空 choices（纯错误
+	// 响应、被截断）时，直接 [0] 会 panic 掉整个 handler。
+	choicesList := asSlice(env["choices"])
+	if len(choicesList) == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "upstream_error",
+				"message": "上游没有返回任何 choices",
+			},
+		})
+		return
+	}
+	if ch, ok := choicesList[0].(map[string]any); ok {
 		if m, ok := ch["message"].(map[string]any); ok {
 			msg = m
 		}

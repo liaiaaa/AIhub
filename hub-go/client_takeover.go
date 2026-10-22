@@ -44,7 +44,14 @@ func backupFile(path string) (string, error) {
 		return "", err // 文件不存在就没有备份一说
 	}
 	bak := fmt.Sprintf("%s.bak-hubgo-%s", path, time.Now().Format("20060102-150405"))
-	if err := os.WriteFile(bak, b, 0644); err != nil {
+	// 2026-10-21 开源审查修：原来固定 0644。被备份的是 ~/.codex/config.toml
+	// 这类文件（原权限可能是 0600，且常含其他供应商的 API key），备份留在
+	// 家目录里长期不动，不该比原文件更宽松。沿用原 mode，取不到就 0600。
+	mode := os.FileMode(0600)
+	if st, serr := os.Stat(path); serr == nil {
+		mode = st.Mode().Perm()
+	}
+	if err := os.WriteFile(bak, b, mode); err != nil {
 		return "", err
 	}
 	return bak, nil

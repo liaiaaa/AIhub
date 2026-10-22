@@ -384,7 +384,11 @@ func (p *QoderProxy) openInfer(ctx context.Context, payload []byte) (*http.Respo
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(700 * time.Millisecond)
+			// 2026-10-21 开源审查修：原先直接 time.Sleep，客户端已断开
+			// （ctx 取消）时还会继续等 700ms 并再打一次上游。
+			if !sleepCtx(ctx, 700*time.Millisecond) {
+				return nil, ctx.Err()
+			}
 		}
 		headers, serr := p.auth.Sign(p.inferURL, string(payload))
 		if serr != nil {
@@ -581,7 +585,11 @@ func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log
 				if providerErrs == 0 {
 					qoderDumpFailedPayload(rid, payload, log)
 				}
-				time.Sleep(700 * time.Millisecond)
+				// 同上：客户端断开就不必再等、也不必再打上游。
+				if !sleepCtx(ctx, 700*time.Millisecond) {
+					resp.Body.Close()
+					return nil, ctx.Err()
+				}
 				providerErrs++
 				continue
 			}

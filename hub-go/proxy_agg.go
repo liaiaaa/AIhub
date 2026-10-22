@@ -201,33 +201,40 @@ var aggPrettyNames = map[string]string{
 	"Fast":              "Fast",
 }
 
+// aggAdd / aggRemove 的 codexCatalogRefresh 必须在**锁外**调用：
+// 它起的 goroutine 要抢 aggMu 取白名单快照，持锁调用会让 /v1/models
+// 在写目录期间排队（客户端表现为启动时偶发秒级卡顿）。2026-10-21 开源审查。
+// 因此这两个函数用显式 Unlock 而不是 defer。
 func aggAdd(line, backend string) (aggModel, bool, string) {
 	aggMu.Lock()
-	defer aggMu.Unlock()
 	slug := line + "." + backend
 	for _, m := range aggList {
 		if m.Slug == slug {
+			aggMu.Unlock()
 			return m, false, "已存在：" + slug
 		}
 	}
 	m := aggModel{Line: line, Slug: slug, Backend: backend, Display: aggDisplayName(line, backend)}
 	aggList = append(aggList, m)
 	aggSaveLocked()
+	aggMu.Unlock()
+
 	codexCatalogRefresh()
 	return m, true, "已添加 " + slug
 }
 
 func aggRemove(slug string) (bool, string) {
 	aggMu.Lock()
-	defer aggMu.Unlock()
 	for i, m := range aggList {
 		if m.Slug == slug {
 			aggList = append(aggList[:i], aggList[i+1:]...)
 			aggSaveLocked()
+			aggMu.Unlock()
 			codexCatalogRefresh()
 			return true, "已删除 " + slug
 		}
 	}
+	aggMu.Unlock()
 	return false, "不存在：" + slug
 }
 

@@ -605,6 +605,12 @@ func traeScanLine(st *traeSSEState, line string) *traeSSEEvent {
 	case strings.HasPrefix(line, "event:"):
 		st.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 	case strings.HasPrefix(line, "data:"):
+		// SSE 规范：一个事件的多行 data 之间用 \n 连接（客户端会把它们
+		// 拼成一个以 \n 分隔的整体）。2026-10-21 开源审查修：原来直接
+		// WriteString 无分隔拼接，上游若发多行 JSON 会拼出非法 JSON 被静默丢帧。
+		if st.data.Len() > 0 {
+			st.data.WriteByte('\n')
+		}
 		st.data.WriteString(strings.TrimPrefix(line, "data:"))
 	}
 	return nil
@@ -699,14 +705,26 @@ func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model,
 			}
 		case "token_usage":
 			pendingUsage = ev.Usage
+			// 2026-10-21 开源审查修：token_usage 原先只是暂存，靠「下一个」
+			// chunk 搭出去。Trae 的发送顺序不固定 —— 若 usage 在 done 之后才到，
+			// 后面已经没有 chunk 了，这条 usage 就永远丢掉（用量统计少记）。
+			// 已经发过 finish 时，单独补一个 usage-only chunk。
+			if sawDone {
+				writeChunk(map[string]any{}, "")
+			}
 		case "done":
-			writeChunk(map[string]any{}, ev.FinishReason)
+			writeChunk(map[string]any{}, ev.FinishReason) // writeChunk 会带上暂存的 usage
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			if flusher != nil {
 				flusher.Flush()
 			}
 			sawDone = true
 		case "error":
+			if sawDone {
+				// [DONE] 之后的帧客户端不会再读，写出去只是浪费（还会让
+				// 严格的客户端报「DONE 之后仍有事件」）。
+				continue
+			}
 			msg := fmt.Sprintf("Trae 上游错误 code=%d: %s", ev.ErrCode, ev.ErrMsg)
 			if p.log != nil {
 				p.log.Log("[%s] ✗ 上游错误帧 | %s", rid, truncate(msg, 300))

@@ -8,7 +8,10 @@ package main
 // proxy_mimo.go:14、opencode_proxy.go:55、proxy_agg.go:71 的 aggLinePort，
 // 以及 hub.go:123 的 knownLineNames），改动必须显式改这里。
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 // TestLineSpecsPortsUnchanged 端口与收敛前逐条一致。
 func TestLineSpecsPortsUnchanged(t *testing.T) {
@@ -105,6 +108,45 @@ func TestLineSpecsMetadataSane(t *testing.T) {
 	for _, s := range lineSpecs {
 		if s.Key == "dom" && s.Risk == "" {
 			t.Error("dom 线路必须标记为高风险（上游 2026-10-23 起收紧非官方客户端识别）")
+		}
+	}
+}
+
+// TestConsoleServicesMatchLineSpecs 控制台的 SERVICES 数组必须与 lineSpecs 对齐。
+//
+// 后端线路清单已经收敛到 lines.go，但前端的 SERVICES 仍是 JS 里的一段数组
+// （assets/console.html）。两处一旦漂移就会出现「后端有这条线路、界面上没有」
+// 或显示名对不上。这条测试把两张清单钉在一起：加线路时改完 lines.go，
+// 控制台不改就会红。
+func TestConsoleServicesMatchLineSpecs(t *testing.T) {
+	src := consoleSource(t)
+	re := regexp.MustCompile(`\{\s*key:'([a-z]+)',\s*name:'([^']+)'`)
+	matches := re.FindAllStringSubmatch(src, -1)
+	if len(matches) == 0 {
+		t.Fatal("控制台页面里没找到 SERVICES 数组条目")
+	}
+
+	got := map[string]string{} // key -> 显示名
+	for _, m := range matches {
+		got[m[1]] = m[2]
+	}
+	want := map[string]string{}
+	for _, s := range lineSpecs {
+		want[s.Key] = s.Display
+	}
+
+	for k, v := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("控制台 SERVICE 缺线路 %q（后端 lines.go 有）", k)
+			continue
+		}
+		if got[k] != v {
+			t.Errorf("线路 %s 显示名不一致：控制台 %q / lines.go %q", k, got[k], v)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("控制台多出线路 %q（后端 lines.go 没有）", k)
 		}
 	}
 }

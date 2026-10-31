@@ -43,7 +43,9 @@
   }
   .nav-item:hover { background:#f3f5f9; color:var(--txt); }
   .nav-item.active { background:#eef2ff; color:var(--brand); }
-  .nav-item .ico { width:16px; text-align:center; flex:none; }
+  .nav-item .ico { width:16px; height:16px; display:flex; align-items:center;
+                    justify-content:center; flex:none; opacity:.9; }
+  .nav-item.active .ico { opacity:1; }
   .sidebar .foot { margin-top:auto; font-size:11px; color:var(--faint); padding:8px; line-height:1.7; }
   .main { flex:1; min-width:0; padding:0 22px 34px; }
 
@@ -421,6 +423,132 @@
     .modal { background:#181c23; border-color:#262c36; }
     .tile-cool { color:#e0a94a; background:rgba(224,169,74,.14); }
   }
+
+  /* ===== v3 视觉重做（2026-10-31）：浅色 + 紧凑，重排版与层级 =====
+     做法：不动结构，只在新块里覆盖令牌与关键选择器（CSS 层叠优先级够用），
+     这样 JS 与 DOM 完全不用跟着改，回滚也只是一段删除。 */
+  :root {
+    --bg:#f6f7f9; --card:#ffffff; --line:#e6e8ee; --line2:#eef0f4;
+    --txt:#14171c; --muted:#5f6875; --faint:#98a1af;
+    --radius:10px;
+    --shadow:0 1px 2px rgba(16,24,40,.045), 0 1px 3px rgba(16,24,40,.03);
+    --ok:#0d8a4f; --warn:#b45f06; --err:#c92a1e;
+  }
+  body { font-size:13px; background-image:none; }
+
+  /* 侧栏更窄、导航更紧凑，激活态用左侧色条而不是整块蓝底 */
+  .sidebar { width:176px; padding:12px 8px; gap:2px; }
+  .sidebar .brand { font-size:14.5px; padding:2px 8px 12px; }
+  .sidebar .brand::before { width:20px; height:20px; border-radius:6px; }
+  .nav-item { font-size:12.5px; padding:7px 9px; border-radius:7px; position:relative; }
+  .nav-item.active { background:#eef2ff; color:var(--brand); font-weight:650; }
+  .nav-item.active::before { content:""; position:absolute; left:0; top:7px; bottom:7px;
+                             width:3px; border-radius:0 3px 3px 0; background:var(--brand); }
+  .sidebar .foot { font-size:10.5px; padding:6px 8px; }
+
+  .main { padding:0 18px 26px; }
+  .topbar { height:46px; }
+  .topbar .page-title { font-size:14.5px; }
+  .page { max-width:1140px; }
+
+  /* 卡片与 hero：压缩留白、边框更淡、阴影更轻 */
+  .card { padding:12px 14px; margin-bottom:12px; box-shadow:var(--shadow); }
+  .card-h { margin-bottom:8px; }
+  .card-h .t { font-size:12.5px; }
+  .hero { padding:13px 15px; box-shadow:var(--shadow); }
+  .hero-verdict { font-size:13.5px; }
+  .hero-verdict .mark { font-size:15px; }
+  .hero-gw { margin-top:8px; padding-top:8px; border-top:1px solid var(--line2);
+             font-size:12px; gap:14px; }
+  .hero-gw .mono { font-size:11.5px; }
+
+  /* 需要关注：改成带计数的分组块（详情见 renderOverview） */
+  .attention { background:#fffbf5; border:1px solid #f3e3c8; padding:10px 12px;
+               margin-bottom:12px; box-shadow:var(--shadow); }
+  .attention .att-head { display:flex; align-items:center; gap:8px;
+                         font-size:12.5px; font-weight:700; color:#8a4b00; margin-bottom:6px; }
+  .attention .att-count { background:#f6e3c2; color:#8a4b00; border-radius:999px;
+                          padding:0 7px; font-size:11px; font-weight:700; line-height:17px; }
+  .att-group { border-top:1px solid #f1e4cd; }
+  .att-group > summary { display:flex; align-items:center; gap:8px; cursor:pointer;
+                         list-style:none; padding:5px 0; font-size:12px; font-weight:650;
+                         color:#7a4300; }
+  .att-group > summary::-webkit-details-marker { display:none; }
+  .att-group > summary::before { content:"▸"; font-size:10px; color:#b4884a; }
+  .att-group[open] > summary::before { content:"▾"; }
+  .att-group .g-n { margin-left:auto; font-size:11px; font-weight:700; color:#a2632a;
+                    background:#f8ebd6; border-radius:999px; padding:0 6px; line-height:16px; }
+  .att-row { display:flex; align-items:center; gap:8px; font-size:12px; line-height:1;
+             padding:4px 0 4px 12px; color:var(--txt); cursor:pointer; }
+  .att-row:hover { background:#fff4e2; border-radius:6px; }
+  .att-row .i { flex:none; width:12px; text-align:center; }
+  .att-row .nm { flex:none; max-width:190px; font-family:var(--mono); font-size:11.5px;
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .att-row .why { flex:1; color:var(--muted); overflow:hidden; text-overflow:ellipsis;
+                  white-space:nowrap; font-size:11.5px; }
+  .att-row.risk .i { color:var(--err); }
+  .att-row.limit .i { color:var(--warn); }
+  .att-row.quota .i { color:#8a6d1f; }
+
+  /* 线路列表：34px 行高、列对齐、按钮弱化 */
+  .line-list { box-shadow:var(--shadow); overflow:hidden; }
+  .line-row { padding:0 12px; height:34px; font-size:12.5px; gap:10px; }
+  .line-row .lname { font-size:12.5px; font-weight:600; }
+  .line-row .lname .dot { width:7px; height:7px; }
+  .line-row button.sm { font-size:11.5px; padding:3px 10px; border-radius:7px; }
+  .line-row button.sm:not(.primary) { background:none; border-color:transparent;
+                                      color:var(--muted); }
+  .line-row button.sm:not(.primary):hover { background:#f1f3f7; color:var(--txt); }
+  button.sm { font-size:11.5px; padding:4px 10px; border-radius:7px; }
+  button.primary { box-shadow:0 1px 2px rgba(59,91,253,.25); }
+  /* 线路行的按钮压成浅色（一屏 7 个实心蓝太抢视线）；只有真正的主动作才用实心 */
+  .line-row button.sm.primary { background:#eef2ff; border-color:#dde4ff; color:var(--brand);
+                                box-shadow:none; font-weight:650; }
+  .line-row button.sm.primary:hover { background:#e2e9ff; border-color:#cfd9ff; }
+  /* hero 里的数字给足视觉重量 */
+  .hero-gw .mono { font-size:12.5px; font-weight:650; color:var(--txt); }
+  #hero-today { font-size:13px; font-weight:700; color:var(--brand); }
+  /* 用量榜单里 0 token 的行（全是失败请求）淡化，别和主力模型抢注意力 */
+  .b-row.zero { opacity:.55; }
+  .b-row.zero .v-tok { color:var(--faint); font-weight:600; }
+
+  /* 线路页卡片：更紧凑，标题行与按钮更小 */
+  .tile { box-shadow:var(--shadow); }
+  .tile-head { padding:9px 12px; }
+  .tile-name { font-size:12.5px; }
+  .tile-port { font-size:11px; }
+  .tile-body { padding:9px 12px 10px; }
+  .tile-acct { font-size:11.5px; min-height:15px; }
+  .tile-btns { gap:6px; margin-top:8px; }
+  .tile-risk { font-size:10px; padding:1px 5px; }
+  .cred-sum { font-size:11.5px; }
+
+  /* 签到条与胶囊 */
+  .checkin-bar { padding:9px 12px; box-shadow:var(--shadow); }
+  .chip { font-size:11px; padding:2px 9px; }
+  button { font-size:12.5px; padding:6px 11px; border-radius:8px; }
+
+  /* 用量页：KPI 与榜单更紧凑 */
+  .kpi-row { gap:10px; }
+  .kpi { padding:10px 12px; box-shadow:var(--shadow); }
+  .kpi .k-label { font-size:11px; }
+  .kpi .k-value { font-size:19px; }
+  .kpi .k-sub { font-size:10.5px; }
+  .board2 { gap:12px; }
+  .board { box-shadow:var(--shadow); }
+  .b-row { padding:5px 10px; }
+  .b-name { font-size:12px; }
+  .b-val .v-tok { font-size:12px; }
+  .b-val .v-sub { font-size:10.5px; }
+  .filter-bar { gap:8px; margin-bottom:10px; }
+  .seg button { font-size:11.5px; padding:4px 10px; }
+  .tag { font-size:11px; }
+
+  /* 日志弹层与维护区 */
+  .modal { border-radius:12px; }
+  .modal-head { padding:8px 12px; font-size:12.5px; }
+  .modal pre { font-size:11px; line-height:1.5; padding:10px 12px; }
+  .maint-row { padding:4px 0; font-size:11.5px; }
 </style>
 </head>
 <body>
@@ -428,15 +556,15 @@
   <aside class="sidebar">
     <div class="brand">AIHub</div>
     <button class="nav-item active" data-page="dash" onclick="switchPage('dash')">
-      <span class="ico">◎</span>总览</button>
+      <span class="ico"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></svg></span>总览</button>
     <button class="nav-item" data-page="lines" onclick="switchPage('lines')">
-      <span class="ico">▤</span>线路与凭证</button>
+      <span class="ico"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="5" cy="4" r="1.6" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.6" fill="currentColor" stroke="none"/><circle cx="6.5" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></span>线路与凭证</button>
     <button class="nav-item" data-page="models" onclick="switchPage('models')">
-      <span class="ico">⇄</span>模型</button>
+      <span class="ico"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h8M8.5 2.5 11 5 8.5 7.5"/><path d="M13 11H5M7.5 8.5 5 11l2.5 2.5"/></svg></span>模型</button>
     <button class="nav-item" data-page="usage" onclick="switchPage('usage')">
-      <span class="ico">▥</span>用量</button>
+      <span class="ico"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13V6M8 13V3M13 13V8"/></svg></span>用量</button>
     <button class="nav-item" data-page="settings" onclick="switchPage('settings')">
-      <span class="ico">⚙</span>设置</button>
+      <span class="ico"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4"/></svg></span>设置</button>
     <div class="foot">本地模型网关 · Go</div>
   </aside>
 
@@ -1055,9 +1183,9 @@ function renderOverview() {
   const att = [];
   ['dom','intl'].forEach(function (line) {
     (credStatus[line] || []).forEach(function (c) {
-      if (c.state === '风控') att.push({ name: c.name, why: '风控 · 推理被拦，建议换其它凭证' });
-      else if (c.state === '渠道拦截') att.push({ name: c.name, why: '渠道拦截（11128）· 已本地暂停出站，建议改用其它线路' });
-      else if (!c.ok && c.until) att.push({ name: c.name, why: (c.state || '') + '：' + credWhy(c) });
+      if (c.state === '风控') att.push({ name: c.name, kind: 'risk', why: '推理被拦，建议换其它凭证' });
+      else if (c.state === '渠道拦截') att.push({ name: c.name, kind: 'risk', why: '渠道拦截（11128）· 已本地暂停出站，建议改用其它线路' });
+      else if (!c.ok && c.until) att.push({ name: c.name, kind: 'risk', why: (c.state || '') + '：' + credWhy(c) });
     });
   });
   (credits || {});
@@ -1065,13 +1193,14 @@ function renderOverview() {
   SERVICES.filter(function (x) { return x.quota; }).forEach(function (x) {
     const k = x.key;
     const c = credits && credits[k];
-    if (c && c.ok === false && c.text && c.text !== '查询中…') att.push({ name: k, why: '额度查询失败：' + c.text });
+    if (c && c.ok === false && c.text && c.text !== '查询中…') att.push({ name: k, kind: 'quota', why: '额度查询失败：' + c.text });
   });
   // 限流冷却：台账里一条就是「某账号/某模型正在冷却」，直接进「需要关注」，
   // 并说清剩余时间与命中次数（这是之前界面上完全看不到的信息）。
   limits.forEach(function (l) {
     att.push({
       name: l.name || l.model || '账号',
+      kind: 'limit',
       why: '限流冷却 · ' + (l.remain || '—') +
         (l.model ? ' · ' + l.model : '') +
         (l.reason ? ' · ' + l.reason : '') +
@@ -1081,10 +1210,26 @@ function renderOverview() {
   const box = document.getElementById('attention');
   if (!att.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
   box.style.display = '';
-  box.innerHTML = '<div class="att-title">需要关注</div>' + att.map(function (x) {
-    return '<div class="att-item" onclick="gotoLine(\'' + x.name + '\')"><span>⚠</span>' +
-      '<b>' + x.name + '</b><span class="why">' + x.why + '</span></div>';
-  }).join('');
+  // v3：按类别分组 + 计数，条目压成一行（此前是 9 行等宽纯文本，一扫看不出轻重）
+  const GROUPS = [
+    { kind: 'risk', label: '账号风控', icon: '⛔' },
+    { kind: 'limit', label: '限流冷却', icon: '⏳' },
+    { kind: 'quota', label: '额度异常', icon: '💳' }
+  ];
+  let html = '<div class="att-head">⚠ 需要关注<span class="att-count">' + att.length + '</span></div>';
+  GROUPS.forEach(function (g) {
+    const rows = att.filter(function (x) { return x.kind === g.kind; });
+    if (!rows.length) return;
+    html += '<details class="att-group" open><summary>' + g.label +
+      '<span class="g-n">' + rows.length + '</span></summary>' +
+      rows.map(function (x) {
+        return '<div class="att-row ' + g.kind + '" onclick="gotoLine(\'' + x.name + '\')">' +
+          '<span class="i">' + g.icon + '</span>' +
+          '<span class="nm" title="' + x.name + '">' + x.name + '</span>' +
+          '<span class="why" title="' + x.why + '">' + x.why + '</span></div>';
+      }).join('') + '</details>';
+  });
+  box.innerHTML = html;
 }
 
 function gotoLine(name) {
@@ -1802,7 +1947,7 @@ function renderUsage() {
       const pct = Math.round(t / total * 100);
       const color = colorFn(r);
       const nm = nameFn(r);
-      return '<div class="b-row' + (i < 3 ? ' r' + (i + 1) : '') + '">' +
+      return '<div class="b-row' + (i < 3 ? ' r' + (i + 1) : '') + (t === 0 ? ' zero' : '') + '">' +
         '<div class="b-rank">' + (i + 1) + '</div>' +
         '<div><div class="b-name"><span class="b-dot" style="background:' + color + '"></span>' +
           '<span class="nm" title="' + nm + '">' + nm + '</span></div>' +

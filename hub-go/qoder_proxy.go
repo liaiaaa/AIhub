@@ -161,6 +161,7 @@ func (p *QoderProxy) Start() (bool, string) {
 
 	name, _, _, _ := p.auth.Snapshot()
 	go func() {
+		defer recoverGoroutine("qoder_proxy.go:163")
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			if p.log != nil {
 				p.log.Log("serve error: %v", err)

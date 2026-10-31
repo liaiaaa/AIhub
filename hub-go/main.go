@@ -70,6 +70,7 @@ func main() {
 	// creditsSnapshot(force=true) 清五平台缓存，domCredsStatus(force=true)
 	// 清凭证卡片缓存（含积分到期，见 wbCreditExpiries）。
 	go func() {
+		defer recoverGoroutine("main.go:72")
 		time.Sleep(2 * time.Second)
 		creditsSnapshot(hub, true)
 		domCredsStatus(hub, true)
@@ -121,6 +122,7 @@ func main() {
 
 	srv := &http.Server{Handler: withConsoleGuard(*port)(mux), ReadHeaderTimeout: 20 * time.Second}
 	go func() {
+		defer recoverGoroutine("main.go:123")
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logHub("console serve error: %v", err)
 		}

@@ -256,6 +256,7 @@ func domCredsStatus(h *Hub, force bool) []intlCredStatus {
 	for i, name := range names {
 		wg.Add(1)
 		go func(i int, name string) {
+			defer recoverGoroutine("cred_dom.go:258")
 			defer wg.Done()
 			out[i] = domCredStatusOne(name, dirs[name], name == selected, force)
 		}(i, name)

@@ -63,7 +63,10 @@ func domCheckin() checkinResult {
 	}
 	ch := make(chan one, len(names))
 	for _, n := range names {
-		go func(n string) { ch <- one{n, domCheckinPath(dirs[n] + "/" + domAuthFileName)} }(n)
+		go func(n string) {
+			defer recoverGoroutine("checkin.go:66")
+			ch <- one{n, domCheckinPath(dirs[n] + "/" + domAuthFileName)}
+		}(n)
 	}
 	results := make([]one, 0, len(names))
 	allOK := true
@@ -497,8 +500,14 @@ func traeRewardField(m map[string]any) string {
 func runCheckin(h *Hub) (bool, string) {
 	domCh := make(chan checkinResult, 1)
 	traeCh := make(chan checkinResult, 1)
-	go func() { domCh <- domCheckin() }()
-	go func() { traeCh <- traeCheckin() }()
+	go func() {
+		defer recoverGoroutine("checkin.go:500")
+		domCh <- domCheckin()
+	}()
+	go func() {
+		defer recoverGoroutine("checkin.go:501")
+		traeCh <- traeCheckin()
+	}()
 	dom := <-domCh
 	trae := <-traeCh
 	const qoderDetail = "已停用"
@@ -548,7 +557,10 @@ func runIntlCheckin(h *Hub) (bool, string) {
 	}
 	ch := make(chan one, len(names))
 	for _, n := range names {
-		go func(n string) { ch <- one{n, intlCheckin(n)} }(n)
+		go func(n string) {
+			defer recoverGoroutine("checkin.go:551")
+			ch <- one{n, intlCheckin(n)}
+		}(n)
 	}
 
 	results := make([]one, 0, len(names))

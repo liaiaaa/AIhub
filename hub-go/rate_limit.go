@@ -520,6 +520,7 @@ func intlCredsStatus(h *Hub, force bool) []intlCredStatus {
 	for i, name := range names {
 		wg.Add(1)
 		go func(i int, name string) {
+			defer recoverGoroutine("rate_limit.go:522")
 			defer wg.Done()
 			out[i] = intlCredStatusOne(name, dirs[name], name == selected)
 		}(i, name)

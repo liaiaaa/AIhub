@@ -165,6 +165,7 @@ func (p *Proxy) Start() (bool, string) {
 	p.mu.Unlock()
 
 	go func() {
+		defer recoverGoroutine("proxy.go:167")
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Log("serve error: %v", err)
 		}

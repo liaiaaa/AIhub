@@ -92,6 +92,7 @@ func creditsSnapshot(h *Hub, force bool) map[string]creditInfo {
 		if stale && !e.fetching {
 			e.fetching = true
 			go func(k string, en *creditEntry) {
+				defer recoverGoroutine("credits.go:94")
 				info := fetchCredit(h, k)
 				en.mu.Lock()
 				en.info = info
@@ -141,6 +142,7 @@ func creditsOne(h *Hub, key string, force bool) (creditInfo, bool) {
 	if stale && !e.fetching {
 		e.fetching = true
 		go func(k string, en *creditEntry) {
+			defer recoverGoroutine("credits.go:143")
 			info := fetchCredit(h, k)
 			en.mu.Lock()
 			en.info = info

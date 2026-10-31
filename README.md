@@ -60,7 +60,7 @@ npmmirror **不镜像 Go 二进制**（`mirrors/go/` 那个路径 404）。
 快捷方式由 `scripts/install-desktop-entry.sh` 按仓库当前位置生成，挪目录后重跑一次即可。
 
 `hubRoot` 解析规则不变（`AIHUB_ROOT` > 从 exe 逐级向上找 `state.json`/凭证目录 > 工作目录），
-所以把整个仓库目录拷到 Linux 上，`state.json`、`<凭证目录A>*`、`wbatrest.key` 会原样被找到。
+所以把整个仓库目录拷到 Linux 上，`state.json`、凭证目录（数据根下形如 `*凭证/` 的目录）、`wbatrest.key` 会原样被找到。
 
 各线路在 Linux 上的凭据来源：
 
@@ -68,7 +68,7 @@ npmmirror **不镜像 Go 二进制**（`mirrors/go/` 那个路径 404）。
 |------|------|--------------------|------|
 | Qoder | 8797 | 本机桌面端 `~/.config/com.qodercn.app.stable/auth.v1.dat`；主密钥走 Electron safeStorage：GNOME 密钥环条目 `application="Qoder CN App"` → PBKDF2-SHA1(`saltysalt`,1,16) → **v11** 头 AES-128-CBC。已实测跑通（`hub.log` 里会打「qoder 凭据解密方式：keyring:Qoder CN App+pbkdf2-16+aes-cbc」） | ✅ 零配置 |
 | Zcode | 8796 | 桌面端凭据的信封密钥绑定 `{platform}:{homedir}:{username}`，从 Windows 拷来的文件在 Linux 解不开 → 走手动 Key | ✅ 需一次手工 |
-| 国际 | 8799 | 凭证目录（`<凭证目录A>` / `<凭证目录B>` / `<凭证目录C>`）本来就在数据根，直接可用；出网靠**系统代理**（Linux 读 GNOME dconf，本机实测 `mode=manual` → `127.0.0.1:10808`）。2026-10-09 实测：凭据加载 + 后端余额查询均通过 | ✅ 已通 |
+| 国际 | 8799 | 凭证目录（数据根下每个 `*凭证/` 目录）本来就在数据根，直接可用；出网靠**系统代理**（Linux 读 GNOME dconf，本机实测 `mode=manual` → `127.0.0.1:10808`）。2026-10-09 实测：凭据加载 + 后端余额查询均通过 | ✅ 已通 |
 | 国内 | 8787 | 从 Windows 拷 `workbuddy-desktop.info`（信封解密是纯 Go，`wbatrest.key` 已在数据根）。查找顺序：`WORKBUDDY_AUTH_DIR` → `<数据根>/CodeBuddyExtension/Data/Public/auth/` → 数据根直接放文件 → **数据根下任意子目录里的同名文件**（所以 `国内workbuddy凭证/` 这种自起名字的目录能直接被找到）。2026-10-09 实测：凭据解密 + 后端余额查询（2,677 / 5,200 积分）通过 | ✅ 已通 |
 | Trae | 8795 | 拷 Windows 的 `%APPDATA%\Trae CN\User\globalStorage\storage.json`（`tc` 信封是纯算法、跨平台可解，只要这一个文件）。放 `<数据根>/Trae CN/User/globalStorage/storage.json`，或用 `TRAE_USER_DATA_DIR` 指定。2026-10-09 实测：解出登录态 + 余额查询（1,000 / 1,000 积分）通过 | ✅ 已通 |
 | MiMo | 8798 | 依赖 Windows 桌面端的 Xiaomi Cookie 库 | ❌ 不支持 |
@@ -206,7 +206,7 @@ workbuddy / workbuddyai / zcode 的模型补上，实测档位表现：
   「CodeBuddy凭证」来自 CodeBuddy IDE 的登录态（state.vscdb safeStorage 解密导出，
   主密钥在 GNOME 密钥环 application="CodeBuddy CN"），是独立账号独立积分池；
   服务页下拉单选 + 「换凭证并重启」，签到会对**全部**国内凭证各签一次。
-- 国际线路控制台里单选「<凭证目录A> / <凭证目录B> / <凭证目录C> / <凭证目录D>」，或点「换凭证并重启」；偏好写入 `state.json`。
+- 国际线路控制台里单选「某个凭证目录」，或点「换凭证并重启」；偏好写入 `state.json`。
   （三个目录都由 `credDirs()` 提供并在网页上列出；`state.json` 里的 `intl_cred` 记录上次选择。）
 - Qoder 与 MiMo **零配置**：分别从桌面端登录态自动取用，无需手工放文件。
 - Zcode 同样零配置：自动解密 `%USERPROFILE%\.zcode\v2\credentials.json`（AES-256-GCM
@@ -233,7 +233,7 @@ exe 所在目录的上一级**，而是按以下优先级解析（见 `hub-go/pa
 3. 当前工作目录（兜底，例如 `go run`）
 
 判断某目录「是不是数据根」只看两个**权威标志**：`state.json` 或凭证目录
-（`<凭证目录A>` / `<凭证目录B>` / `<凭证目录C>`）。
+（数据根下任一 `*凭证/` 目录）。
 
 > **刻意不把 `*.log` 当标志。** 日志是 hub 自己写出来的，一旦某个目录被误写了日志，
 > 它下次就会被误判成数据根，错误会自我固化、再也回不到真正的根。

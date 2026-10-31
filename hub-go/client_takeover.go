@@ -30,8 +30,16 @@ const (
 	aggDefaultModel = "intl.deepseek-v4.1-flash"
 )
 
+// userHomeDir 是 homeJoin 的 home 来源，做成变量以便测试注入。
+//
+// 2026-10-27 事故：TestCodexCatalogFileLocation 故意把白名单清空后调用真实
+// 写盘路径，把用户真实的 ~/.codex/aihub-model-catalog.json 写成 {"models": []}，
+// Codex 桌面版启动报 `must contain at least one model` 打不开，而且它只在启动时
+// 读一次、不会自愈。测试里必须改成临时 home，不能再碰真实用户目录。
+var userHomeDir = os.UserHomeDir
+
 func homeJoin(elem ...string) (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}

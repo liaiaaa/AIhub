@@ -15,9 +15,25 @@ import (
 	"testing"
 )
 
+// isolateUserHome 把 homeJoin 的落盘位置指到临时目录。
+//
+// 2026-10-27 事故根因之一：homeJoin 原来恒用 os.UserHomeDir()，测试里设
+// hubRoot = t.TempDir() 对它无效，于是 TestCodexCatalogFileLocation 把用户
+// 真实的 ~/.codex/aihub-model-catalog.json 写成了 {"models": []}，Codex 桌面版
+// 报 "must contain at least one model" 打不开。测试一律先调这个函数。
+func isolateUserHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	old := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = old })
+	return home
+}
+
 // Codex 目录的 display_name 必须与 /v1/models 用同一套生成逻辑（含倍率）。
 func TestCodexCatalogDisplayNameCarriesRatio(t *testing.T) {
 	h := &Hub{}
+	home := isolateUserHome(t)
 	old := hubRoot
 	dir := t.TempDir()
 	hubRoot = dir
@@ -35,6 +51,9 @@ func TestCodexCatalogDisplayNameCarriesRatio(t *testing.T) {
 	path, err := writeCodexCatalogFile(h)
 	if err != nil {
 		t.Fatalf("写 Codex 目录失败：%v", err)
+	}
+	if want := filepath.Join(home, ".codex", codexCatalogPath); path != want {
+		t.Fatalf("落盘路径 = %q，应为 %q", path, want)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -92,28 +111,97 @@ func TestWBCatalogRefreshTriggersCodexCatalog(t *testing.T) {
 	}
 }
 
-// 写出的文件必须落在 ~/.codex 下且原子替换（.tmp + rename）。
+// 写出的文件必须落在 <home>/.codex 下且原子替换（.tmp + rename）。
 func TestCodexCatalogFileLocation(t *testing.T) {
+	home := isolateUserHome(t)
 	old := hubRoot
-	dir := t.TempDir()
-	hubRoot = dir
+	hubRoot = t.TempDir()
 	t.Cleanup(func() { hubRoot = old })
 
 	h := &Hub{}
 	aggMu.Lock()
 	saved := aggList
-	aggList = []aggModel{}
+	aggList = []aggModel{
+		{Line: "intl", Slug: "intl.deepseek-v4.1-flash", Backend: "deepseek-v4.1-flash",
+			Display: "DeepSeek V4.1 Flash（国际）"},
+		{Line: "qoder", Slug: "qoder.DeepSeek-Flash", Backend: "DeepSeek-Flash",
+			Display: "DeepSeek Flash（Qoder）"},
+	}
 	aggMu.Unlock()
 	t.Cleanup(func() { aggMu.Lock(); aggList = saved; aggMu.Unlock() })
 
 	path, err := writeCodexCatalogFile(h)
 	if err != nil {
-		t.Fatalf("空白名单也应能写出目录：%v", err)
+		t.Fatalf("写目录失败：%v", err)
+	}
+	if want := filepath.Join(home, ".codex", codexCatalogPath); path != want {
+		t.Errorf("落盘路径 = %q，应为 %q", path, want)
 	}
 	if filepath.Base(path) != codexCatalogPath {
 		t.Errorf("文件名 = %q，应为 %q", filepath.Base(path), codexCatalogPath)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("文件未落盘：%v", err)
+	}
+	// 原子替换：.tmp 不能留下
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf(".tmp 残留：%v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Models) != 2 {
+		t.Fatalf("应有 2 个模型，实际 %d", len(doc.Models))
+	}
+}
+
+// 白名单 0 个模型时绝不覆盖已有目录文件（2026-10-27 Codex 打不开的事故）。
+func TestCodexCatalogSkipsEmptyWhitelist(t *testing.T) {
+	home := isolateUserHome(t)
+	aggMu.Lock()
+	saved := aggList
+	aggList = []aggModel{}
+	aggMu.Unlock()
+	t.Cleanup(func() { aggMu.Lock(); aggList = saved; aggMu.Unlock() })
+
+	path := filepath.Join(home, ".codex", codexCatalogPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := []byte(`{"models":[{"slug":"keep-me"}]}`)
+	if err := os.WriteFile(path, sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := writeCodexCatalogFile(&Hub{}); err == nil {
+		t.Fatal("白名单为空时应返回错误，而不是静默写空表")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(sentinel) {
+		t.Fatalf("已有目录文件被改写了：%q", got)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("mtime 变了：%v → %v", before.ModTime(), after.ModTime())
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf(".tmp 不应被创建：%v", err)
 	}
 }

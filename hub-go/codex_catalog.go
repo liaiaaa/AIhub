@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 )
@@ -35,9 +36,9 @@ var catalogMu sync.Mutex
 //
 // 2026-10-15 改造：原来只读 ~/.codex/cc-switch-model-catalog.json（cc-switch 时代
 // 产物）。那是外部文件，一旦被清理桌面版目录就生成不了。现在改成三级回退：
-//   1. 仓库内置 hub-go/assets/codex-catalog-template.json（随二进制发布，主路径）
-//   2. 编译期内联 embeddedCatalogTemplate（embed.FS，兜底）
-//   3. ~/.codex/cc-switch-model-catalog.json（cc-switch 遗留，兼容用）
+//  1. 仓库内置 hub-go/assets/codex-catalog-template.json（随二进制发布，主路径）
+//  2. 编译期内联 embeddedCatalogTemplate（embed.FS，兜底）
+//  3. ~/.codex/cc-switch-model-catalog.json（cc-switch 遗留，兼容用）
 func catalogTemplate() []map[string]any {
 	// 1+2：仓库内置（embed.FS，编译期内联）
 	if b, err := assets.ReadFile("assets/codex-catalog-template.json"); err == nil {
@@ -150,20 +151,40 @@ func writeCodexCatalogFile(h *Hub) (string, error) {
 		}
 		entries = append(entries, e)
 	}
-	out, err := json.MarshalIndent(map[string]any{"models": entries}, "", " ")
-	if err != nil {
-		return "", err
-	}
 	path, err := homeJoin(".codex", codexCatalogPath)
 	if err != nil {
 		return "", err
 	}
+	if len(entries) == 0 {
+		// 空表对 Codex 桌面版毫无价值：它要求 model_catalog 至少 1 个 model，
+		// 只在启动时读一次、不会自愈。保留现有文件永远比写成空表好。
+		// 2026-10-27 事故：测试把白名单清空后走到这里，把用户真实文件覆盖成
+		// {"models": []}，Codex 直接打不开（"must contain at least one model"）。
+		logHub("⚠ 桌面版目录跳过：白名单 0 个模型，保留现有文件不覆盖（%s）", path)
+		return "", fmt.Errorf("白名单为空，保留现有目录文件：%s", path)
+	}
+	out, err := json.MarshalIndent(map[string]any{"models": entries}, "", " ")
+	if err != nil {
+		return "", err
+	}
+	// ~/.codex 可能还不存在（全新机器 / 测试用的临时 home）：先建目录，
+	// 否则 WriteFile 会 ENOENT。
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	_, statErr := os.Stat(path)
+	overwriting := statErr == nil
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0644); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
+	}
+	if overwriting {
+		// 成功路径也要留痕：原来只在失败时记日志，12:22 那次把真实文件写空
+		// 在 hub.log 里查不到任何记录，只能靠反推（2026-10-27 诊断浪费）。
+		logHub("桌面版目录已刷新：%d 个模型 → %s", len(entries), path)
 	}
 	return path, nil
 }

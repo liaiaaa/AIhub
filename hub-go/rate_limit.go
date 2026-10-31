@@ -41,6 +41,18 @@ const rateLimitMaxUntil = 2 * time.Hour
 const (
 	rlKindModel   = "model"   // 模型级：同账号换模型可用（6004 常见）
 	rlKindAccount = "account" // 账号级：该账号全模型不可用（11140 风控）
+	// rlKindChannel 渠道校验拦截（11128）。不是限流：它是「上游认为请求不是
+	// 官方客户端发的」这个信号。单次可能是随机误拦，反复命中才开闸门。
+	rlKindChannel = "channel"
+)
+
+// 渠道拦截的判定窗口与闸门：10 分钟内累计 3 次 → 整条账号暂停 30 分钟。
+// 依据：上游 displayMsg 自己写「请重新发送」（单次不该停摆），但 2026-10-23
+// 起上游收紧了非官方客户端识别，反复命中说明请求形状已被盯上。
+const (
+	channelBlockWindow   = 10 * time.Minute
+	channelBlockGateHits = 3
+	channelBlockGate     = 30 * time.Minute
 )
 
 // rateLimitEntry 一次限流记录。
@@ -220,7 +232,7 @@ func rateLimitSnapshot() []rateLimitEntry {
 }
 
 // rateLimitFor 查某个账号（可选指定模型）当前是否被限。
-// 账号级冷却对任意模型都生效；模型级只对指定模型生效。
+// 账号级冷却对任意模型都生效；模型级只对指定模型生效；渠道拦截闸门同理。
 func rateLimitFor(uid, model string) (rateLimitEntry, bool) {
 	now := time.Now()
 	rateLimitState.mu.Lock()
@@ -230,12 +242,77 @@ func rateLimitFor(uid, model string) (rateLimitEntry, bool) {
 	if e, ok := rateLimitState.entries[rlKey(uid, rlKindAccount, "")]; ok && e != nil && now.Before(e.Until) {
 		return *e, true
 	}
+	if e, ok := rateLimitState.entries[rlKey(uid, rlKindChannel, "")]; ok && e != nil && now.Before(e.Until) {
+		return *e, true
+	}
 	if model != "" {
 		if e, ok := rateLimitState.entries[rlKey(uid, rlKindModel, model)]; ok && e != nil && now.Before(e.Until) {
 			return *e, true
 		}
 	}
 	return rateLimitEntry{}, false
+}
+
+// channelBlockHits 渠道拦截的滑动窗口计数（按账号）。
+//
+// 只放内存：它服务的是「最近 10 分钟内命中几次」这个短窗口判断，重启清零
+// 是合理行为；闸门本身一旦开出来会落进 limit 台账（rate_limit.json）。
+var channelBlockHits = struct {
+	mu   sync.Mutex
+	hits map[string][]time.Time
+}{hits: map[string][]time.Time{}}
+
+// rateLimitRecordChannel 记录一次 11128 渠道拦截，必要时开闸门。
+//
+// 返回闸门截止时刻与是否已开闸门。单次命中只计数、不开闸门——上游
+// displayMsg 明确说「请重新发送」，一次误拦就让整条线路停 30 分钟过重；
+// 但窗口内累计到 channelBlockGateHits 次，说明这个账号的请求形状已经被
+// 盯上，继续打只会把账号往 11140 上推，此时整账号暂停 channelBlockGate。
+func rateLimitRecordChannel(uid, name string) (time.Time, bool) {
+	if uid == "" {
+		return time.Time{}, false
+	}
+	now := time.Now()
+
+	channelBlockHits.mu.Lock()
+	kept := make([]time.Time, 0, len(channelBlockHits.hits[uid])+1)
+	for _, t := range channelBlockHits.hits[uid] {
+		if now.Sub(t) <= channelBlockWindow {
+			kept = append(kept, t)
+		}
+	}
+	kept = append(kept, now)
+	channelBlockHits.hits[uid] = kept
+	n := len(kept)
+	channelBlockHits.mu.Unlock()
+
+	if n < channelBlockGateHits {
+		return time.Time{}, false
+	}
+
+	until := now.Add(channelBlockGate)
+	rateLimitState.mu.Lock()
+	defer rateLimitState.mu.Unlock()
+	loadRateLimitLocked()
+	rateLimitState.entries[rlKey(uid, rlKindChannel, "")] = &rateLimitEntry{
+		UID:    uid,
+		Name:   name,
+		Kind:   rlKindChannel,
+		Code:   channelBlockCode,
+		Reason: fmt.Sprintf("渠道校验拦截(11128)×%d，已暂停出站", n),
+		Until:  until,
+		SeenAt: now,
+		Hits:   n,
+	}
+	saveRateLimitLocked()
+	return until, true
+}
+
+// channelBlockHitsReset 清空窗口计数（测试隔离用；生产不调用）。
+func channelBlockHitsReset() {
+	channelBlockHits.mu.Lock()
+	channelBlockHits.hits = map[string][]time.Time{}
+	channelBlockHits.mu.Unlock()
 }
 
 // rateLimitClearUID 清掉某账号的全部限流记录（如换凭证后确认可用）。
@@ -490,14 +567,19 @@ func intlCredStatusOne(name, dir string, selected bool) intlCredStatus {
 		st.OK = false
 		st.Reason = e.Reason
 		st.UpstreamReset = e.HasUpstreamReset()
-		if e.Kind == rlKindAccount {
+		switch e.Kind {
+		case rlKindAccount:
 			st.State = "风控"
 			// 风控（11140）上游从不给恢复时刻：只报"被拦"，不编时间。
 			if st.UpstreamReset {
 				st.Until = rateLimitShortUntil(e.Until)
 				st.RemainTx = rateLimitRemain(e.Until)
 			}
-		} else {
+		case rlKindChannel:
+			st.State = "渠道拦截"
+			st.Until = rateLimitShortUntil(e.Until)
+			st.RemainTx = rateLimitRemain(e.Until)
+		default:
 			st.State = "限流"
 			st.Until = rateLimitShortUntil(e.Until)
 			st.RemainTx = rateLimitRemain(e.Until)
@@ -665,7 +747,7 @@ func intlCreditsRaw(cm *CredentialManager, p *Proxy) (remain, total float64, ok 
 	if err != nil {
 		return 0, 0, false
 	}
-	headers["User-Agent"] = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
+	headers["User-Agent"] = officialIntlUA()
 	headers["X-Product"] = "SaaS"
 	headers["X-IDE-Type"] = "WorkBuddy"
 	body, status, err := httpPostJSON(p.Backend+"/billing/meter/get-user-resource-summary", headers, []byte("{}"))

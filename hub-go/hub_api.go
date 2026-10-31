@@ -111,14 +111,78 @@ func (h *Hub) apiNick(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.enrichStatus())
 }
 
-func (h *Hub) apiDomStart(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.startDom()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+// lineToggle 一条线路的启停实现（A2：把 12 个一模一样的 handler 收敛成一张表）。
+//
+// 此前每条线路都写了两个 handler（apiDomStart/apiDomStop、apiQoderStart/…），
+// 每个 4 行里有 3 行是同一句 writeJSON。加一条线路要改 4 处：路由 2 行 + handler 2 个。
+// 现在只需要在 lines.go 加一行元数据、在这张表加一行启停实现。
+//
+// 两个特例不在表里：
+//   - zcode 的 start 需要 apiKey（见 apiZcodeStart）；
+//   - intl 的 start 需要当前选中的国际凭证，用闭包适配，读法与原 handler 完全一致。
+type lineToggle struct {
+	Start func(h *Hub) (bool, string)
+	Stop  func(h *Hub) (bool, string)
 }
 
-func (h *Hub) apiDomStop(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.stopDom()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+var lineToggles = map[string]lineToggle{
+	"dom": {
+		Start: func(h *Hub) (bool, string) { return h.startDom() },
+		Stop:  func(h *Hub) (bool, string) { return h.stopDom() },
+	},
+	"intl": {
+		Start: func(h *Hub) (bool, string) {
+			h.mu.Lock()
+			cred := h.intlCred
+			h.mu.Unlock()
+			return h.startIntl(cred)
+		},
+		Stop: func(h *Hub) (bool, string) { return h.stopIntl() },
+	},
+	"mimo": {
+		Start: func(h *Hub) (bool, string) { return h.startMimo() },
+		Stop:  func(h *Hub) (bool, string) { return h.stopMimo() },
+	},
+	"qoder": {
+		Start: func(h *Hub) (bool, string) { return h.startQoder() },
+		Stop:  func(h *Hub) (bool, string) { return h.stopQoder() },
+	},
+	"trae": {
+		Start: func(h *Hub) (bool, string) { return h.startTrae() },
+		Stop:  func(h *Hub) (bool, string) { return h.stopTrae() },
+	},
+	// OpenCode 免费档线路（2026-10-15）：不需要本机凭据，起即可用
+	// （上游公开匿名 "public" 凭据，只放免费模型）。
+	"oc": {
+		Start: func(h *Hub) (bool, string) { return h.startOpencode() },
+		Stop:  func(h *Hub) (bool, string) { return h.stopOpencode() },
+	},
+}
+
+// apiLineStart 返回某条线路的启动 handler。响应体与收敛前的专用 handler 完全一致。
+func (h *Hub) apiLineStart(key string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		t, ok := lineToggles[key]
+		if !ok {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "未知线路：" + key})
+			return
+		}
+		started, msg := t.Start(h)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": started, "msg": msg})
+	}
+}
+
+// apiLineStop 返回某条线路的停止 handler。
+func (h *Hub) apiLineStop(key string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		t, ok := lineToggles[key]
+		if !ok {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "未知线路：" + key})
+			return
+		}
+		stopped, msg := t.Stop(h)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": stopped, "msg": msg})
+	}
 }
 
 // apiDomCred 记住国内凭证偏好（不重启）。
@@ -156,61 +220,7 @@ func (h *Hub) apiModelsProbe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lines": probeAllModels(h)})
 }
 
-func (h *Hub) apiIntlStart(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	cred := h.intlCred
-	h.mu.Unlock()
-	ok, msg := h.startIntl(cred)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiIntlStop(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.stopIntl()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiMimoStart(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.startMimo()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiMimoStop(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.stopMimo()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiQoderStart(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.startQoder()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiQoderStop(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.stopQoder()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiTraeStart(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.startTrae()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiTraeStop(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.stopTrae()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-// apiOpencodeStart / apiOpencodeStop：OpenCode 免费档线路（2026-10-15）。
-// 不需要本机凭据，起即可用（上游公开匿名 "public" 凭据，只放免费模型）。
-func (h *Hub) apiOpencodeStart(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.startOpencode()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
-func (h *Hub) apiOpencodeStop(w http.ResponseWriter, r *http.Request) {
-	ok, msg := h.stopOpencode()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
-}
-
+// apiZcodeStart 需要 apiKey，因此不走 lineToggles 表。
 func (h *Hub) apiZcodeStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		APIKey string `json:"apiKey"`

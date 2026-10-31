@@ -8,6 +8,7 @@ import (
 )
 
 func TestZZGyDetail(t *testing.T) {
+	requireLive(t)
 	dir := domCredDirs()["国内workbuddy凭证"]
 	p := NewDomProxyDir(dir)
 	cm := NewCredentialManager(p.AuthFilePath(), p.Backend, p.DefaultDomain, p.UserAgent)

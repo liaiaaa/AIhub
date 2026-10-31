@@ -44,6 +44,7 @@ func zzNewErrFrameProxy(t *testing.T, errFrame string) *QoderProxy {
 // TestUpstreamErrorFrameSurfacesToClient 是本 bug 的核心回归测试：
 // 上游错误帧必须让客户端看到错误，而不是静默空流。
 func TestUpstreamErrorFrameSurfacesToClient(t *testing.T) {
+	requireLive(t)
 	// 真实网关错误帧形态（节选自实测日志）
 	errFrame := "data: {\"code\":\"400\",\"message\":\"[FAIL]node:oa_qwen-plus-main msg:Execution failed: java.util.LinkedHashMap cannot be cast to java.util.List\"}\n\n"
 
@@ -74,6 +75,7 @@ func TestUpstreamErrorFrameSurfacesToClient(t *testing.T) {
 
 // TestNormalStreamNotAffectedByErrorHandling 确保正常流不被错误识别逻辑误伤。
 func TestNormalStreamNotAffectedByErrorHandling(t *testing.T) {
+	requireLive(t)
 	upstream := "data: {\"headers\":{},\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"Hi\\\"}}]}\"}\n\n" +
 		"data: {\"headers\":{},\"body\":\"[DONE]\"}\n\n"
 
@@ -98,6 +100,7 @@ func TestNormalStreamNotAffectedByErrorHandling(t *testing.T) {
 
 // TestUpstreamErrorFrameDetector 单测错误帧识别函数本身。
 func TestUpstreamErrorFrameDetector(t *testing.T) {
+	requireLive(t)
 	cases := []struct {
 		name   string
 		in     string

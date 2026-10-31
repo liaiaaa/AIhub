@@ -74,13 +74,10 @@ func TestRealUsageDataCachedNeverExceedsInput(t *testing.T) {
 }
 
 // 前端命中率算法必须写成 cached/in，不能是 cached/(in+cached)。
-// 用源码文本断言：这段逻辑在 webui.go 的模板字符串里，跑不了单测。
+// 用页面文本断言：这段逻辑在控制台页面里（assets/console.html，go:embed 进 webHTML），
+// 跑不了单测，只能对文本断言。
 func TestCacheHitFormulaUsesCachedOverInput(t *testing.T) {
-	b, err := os.ReadFile("webui.go")
-	if err != nil {
-		t.Skipf("读不到 webui.go：%v", err)
-	}
-	s := string(b)
+	s := consoleSource(t)
 	if strings.Contains(s, "s.cached / (s.in + s.cached)") {
 		t.Fatal("命中率仍用 cached/(in+cached)：cached 是 in 的子集，" +
 			"分母重复相加会让命中率被腰斩（实测 95.8% 显示成 48.9%）")
@@ -146,11 +143,7 @@ func TestRealUsageTotalEqualsInPlusOut(t *testing.T) {
 
 // 前端总 tokens 公式必须是 in+out，不能加 reason。
 func TestTotalTokensFormulaExcludesReason(t *testing.T) {
-	b, err := os.ReadFile("webui.go")
-	if err != nil {
-		t.Skipf("读不到 webui.go：%v", err)
-	}
-	s := string(b)
+	s := consoleSource(t)
 	if strings.Contains(s, "const total = s.in + s.out + s.reason;") {
 		t.Fatal("总 tokens 仍把 reason 加了两遍（reason 是 out 的子集）")
 	}

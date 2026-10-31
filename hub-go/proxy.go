@@ -96,6 +96,11 @@ type Proxy struct {
 	// 只在 dom 置位：国际版此前已靠 ConversationHeaders 解决，不动它。
 	OfficialChatClient bool
 
+	// SanitizeHarness：转发前把 system/developer 里「自报家门」的身份句
+	// （You are … powered by …）替换成中性表述，见 sanitizeHarnessPrompt。
+	// 上游对「身份句 + 品牌」做连续子串匹配，命中即 11128；两条线路都置位。
+	SanitizeHarness bool
+
 	// ThinkingDefault：客户端没指定思考档位时补的默认档（见 default_thinking.go）。
 	// 空串 = 不注入，完全透传。
 	ThinkingDefault string
@@ -396,9 +401,9 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	body["model"] = p.mapModel(fmt.Sprintf("%v", raw["model"]))
 	body["messages"] = p.normalizeMessages(msgs)
-	// 2026-10-21：dom 开了官方客户端伪装时，system 里的第三方客户端签名会被
-	// 上游渠道校验识别（11128），转发前替换掉。见 sanitizeHarnessPrompt。
-	if p.OfficialChatClient {
+	// 上游渠道校验会识别 system 里的第三方客户端签名句（11128），转发前替换掉。
+	// 见 sanitizeHarnessPrompt。dom/intl 都开。
+	if p.SanitizeHarness {
 		body["messages"] = sanitizeHarnessMessages(body["messages"].([]any))
 	}
 	body["stream"] = true
@@ -412,6 +417,11 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	modelName := fmt.Sprintf("%v", body["model"])
 	logger.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d%s", rid, modelName, clientStream, len(msgs),
 		lastUserSuffix(msgs))
+	// 冷却闸门：账号被 11140 / 11128 风控、或该模型被 6004 限流时，本地直接
+	// 回 429，不再把请求打到上游（见 risk_gate.go）。
+	if p.gateCooling(w, auth, modelName, rid, logger) {
+		return
+	}
 
 	headers, err := auth.Headers()
 	if err != nil {
@@ -532,7 +542,36 @@ func (p *Proxy) withConversationHeaders(h map[string]string) map[string]string {
 const (
 	officialWBVersion  = "5.8.3"
 	officialCLIVersion = "2.161.0"
+	// officialIntlWBVersion 国际版桌面端版本。国内与国际的桌面端版本号不同
+	// （2026-10-18 实跑：国内 5.8.3、国际 5.8.4）。混用等于在出站身份上自报
+	// 「我不是官方客户端」——2026-10-25 已把两条线路的所有出站 UA 收敛到这两个值。
+	officialIntlWBVersion = "5.8.4"
 )
+
+// officialDomUA 官方国内桌面端（含内置 CLI）的完整 UA。
+//
+// 供不经 officialChatHeaders 的请求使用：签到、探活、模型列表探测等。
+// 历史坑：这些路径曾各自写死 codebuddy2openai/2.0、WorkBuddy/5.5.4 等旧串，
+// 与对话路径的官方身份不一致——同一账号在不同接口上自报不同版本，是最容易
+// 被上游识别成「非官方客户端」的特征。见 docs/2026-10-25-封号风险与出站身份对齐.md。
+func officialDomUA() string {
+	return "WorkBuddy/" + officialWBVersion + " WorkBuddy/" + officialWBVersion + " CLI/" + officialCLIVersion
+}
+
+// officialIntlUA 官方国际桌面端 UA。billing 域要求平台段含 "WorkBuddy AI"，
+// 所以是三段式；对话与查询路径统一用这一个形状。
+func officialIntlUA() string {
+	return "WorkBuddy/" + officialIntlWBVersion + " WorkBuddy AI/" + officialIntlWBVersion + " CLI/" + officialCLIVersion
+}
+
+// officialDomBillingUA billing 域只认单段 WorkBuddy/<版本> 形态，送多段回 10085。
+func officialDomBillingUA() string { return "WorkBuddy/" + officialWBVersion }
+
+// officialCLICodeBuddyUA copilot.tencent.com/v3/config 要求的「桌面端 CLI 身份」形状：
+// 上游按它决定是否下发带 credits 的目录（2026-10-19 实测，见 wb_config.go）。
+func officialCLICodeBuddyUA() string {
+	return "CLI/" + officialCLIVersion + " CodeBuddy/" + officialCLIVersion
+}
 
 // officialChatHeaders 把对话请求整体伪装成官方桌面端内置 CLI 发出的。
 //
@@ -570,7 +609,7 @@ func officialChatHeaders(h map[string]string) map[string]string {
 	for k, v := range h {
 		out[k] = v
 	}
-	out["User-Agent"] = "WorkBuddy/" + officialWBVersion + " WorkBuddy/" + officialWBVersion + " CLI/" + officialCLIVersion
+	out["User-Agent"] = officialDomUA()
 	out["Accept"] = "application/json, text/plain, */*"
 	out["Content-Type"] = "application/json"
 	out["Accept-Encoding"] = "gzip, compress, deflate, br"

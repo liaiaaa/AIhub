@@ -9,15 +9,45 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // ---------- 代理服务 ----------
+
+const (
+	// qoderMaxConcurrentDefault 上游并发上限的默认值 —— 0 = 不限制。
+	//
+	// 2026-10-28 用户要求撤掉本地并发限制：「别设置本地并发限制了，太妨碍我的使用了」。
+	// 此前是 2，dsh 多开会话时第 3 个直接吃本地 429，用起来像断线。
+	// 现在默认完全放行，想重新设上限用 QODER_MAX_CONCURRENT=N 或数据根
+	// qoder_max_concurrent.txt（每请求现读，改完不用重启）。
+	qoderMaxConcurrentDefault = 0
+
+	// qoderMaxConcurrentEnvFile / qoderMaxConcurrentEnv 上限的配置来源。
+	qoderMaxConcurrentFile = "qoder_max_concurrent.txt"
+	qoderMaxConcurrentEnv  = "QODER_MAX_CONCURRENT"
+
+	// qoderMaxConcurrentCeil 上限的硬封顶，防止手滑写成 10000 把上游打爆。
+	qoderMaxConcurrentCeil = 64
+
+	// qoderMinGapDefault 相邻上游请求最小间隔（拟人化，默认 800ms）+ 0~400ms 抖动。
+	// 官方客户端是人工点触发的，不会有毫秒级连续请求；固定间隔本身也是特征。
+	// 0 = 不等待。QODER_MIN_GAP_MS=N 或数据根 qoder_min_gap.txt 可改。
+	qoderMinGapDefault = 800
+	qoderMinGapJitter  = 400
+
+	qoderMinGapFile = "qoder_min_gap.txt"
+	qoderMinGapEnv  = "QODER_MIN_GAP_MS"
+	// qoderMinGapCeil 间隔的硬封顶，防止写错把请求卡死。
+	qoderMinGapCeil = 10000
+)
 
 type QoderProxy struct {
 	Port     int
@@ -32,6 +62,18 @@ type QoderProxy struct {
 	catalog   []qoderModelEntry
 	aliases   map[string]string
 
+	// 上游并发闸门 + 拟人间隔。
+	// inflight 是当前在途请求数（qoderMaxConcurrentDefault=0 时只作统计，
+	// 不做拦截）；用计数而不是 chan 是为了让上限可以每请求现读、随时改。
+	inflightMu sync.Mutex
+	inflight   int
+	lastReqMu  sync.Mutex
+	lastReq   time.Time
+
+	// 会话租约：同一段对话在 TTL 内复用 session_id/request_set_id/business.id
+	sessionMu    sync.Mutex
+	sessionCache map[string]*qoderSessionLease
+
 	mu     sync.Mutex
 	ln     net.Listener
 	server *http.Server
@@ -40,10 +82,11 @@ type QoderProxy struct {
 func NewQoderProxy() *QoderProxy {
 	catalog := defaultQoderCatalog() // 内置快照已含 context_config（见 defaultQoderCatalog）
 	return &QoderProxy{
-		Port:     QoderPort,
-		inferURL: QoderInferURL,
-		catalog:  catalog,
-		aliases:  buildQoderAliases(catalog),
+		Port:         QoderPort,
+		inferURL:     QoderInferURL,
+		catalog:      catalog,
+		aliases:      buildQoderAliases(catalog),
+		sessionCache: make(map[string]*qoderSessionLease),
 	}
 }
 
@@ -101,6 +144,8 @@ func (p *QoderProxy) Start() (bool, string) {
 	}
 	p.log = NewFileLogger(dataPath("converter-qoder.log"))
 	// gateway.qoder.com.cn 国内（阿里云）可达：直连，不读系统/环境代理。
+	// 推理请求在 Sign 里显式带 Accept-Encoding: identity，Go 不会自动加
+	// gzip/解压；万一上游仍回 gzip，由 qoderMaybeDecompress 兜底。
 	p.client = directClient()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
@@ -327,6 +372,152 @@ func firstSystemSnippet(msgs []any) (string, bool) {
 	return "", false
 }
 
+// qoderClientSessionKey 客户端显式会话标识：header 优先，其次 body。
+func qoderClientSessionKey(r *http.Request, raw map[string]any) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Session-Id")); v != "" {
+		return v
+	}
+	if v, ok := raw["conversation_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// sessionLease 取/建会话租约；访问时顺带清理过期项（不起 goroutine）。
+func (p *QoderProxy) sessionLease(key, uid string) *qoderSessionLease {
+	now := time.Now()
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if p.sessionCache == nil {
+		p.sessionCache = make(map[string]*qoderSessionLease)
+	}
+	for k, l := range p.sessionCache {
+		if now.Sub(l.lastSeen) > qoderSessionLeaseTTL {
+			delete(p.sessionCache, k)
+		}
+	}
+	if l, ok := p.sessionCache[key]; ok {
+		l.lastSeen = now
+		cp := *l
+		return &cp
+	}
+	l := &qoderSessionLease{
+		SessionID:    qoderSessionID(uid),
+		RequestSetID: "qoder-request-" + qoderUUID(),
+		BusinessID:   qoderUUID(),
+		lastSeen:     now,
+	}
+	p.sessionCache[key] = l
+	cp := *l
+	return &cp
+}
+
+// qoderMaxConcurrent 当前生效的上游并发上限；0 = 不限制（默认）。
+//
+// 每请求现读，改 QODER_MAX_CONCURRENT 或数据根 qoder_max_concurrent.txt
+// 之后不用重启。非法值/负数一律回落默认（0），超封顶按封顶算。
+func qoderMaxConcurrent() int {
+	if n, ok := qoderIntSetting(qoderMaxConcurrentEnv, qoderMaxConcurrentFile); ok {
+		if n < 0 {
+			return qoderMaxConcurrentDefault
+		}
+		if n > qoderMaxConcurrentCeil {
+			return qoderMaxConcurrentCeil
+		}
+		return n
+	}
+	return qoderMaxConcurrentDefault
+}
+
+// qoderMinGap 当前生效的相邻请求最小间隔；0 = 不等待。
+// 同样每请求现读，QODER_MIN_GAP_MS / qoder_min_gap.txt 可改。
+func qoderMinGap() time.Duration {
+	n := qoderMinGapDefault
+	if v, ok := qoderIntSetting(qoderMinGapEnv, qoderMinGapFile); ok {
+		n = v
+	}
+	if n < 0 {
+		n = qoderMinGapDefault
+	}
+	if n > qoderMinGapCeil {
+		n = qoderMinGapCeil
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+// acquireUpstreamSlot 抢并发槽。上限 <= 0 时完全放行（默认）；池满返回 false
+// （调用方回本地 429）。release 幂等，重复调用不会把计数减穿。
+func (p *QoderProxy) acquireUpstreamSlot() (release func(), ok bool) {
+	limit := qoderMaxConcurrent()
+	p.inflightMu.Lock()
+	if limit > 0 && p.inflight >= limit {
+		p.inflightMu.Unlock()
+		return nil, false
+	}
+	p.inflight++
+	p.inflightMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.inflightMu.Lock()
+			if p.inflight > 0 {
+				p.inflight--
+			}
+			p.inflightMu.Unlock()
+		})
+	}, true
+}
+
+// inflightCount 在途请求数（日志/测试用）。
+func (p *QoderProxy) inflightCount() int {
+	p.inflightMu.Lock()
+	defer p.inflightMu.Unlock()
+	return p.inflight
+}
+
+// waitHumanGap 相邻上游请求的最小间隔。持有 lastReqMu 等待，保证并发请求
+// 也按间隔排队；ctx 取消（客户端断开）时立即放弃。
+// 间隔配成 0（QODER_MIN_GAP_MS=0）时直接放行，不抢锁、不等待。
+func (p *QoderProxy) waitHumanGap(ctx context.Context) bool {
+	gap := qoderMinGap()
+	if gap <= 0 {
+		return true
+	}
+	p.lastReqMu.Lock()
+	defer p.lastReqMu.Unlock()
+	gap += time.Duration(rand.Int63n(int64(qoderMinGapJitter))) * time.Millisecond
+	if wait := time.Until(p.lastReq.Add(gap)); wait > 0 {
+		if !sleepCtx(ctx, wait) {
+			return false
+		}
+	}
+	p.lastReq = time.Now()
+	return true
+}
+
+// qoderIntSetting 读整数型配置：环境变量优先，其次数据根文件，都没有返回 ok=false。
+func qoderIntSetting(env, file string) (int, bool) {
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n, true
+		}
+	}
+	b, err := os.ReadFile(dataPath(file))
+	if err != nil {
+		return 0, false
+	}
+	v := strings.TrimSpace(string(b))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
 func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -375,6 +566,11 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 思考链路整体失效，2026-09-25 根因定论，见 qoder_envelope.go）。
 	modelKey := p.resolveModel(requestedModel)
 	normMsgs := qoderNormalizeMessages(msgs)
+	// 上游按「自报家门的身份句 / 框架标签」拦请求（dom 线路 11128 同款根因），
+	// qoder 线路此前完全没接清洗。QODER_SANITIZE=0 可关（排查用）。
+	if qoderSanitizeEnabled() {
+		normMsgs = sanitizeHarnessMessages(normMsgs)
+	}
 	markedNoThink := qoderNoThinkMarked(normMsgs)
 	if markedNoThink {
 		qoderStripNoThinkMarker(normMsgs)
@@ -386,7 +582,8 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		spec = qoderResolveThinking(raw, normMsgs, entry)
 	}
 	uid, _, _, _ := p.auth.Snapshot()
-	env := qoderEnvelope(normMsgs, raw["tools"], modelKey, uid, spec, entry, raw)
+	lease := p.sessionLease(qoderLeaseKey(qoderClientSessionKey(r, raw), normMsgs), uid)
+	env := qoderEnvelope(normMsgs, raw["tools"], modelKey, uid, spec, entry, raw, lease)
 	// 可见思考提示兜底：默认关闭，QODER_THINK_PROMPT=on 显式开启
 	if qoderThinkPromptEnabled() && spec.Effort != "none" {
 		qoderInjectPrompt(env, qoderThinkingPrompt)
@@ -430,20 +627,43 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 			p.log.Log("[%s] ▶ DIAG client | tools=%d(%v) tool_choice=%v stream=%v topEffort=%v thinking=%v enable_thinking=%v | payload=%dKB msgs=%d",
 				rid, nTools, strings.Join(names, ","), raw["tool_choice"], raw["stream"],
 				raw["reasoning_effort"], raw["thinking"], raw["enable_thinking"], len(payload)/1024, len(msgs))
-			if sysMsg, ok := firstSystemSnippet(msgs); ok {
-				p.log.Log("[%s] ▶ DIAG system提示词(前300字) | %s", rid, truncate(sysMsg, 300))
+			if sysMsg, ok := firstSystemSnippet(normMsgs); ok {
+				// 只留长度：明文 system 不再落盘（converter-qoder.log 曾积 95 条明文提示词）
 				p.log.Log("[%s] ▶ DIAG system提示词长度=%d字", rid, len(sysMsg))
+				qid := currentQoderIdentity()
+				p.log.Log("[%s] ▶ DIAG outbound | ide=%s clientType=%s session_type=%s product=%s | system=%d字 harness=%d acp=%d | session=%s",
+					rid, qid.Version, qid.ClientType, qid.SessionType, qid.Product,
+					len(sysMsg), strings.Count(sysMsg, "DeepSeek Harness"), strings.Count(sysMsg, "<acp"), lease.SessionID)
 			}
 			// 完整客户端请求 dump（原始 OpenAI 形态，可直接重放）
 			if fb, err := json.MarshalIndent(raw, "", " "); err == nil {
 				dumpPath := dataPath("qoder-dump-" + rid + ".json")
-				os.WriteFile(dumpPath, fb, 0644)
+				os.WriteFile(dumpPath, fb, 0600)
 				p.log.Log("[%s] ▶ DIAG 已 dump 完整请求: %s (%d 字节)", rid, dumpPath, len(fb))
 				qoderPruneDumps(p.log) // DIAG dump 也会积（1MB/份），同样只留最近几份
 			}
 		}
 	}
 	t0 := time.Now()
+
+	release, ok := p.acquireUpstreamSlot()
+	if !ok {
+		limit := qoderMaxConcurrent()
+		if p.log != nil {
+			p.log.Log("[%s] ⚠ 本地并发上限 %d，拒绝请求（在途 %d）", rid, limit, p.inflightCount())
+		}
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": map[string]any{
+				"message": fmt.Sprintf("本地并发上限 %d，请稍后重试", limit),
+				"type":    "rate_limit_error",
+			},
+		})
+		return
+	}
+	defer release()
+	if !p.waitHumanGap(r.Context()) {
+		return // 客户端已断开
+	}
 
 	if clientStream {
 		if degrade {

@@ -134,6 +134,22 @@ func aggSnapshot() []aggModel {
 	return out
 }
 
+// aggRiskTag 高风险线路在模型显示名前的标记。
+//
+// 2026-10-23 上游收紧对非官方客户端的识别后，dom 是风险最高的线路：反代到
+// dsh 这类 agent 框架时请求体大、工具多、system 里有身份句，正是上游抓的形状。
+// 这里只加显示标记，不改模型 id 与路由——要不要用仍由用户决定。
+const aggRiskTag = "⚠高风险 "
+
+// aggRiskTagged 给高风险线路的显示名加前缀；已经带前缀则不重复加（幂等），
+// 因为 Display 可能来自旧的 agg_models.json 快照、也可能刚由 aggDisplayName 生成。
+func aggRiskTagged(line, name string) string {
+	if line != "dom" || name == "" || strings.HasPrefix(name, aggRiskTag) {
+		return name
+	}
+	return aggRiskTag + name
+}
+
 // aggDisplayName 生成白名单条目的显示名：`<友好名>（<线路中文名>）`。
 //
 // 2026-10-15 新增：原来直接用 backend（如 kimi-k3（国际）），选择器里是一串
@@ -144,7 +160,7 @@ func aggDisplayName(line, backend string) string {
 	if n, ok := aggPrettyNames[backend]; ok {
 		name = n
 	}
-	return name + "（" + aggLineCN[line] + "）"
+	return aggRiskTagged(line, name+"（"+aggLineCN[line]+"）")
 }
 
 // aggPrettyNames 模型 id → 友好显示名（不含线路后缀）。
@@ -152,38 +168,38 @@ func aggDisplayName(line, backend string) string {
 var aggPrettyNames = map[string]string{
 	// 国内 / 国际 WorkBuddy 共有
 	"deepseek-v4.1-flash": "DeepSeek 4.1 Flash",
-	"deepseek-v4-flash":  "DeepSeek V4 Flash",
-	"deepseek-v4-pro":    "DeepSeek V4 Pro",
-	"glm-5.3-flash":      "GLM 5.3 Flash",
-	"glm-5.3":            "GLM 5.3",
-	"glm-5.2":            "GLM 5.2",
-	"glm-5.1":            "GLM 5.1",
-	"glm-5v-turbo":       "GLM 5V Turbo",
-	"hy4-preview":        "HY4 Preview",
-	"hy3-preview":        "HY3 Preview",
-	"hy3-preview-agent":  "HY3 Preview Agent",
-	"kimi-k3":            "Kimi K3",
-	"kimi-k2.8-preview":  "Kimi K2.8 Preview",
-	"kimi-k2.6":          "Kimi K2.6",
-	"kimi-k2.7":          "Kimi K2.7",
-	"minimax-m3":         "MiniMax M3",
-	"minimax-m3-pay":     "MiniMax M3",
-	"space-bunny":        "Space Bunny",
-	"space-bunny-max":    "Space Bunny Max",
-	"step-5-preview":     "Step 5 Preview",
+	"deepseek-v4-flash":   "DeepSeek V4 Flash",
+	"deepseek-v4-pro":     "DeepSeek V4 Pro",
+	"glm-5.3-flash":       "GLM 5.3 Flash",
+	"glm-5.3":             "GLM 5.3",
+	"glm-5.2":             "GLM 5.2",
+	"glm-5.1":             "GLM 5.1",
+	"glm-5v-turbo":        "GLM 5V Turbo",
+	"hy4-preview":         "HY4 Preview",
+	"hy3-preview":         "HY3 Preview",
+	"hy3-preview-agent":   "HY3 Preview Agent",
+	"kimi-k3":             "Kimi K3",
+	"kimi-k2.8-preview":   "Kimi K2.8 Preview",
+	"kimi-k2.6":           "Kimi K2.6",
+	"kimi-k2.7":           "Kimi K2.7",
+	"minimax-m3":          "MiniMax M3",
+	"minimax-m3-pay":      "MiniMax M3",
+	"space-bunny":         "Space Bunny",
+	"space-bunny-max":     "Space Bunny Max",
+	"step-5-preview":      "Step 5 Preview",
 	// 国际线额外模型
-	"grok-4.7":          "Grok 4.7",
-	"gemini-3.8-flash":  "Gemini 3.8 Flash",
-	"gemini-3.5-flash":  "Gemini 3.5 Flash",
-	"gpt-5.4":           "GPT 5.4",
-	"gpt-5.5":           "GPT 5.5",
-	"gpt-5.6-luna":      "GPT 5.6 Luna",
-	"gpt-5.6-terra":     "GPT 5.6 Terra",
-	"gpt-5.6-sol":       "GPT 5.6 Sol",
-	"gpt-6-astra":       "GPT 6 Astra",
-	"gpt-6-luna":        "GPT 6 Luna",
-	"gpt-6-sol":         "GPT 6 Sol",
-	"gpt-6.1-sol":       "GPT 6.1 Sol",
+	"grok-4.7":         "Grok 4.7",
+	"gemini-3.8-flash": "Gemini 3.8 Flash",
+	"gemini-3.5-flash": "Gemini 3.5 Flash",
+	"gpt-5.4":          "GPT 5.4",
+	"gpt-5.5":          "GPT 5.5",
+	"gpt-5.6-luna":     "GPT 5.6 Luna",
+	"gpt-5.6-terra":    "GPT 5.6 Terra",
+	"gpt-5.6-sol":      "GPT 5.6 Sol",
+	"gpt-6-astra":      "GPT 6 Astra",
+	"gpt-6-luna":       "GPT 6 Luna",
+	"gpt-6-sol":        "GPT 6 Sol",
+	"gpt-6.1-sol":      "GPT 6.1 Sol",
 	// Qoder 线（客户端可见的 DisplayName）
 	"Qwen3.8-Flash":     "Qwen3.8 Flash",
 	"Qwen3.8-Max":       "Qwen3.8 Max",
@@ -266,8 +282,7 @@ func (h *Hub) startAggLine() (bool, string) {
 			return
 		}
 		out := h.aggOpenAIModels()
-		n := len(asSlice(out["data"]))
-		logHub("agg /v1/models 目录请求 | OpenAI 形态 | %d 个模型", n)
+		logHub("agg /v1/models 目录请求 | OpenAI 形态 | %d 个模型", aggOpenAIModelCount(out))
 		writeJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
@@ -791,11 +806,25 @@ func (h *Hub) aggCodexModels() map[string]any {
 // 现在输出富信息形态：
 //   - key/id  ：聚合 slug（请求侧唯一标识，不能改）
 //   - name    ：中文显示名 + 倍率（DSH 的显示名只认 name/display_name/displayName，
-//               倍率不在它解析的字段里，只能并进显示名）
+//     倍率不在它解析的字段里，只能并进显示名）
 //   - contextWindow / maxTokens：元数据（有则输出）
 //
 // gpt-* 官方模型不再进目录（2026-10-15 用户要求：目录里不该混官方模型），
 // 但透传路由保留——想用官方订阅仍可直接请求 gpt-*。
+// aggOpenAIModelCount 数 OpenAI 形态 /v1/models 响应里的模型条数，专供日志用。
+//
+// 2026-10-27 修：aggOpenAIModels 的 data 是 Go 原生 []map[string]any，而
+// asSlice 只认 JSON 解析出来的 []any，类型断言必然失败 —— 于是这行日志永远
+// 报「0 个模型」，与实际返回（14 条）对不上，排查时被它带偏过一轮。
+func aggOpenAIModelCount(out map[string]any) int {
+	switch d := out["data"].(type) {
+	case []map[string]any:
+		return len(d)
+	default:
+		return len(asSlice(out["data"]))
+	}
+}
+
 func (h *Hub) aggOpenAIModels() map[string]any {
 	list := aggSnapshot()
 	data := make([]map[string]any, 0, len(list))
@@ -834,6 +863,8 @@ func aggOpenAIDisplayName(h *Hub, am aggModel) string {
 	if base == "" {
 		base = am.Backend
 	}
+	// 快照里的 Display 可能是加标记前生成的，这里再兜一次（幂等）。
+	base = aggRiskTagged(am.Line, base)
 	r, hasRatio := h.modelRatio(am.Line, am.Backend)
 	ctx := 0
 	if m, ok := h.modelMeta(am.Line, am.Backend); ok {

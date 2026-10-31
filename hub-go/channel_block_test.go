@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 真实上游响应（2026-10-21 08:39:40 抓自 converter-cn.log）
@@ -45,12 +46,48 @@ func TestIsChannelBlockBody(t *testing.T) {
 
 func TestChannelBlockWaitEscalates(t *testing.T) {
 	prev := 0.0
-	for i := 1; i <= channelBlockRetries; i++ {
+	for i := 1; i <= channelBlockRetriesMax; i++ {
 		cur := channelBlockWait(i).Seconds()
 		if cur <= prev {
 			t.Fatalf("第 %d 次等待 %.1fs 没有递增（上一个 %.1fs）", i, cur, prev)
 		}
 		prev = cur
+	}
+}
+
+// 2026-10-25：默认不重试。反复重试会把一次可疑请求放大成多次，
+// 上游 10-23 收紧识别后这是给自己加风险。
+func TestChannelBlockRetriesDefaultZero(t *testing.T) {
+	t.Setenv(channelBlockRetryEnv, "")
+	t.Setenv(channelBlockDisabledEnv, "")
+	if got := channelBlockRetries(); got != 0 {
+		t.Errorf("默认应为 0 次重试，实际 %d", got)
+	}
+}
+
+func TestChannelBlockRetriesEnvOverride(t *testing.T) {
+	t.Setenv(channelBlockDisabledEnv, "")
+	t.Setenv(channelBlockRetryEnv, "2")
+	if got := channelBlockRetries(); got != 2 {
+		t.Errorf("AIHUB_CHANNEL_RETRY=2 应得到 2，实际 %d", got)
+	}
+	// 上限保护：不能把重试次数配成无限大
+	t.Setenv(channelBlockRetryEnv, "99")
+	if got := channelBlockRetries(); got != channelBlockRetriesMax {
+		t.Errorf("应截断到上限 %d，实际 %d", channelBlockRetriesMax, got)
+	}
+	// 非数字/负数回落到默认
+	for _, v := range []string{"abc", "-1"} {
+		t.Setenv(channelBlockRetryEnv, v)
+		if got := channelBlockRetries(); got != 0 {
+			t.Errorf("非法值 %q 应回落 0，实际 %d", v, got)
+		}
+	}
+	// 强制关闭开关优先
+	t.Setenv(channelBlockRetryEnv, "3")
+	t.Setenv(channelBlockDisabledEnv, "1")
+	if got := channelBlockRetries(); got != 0 {
+		t.Errorf("AIHUB_NO_CHANNEL_RETRY=1 应强制 0，实际 %d", got)
 	}
 }
 
@@ -67,22 +104,34 @@ func TestChannelBlockDisabledEnv(t *testing.T) {
 
 // annotateChannelBlockGiveUp 必须保留上游原有字段并追加可执行建议
 func TestAnnotateChannelBlockGiveUp(t *testing.T) {
-	out := string(annotateChannelBlockGiveUp([]byte(chanBlockBody), 3))
-	for _, want := range []string{"11128", "重试 3 次", "换一条线路", "displayMsg"} {
+	out := string(annotateChannelBlockGiveUp([]byte(chanBlockBody), 3, false, time.Time{}))
+	for _, want := range []string{"11128", "重试 3 次", "其它线路", "displayMsg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("提示缺 %q：%s", want, out)
 		}
 	}
+	// 默认 0 次重试的文案必须说明「没有静默重试」，避免用户以为 hub 没做事
+	out = string(annotateChannelBlockGiveUp([]byte(chanBlockBody), 0, false, time.Time{}))
+	if !strings.Contains(out, "不再静默重试") {
+		t.Errorf("0 次重试时文案要说明原因：%s", out)
+	}
+	// 开了闸门时要把截止时刻和「本地闸门」说清楚，不能冒充上游承诺
+	out = string(annotateChannelBlockGiveUp([]byte(chanBlockBody), 0, true, time.Now().Add(30*time.Minute)))
+	if !strings.Contains(out, "本地闸门") || !strings.Contains(out, "暂停出站到") {
+		t.Errorf("闸门文案缺关键信息：%s", out)
+	}
 	// 非 JSON 体不能崩，且要把说明拼上去
-	out = string(annotateChannelBlockGiveUp([]byte("plain text"), 2))
+	out = string(annotateChannelBlockGiveUp([]byte("plain text"), 2, false, time.Time{}))
 	if !strings.Contains(out, "[hub]") {
 		t.Errorf("非 JSON 体应追加说明：%s", out)
 	}
 }
 
-// 端到端：前 2 次返回 11128、第 3 次成功 —— 重试逻辑应吸收掉，
-// 调用方最终拿到 200。
+// 端到端：显式打开 3 次重试后，前 2 次返回 11128、第 3 次成功 ——
+// 重试逻辑应吸收掉，调用方最终拿到 200。
 func TestRetryChannelBlockAbsorbs(t *testing.T) {
+	t.Setenv(channelBlockDisabledEnv, "")
+	t.Setenv(channelBlockRetryEnv, "3")
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -122,7 +171,11 @@ func TestRetryChannelBlockAbsorbs(t *testing.T) {
 
 // 重试全失败时：保留 400 并附上 hub 提示，不能变成 200 或空响应。
 func TestRetryChannelBlockGivesUpWithHint(t *testing.T) {
+	t.Setenv(channelBlockDisabledEnv, "")
+	t.Setenv(channelBlockRetryEnv, "")
+	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, chanBlockBody)
 	}))
@@ -142,5 +195,9 @@ func TestRetryChannelBlockGivesUpWithHint(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "渠道校验拦截（11128）") {
 		t.Errorf("放弃时要带 hub 提示：%s", body)
+	}
+	// 默认 0 次重试：首次 11128 之后不能再打上游
+	if calls != 1 {
+		t.Errorf("默认不重试时上游只该被调用 1 次，实际 %d", calls)
 	}
 }

@@ -177,7 +177,7 @@ func fetchCredit(h *Hub, key string) *creditInfo {
 func wbCredits(h *Hub, intl bool) *creditInfo {
 	var cm *CredentialManager
 	base := "https://copilot.tencent.com"
-	ua := "WorkBuddy/5.5.4" // 单段：billing 域白名单 UA
+	ua := officialDomBillingUA() // 单段：billing 域白名单 UA
 	name := "国内 WorkBuddy"
 	if !intl {
 		h.mu.Lock()
@@ -204,7 +204,7 @@ func wbCredits(h *Hub, intl bool) *creditInfo {
 		}
 		cm = NewCredentialManager(path, p.Backend, p.DefaultDomain, p.UserAgent)
 		base = "https://www.workbuddy.ai"
-		ua = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2" // 平台段必须是 WorkBuddy AI
+		ua = officialIntlUA() // 平台段必须是 WorkBuddy AI
 		name = "国际 WorkBuddy"
 	}
 	headers, err := cm.Headers()

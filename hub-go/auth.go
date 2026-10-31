@@ -313,7 +313,9 @@ func (c *CredentialManager) buildHeaders(auth *AuthData, acct *AccountData) map[
 	}
 	return map[string]string{
 		"Content-Type":    "application/json",
-		"Accept":          "application/json",
+		// 官方客户端发的是 "application/json, text/plain, */*"；只写 application/json
+		// 是另一个可被上游区分「非官方客户端」的细节（2026-10-25 对齐）。
+		"Accept":          "application/json, text/plain, */*",
 		"Authorization":   "Bearer " + auth.AccessToken,
 		"X-User-Id":       uid,
 		"X-Enterprise-Id": ent,

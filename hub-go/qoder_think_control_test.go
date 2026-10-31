@@ -33,7 +33,7 @@ func helperEnvelope(raw map[string]any, entry *qoderModelEntry) map[string]any {
 	if !marked {
 		spec = qoderResolveThinking(raw, normMsgs, entry)
 	}
-	return qoderEnvelope(normMsgs, raw["tools"], "qfmodel", "uid-1", spec, entry, raw)
+	return qoderEnvelope(normMsgs, raw["tools"], "qfmodel", "uid-1", spec, entry, raw, nil)
 }
 
 // helperParam 取信封 parameters 中的一个字段。
@@ -81,8 +81,29 @@ func TestEnvelopeWireShape(t *testing.T) {
 			t.Errorf("信封缺少字段 %q", k)
 		}
 	}
-	if env["agent_id"] != "agent_common" || env["session_type"] != "qodercli" || env["chat_task"] != "FREE_INPUT" {
+	id := currentQoderIdentity()
+	if env["agent_id"] != "agent_common" || env["session_type"] != id.SessionType || env["chat_task"] != "FREE_INPUT" {
 		t.Errorf("agent_id/session_type/chat_task 不符: %v %v %v", env["agent_id"], env["session_type"], env["chat_task"])
+	}
+	if _, ok := env["code_language"]; ok {
+		t.Errorf("信封不应再带僵尸字段 code_language")
+	}
+	if _, ok := env["chat_prompt"]; ok {
+		t.Errorf("信封不应再带僵尸字段 chat_prompt")
+	}
+	biz, _ := env["business"].(map[string]any)
+	if biz == nil {
+		t.Fatalf("business 缺失或类型错误: %v", env["business"])
+	}
+	if biz["product"] != id.Product || biz["version"] != id.Version {
+		t.Errorf("business.product/version 与身份不一致: %v %v (want %v %v)",
+			biz["product"], biz["version"], id.Product, id.Version)
+	}
+	if biz["stage"] != "init" {
+		t.Errorf("business.stage = %v, want init", biz["stage"])
+	}
+	if _, ok := biz["end_at"]; !ok {
+		t.Errorf("business 缺 end_at")
 	}
 	// 客户端控制字段不得整体透传（避免双重语义/上游噪音）
 	for _, k := range []string{"model", "stream_options", "reasoning_effort", "enable_thinking", "temperature"} {
@@ -257,7 +278,7 @@ func TestEnvelopeUnsupportedEffortTieTakesHigher(t *testing.T) {
 	entry := &qoderModelEntry{Key: "gmodel", Efforts: []string{"low", "high", "max"}, DefaultEffort: "max"}
 	msgs := []any{map[string]any{"role": "user", "content": "hi"}}
 	spec := qoderResolveThinking(map[string]any{"reasoning_effort": "xhigh"}, msgs, entry)
-	env := qoderEnvelope(qoderNormalizeMessages(msgs), nil, "gmodel", "uid-1", spec, entry, map[string]any{})
+	env := qoderEnvelope(qoderNormalizeMessages(msgs), nil, "gmodel", "uid-1", spec, entry, map[string]any{}, nil)
 	if got := helperParam(t, env, "reasoning_effort"); got != "max" {
 		t.Errorf("parameters.reasoning_effort = %v, want max（就近钳制，同距取更高档）", got)
 	}
@@ -299,7 +320,7 @@ func TestEnvelopePromptInjection(t *testing.T) {
 	}
 	msgs := qoderNormalizeMessages(raw["messages"].([]any))
 	spec := qoderResolveThinking(raw, msgs, helperQfEntry(t))
-	env := qoderEnvelope(msgs, nil, "qfmodel", "uid-1", spec, helperQfEntry(t), raw)
+	env := qoderEnvelope(msgs, nil, "qfmodel", "uid-1", spec, helperQfEntry(t), raw, nil)
 	// 默认关
 	sys := env["messages"].([]any)[0].(map[string]any)
 	if sys["role"] != "system" {
@@ -310,7 +331,7 @@ func TestEnvelopePromptInjection(t *testing.T) {
 	}
 	// 开启后注入
 	t.Setenv("QODER_THINK_PROMPT", "on")
-	env = qoderEnvelope(msgs, nil, "qfmodel", "uid-1", spec, helperQfEntry(t), raw)
+	env = qoderEnvelope(msgs, nil, "qfmodel", "uid-1", spec, helperQfEntry(t), raw, nil)
 	qoderInjectPrompt(env, qoderThinkingPrompt)
 	sys = env["messages"].([]any)[0].(map[string]any)
 	content, _ := sys["content"].(string)
@@ -330,7 +351,7 @@ func TestEnvelopePreservesAssistantReasoning(t *testing.T) {
 		map[string]any{"role": "assistant", "content": "答案一", "reasoning_content": "第一轮思考"},
 		map[string]any{"role": "user", "content": "继续"},
 	}
-	env := qoderEnvelope(msgs, nil, "qfmodel", "uid-1", qoderThinkingSpec{Effort: "xhigh"}, helperQfEntry(t), map[string]any{})
+	env := qoderEnvelope(msgs, nil, "qfmodel", "uid-1", qoderThinkingSpec{Effort: "xhigh"}, helperQfEntry(t), map[string]any{}, nil)
 	wireMsgs := env["messages"].([]any)
 	asst := wireMsgs[1].(map[string]any)
 	if got, _ := asst["reasoning_content"].(string); got != "第一轮思考" {

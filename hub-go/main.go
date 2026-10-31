@@ -80,21 +80,18 @@ func main() {
 	mux.HandleFunc("/", hub.handleRoot)
 	mux.HandleFunc("/api/status", hub.apiStatus)
 	mux.HandleFunc("/api/nick", hub.apiNick)
-	mux.HandleFunc("/api/dom/start", hub.apiDomStart)
-	mux.HandleFunc("/api/dom/stop", hub.apiDomStop)
 	mux.HandleFunc("/api/dom/cred", hub.apiDomCred)
 	mux.HandleFunc("/api/dom/switch", hub.apiDomSwitch)
 	mux.HandleFunc("/api/models/probe", hub.apiModelsProbe)
-	mux.HandleFunc("/api/intl/start", hub.apiIntlStart)
-	mux.HandleFunc("/api/intl/stop", hub.apiIntlStop)
-	mux.HandleFunc("/api/mimo/start", hub.apiMimoStart)
-	mux.HandleFunc("/api/mimo/stop", hub.apiMimoStop)
-	mux.HandleFunc("/api/qoder/start", hub.apiQoderStart)
-	mux.HandleFunc("/api/qoder/stop", hub.apiQoderStop)
-	mux.HandleFunc("/api/trae/start", hub.apiTraeStart)
-	mux.HandleFunc("/api/trae/stop", hub.apiTraeStop)
-	mux.HandleFunc("/api/oc/start", hub.apiOpencodeStart)
-	mux.HandleFunc("/api/oc/stop", hub.apiOpencodeStop)
+	// 线路启停路由按 lines.go 的 lineSpecs 生成（A2）。
+	// 加一条线路只需改 lines.go 元数据 + hub_api.go 的 lineToggles，不用再动路由表。
+	for _, spec := range lineSpecs {
+		if _, ok := lineToggles[spec.Key]; !ok {
+			continue // 没有通用启停实现（zcode 的 start 要 apiKey），下面单独注册
+		}
+		mux.HandleFunc("/api/"+spec.Key+"/start", hub.apiLineStart(spec.Key))
+		mux.HandleFunc("/api/"+spec.Key+"/stop", hub.apiLineStop(spec.Key))
+	}
 	mux.HandleFunc("/api/zcode/start", hub.apiZcodeStart)
 	mux.HandleFunc("/api/zcode/stop", hub.apiZcodeStop)
 	mux.HandleFunc("/api/zcode/key", hub.apiZcodeKey)

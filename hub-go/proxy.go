@@ -143,20 +143,7 @@ func (p *Proxy) Start() (bool, string) {
 	// 先自己绑定端口，绑定失败就如实报错（而不是靠端口探测猜）。
 	// 端口被占时先清扫再重试，最多重试 3 次、每次间隔 500ms，
 	// 以应对上一次会话残留的 TIME_WAIT / 进程还没完全退出等瞬时冲突。
-	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
-	var ln net.Listener
-	var err error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		ln, err = net.Listen("tcp", addr)
-		if err == nil {
-			break
-		}
-		// 清扫占用者再重试
-		stopPort(p.Port)
-	}
+	ln, err := listenLinePort(p.Port)
 	if err != nil {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动（已重试 %d 次）：%v", p.Port, 3, err)
 	}
@@ -196,24 +183,9 @@ func (p *Proxy) Stop() bool {
 	p.server, p.ln = nil, nil
 	p.mu.Unlock()
 
-	if srv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = srv.Shutdown(ctx) // 先给在途请求一点时间收尾
-		cancel()
-		_ = srv.Close() // 超时则强制断开，保证端口一定释放
-	}
-	if ln != nil {
-		_ = ln.Close()
-	}
+	closeLineServer(srv, ln)
 	// 只做端口确认，不再杀进程。
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !portListening(p.Port) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return !portListening(p.Port)
+	return waitPortFree(p.Port, lineShutdownGrace)
 }
 
 // buildAuth 按代理类型构造认证提供者。返回 nil 时 msg 是给用户看的原因。

@@ -148,24 +148,12 @@ func (p *QoderProxy) Start() (bool, string) {
 	// gzip/解压；万一上游仍回 gzip，由 qoderMaybeDecompress 兜底。
 	p.client = directClient()
 
-	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
-	var ln net.Listener
-	var err error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		ln, err = net.Listen("tcp", addr)
-		if err == nil {
-			break
-		}
-		stopPort(p.Port) // 清掉残留（如独立版 qoder_proxy.exe）
-	}
+	ln, err := listenLinePort(p.Port)
 	if err != nil {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
 
-	srv := &http.Server{Handler: p, ReadHeaderTimeout: 20 * time.Second}
+	srv := newLineServer(p)
 	p.mu.Lock()
 	p.server = srv
 	p.ln = ln
@@ -194,23 +182,8 @@ func (p *QoderProxy) Stop() bool {
 	p.server, p.ln = nil, nil
 	p.mu.Unlock()
 
-	if srv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = srv.Shutdown(ctx)
-		cancel()
-		_ = srv.Close()
-	}
-	if ln != nil {
-		_ = ln.Close()
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !portListening(p.Port) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return !portListening(p.Port)
+	closeLineServer(srv, ln)
+	return waitPortFree(p.Port, lineShutdownGrace)
 }
 
 func (p *QoderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

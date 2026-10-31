@@ -167,18 +167,7 @@ func (p *TraeProxy) Start() (bool, string) {
 	if err != nil {
 		return false, err.Error()
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
-	var ln net.Listener
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		ln, err = net.Listen("tcp", addr)
-		if err == nil {
-			break
-		}
-		stopPort(p.Port)
-	}
+	ln, err := listenLinePort(p.Port)
 	if err != nil {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
@@ -187,7 +176,7 @@ func (p *TraeProxy) Start() (bool, string) {
 	p.auth, p.dev = info, dev
 	p.cli = &http.Client{Transport: tr}
 	p.ln = ln
-	p.portS = &http.Server{Handler: p, ReadHeaderTimeout: 20 * time.Second}
+	p.portS = newLineServer(p)
 	srv := p.portS
 	p.mu.Unlock()
 
@@ -208,23 +197,8 @@ func (p *TraeProxy) Stop() bool {
 	srv, ln := p.portS, p.ln
 	p.portS, p.ln = nil, nil
 	p.mu.Unlock()
-	if srv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = srv.Shutdown(ctx)
-		cancel()
-		_ = srv.Close()
-	}
-	if ln != nil {
-		_ = ln.Close()
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !portListening(p.Port) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return !portListening(p.Port)
+	closeLineServer(srv, ln)
+	return waitPortFree(p.Port, lineShutdownGrace)
 }
 
 func (p *TraeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

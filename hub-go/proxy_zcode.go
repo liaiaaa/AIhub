@@ -17,7 +17,6 @@ package main
 //   - 凭据：控制台传入 > 环境变量 ZCODE_API_KEY > 数据目录 zcode_api_key.txt
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -221,19 +220,7 @@ func (p *ZcodeProxy) Start() (bool, string) {
 	p.stopCh = make(chan struct{})
 	go p.backgroundLoop()
 
-	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
-	var ln net.Listener
-	var err error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		ln, err = net.Listen("tcp", addr)
-		if err == nil {
-			break
-		}
-		stopPort(p.Port)
-	}
+	ln, err := listenLinePort(p.Port)
 	if err != nil {
 		// 2026-10-21 开源审查修的泄漏：走到这里之前已经起了两个后台 goroutine
 		// （spawnRelayStack+detectRelay、backgroundLoop），还可能拉起了外部
@@ -247,7 +234,7 @@ func (p *ZcodeProxy) Start() (bool, string) {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
 
-	srv := &http.Server{Handler: p, ReadHeaderTimeout: 20 * time.Second}
+	srv := newLineServer(p)
 	p.mu.Lock()
 	p.server = srv
 	p.ln = ln
@@ -325,26 +312,11 @@ func (p *ZcodeProxy) Stop() bool {
 		close(stopCh)
 	}
 
-	if srv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = srv.Shutdown(ctx)
-		cancel()
-		_ = srv.Close()
-	}
-	if ln != nil {
-		_ = ln.Close()
-	}
+	closeLineServer(srv, ln)
 	// 点「停止」：本实例拉起的中继栈（mint/中继）一并收掉
 	p.stopSpawnedRelayStack()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !portListening(p.Port) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return !portListening(p.Port)
+	return waitPortFree(p.Port, lineShutdownGrace)
 }
 
 // ServeHTTP 处理 HTTP 请求。

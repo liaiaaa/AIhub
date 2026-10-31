@@ -1,0 +1,15 @@
+# 统一行尾策略，避免 Windows/Linux 之间 clone 时把 .bat 改坏。
+#
+# scripts/*.bat 必须保持 CRLF：中文 Windows 的 cmd.exe 按 GBK 读取，
+# 裸 LF 会导致脚本解析错乱、直接跑不起来（本项目实际踩过的坑）。
+*.bat text eol=crlf
+
+# Go 源码与文档统一用 LF 入库
+*.go    text eol=lf
+*.md    text eol=lf
+*.mod   text eol=lf
+
+# 二进制资源不做行尾转换
+*.png   binary
+*.ico   binary
+*.exe   binary

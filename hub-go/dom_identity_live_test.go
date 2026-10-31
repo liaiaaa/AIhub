@@ -166,12 +166,18 @@ func TestLiveIntlIdentity(t *testing.T) {
 	if len(dirs) == 0 {
 		t.Skip("没有国际凭证目录，跳过")
 	}
-	// 候选顺序：优先 <凭证目录B>（state.json 里选中的），其余目录排后面。
+	// 候选顺序：优先 state.json 里当前选中的那个国际凭证目录（`intl_cred`），
+	// 其余目录排后面。这里**不硬编码目录名** —— 那些名字是使用者自己的数据根结构，
+	// 不该出现在公开仓库里（2026-10-31 清理）。
 	// 台账里有冷却记录（当天 11140）的账号直接跳过——那种账号的 11140 会把
 	// 「UA 有没有问题」和「账号本来就不能用」混在一起。
 	cands := make([]string, 0, len(dirs))
-	if d := dirs["<凭证目录B>"]; d != "" {
-		cands = append(cands, d)
+	h := &Hub{}
+	h.loadState() // state.json 里的 intl_cred = 上次选中的国际凭证目录
+	if h.intlCred != "" {
+		if d := dirs[h.intlCred]; d != "" {
+			cands = append(cands, d)
+		}
 	}
 	for _, d := range dirs {
 		if d != "" && (len(cands) == 0 || d != cands[0]) {

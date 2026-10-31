@@ -379,6 +379,13 @@
            max-height:min(78vh,720px); display:flex; flex-direction:column; overflow:hidden; }
   .modal-head { display:flex; align-items:center; gap:8px; padding:10px 14px;
                 border-bottom:1px solid var(--line2); font-size:13px; }
+  .maint-logs { margin-top:8px; border-top:1px solid var(--line2); }
+  .maint-row { display:flex; align-items:center; gap:10px; padding:5px 0;
+               border-bottom:1px solid var(--line2); font-size:12px; }
+  .maint-row .m-k { flex:none; width:64px; color:var(--muted); font-weight:650; }
+  .maint-row .m-f { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .maint-row .m-s { flex:none; width:86px; text-align:right; }
+  .maint-row .m-t { flex:none; width:150px; text-align:right; color:var(--faint); }
   .modal pre { margin:0; padding:12px 14px; overflow:auto; font-family:var(--mono);
                font-size:11.5px; line-height:1.55; color:var(--txt); white-space:pre-wrap; }
 
@@ -453,6 +460,7 @@
         <div class="hero-gw">
           <span>Codex <span id="cc-codex">—</span></span>
           <span class="spacer"></span>
+          <span>今日 <span class="mono" id="hero-today" title="">—</span></span>
           <span>目录模型 <span class="mono" id="hero-models">—</span></span>
           <span>上下文窗口 <span class="mono" id="hero-ctx">—</span></span>
         </div>
@@ -577,8 +585,14 @@
           <button data-d="30" onclick="setUsageDays(30)">近 30 天</button>
           <button data-d="0" onclick="setUsageDays(0)">全部</button>
         </span>
+        <span class="seg" id="usage-sort" title="模型榜单排序方式">
+          <button class="on" data-s="tok" onclick="setUsageSort('tok')">按 tokens</button>
+          <button data-s="reqs" onclick="setUsageSort('reqs')">按请求</button>
+          <button data-s="fail" onclick="setUsageSort('fail')">按失败</button>
+        </span>
         <span class="spacer"></span>
         <span class="tag">统计走 :8790 网关的请求</span>
+        <button class="text" onclick="exportUsageCSV()">导出 CSV</button>
         <button class="text" onclick="loadUsage()">刷新</button>
       </div>
       <div id="usage-body"><div class="gw-desc" id="usage-empty">加载中…</div></div>
@@ -620,6 +634,16 @@
             <option value="custom">自定义…</option>
           </select>
           <span class="hint" style="font-size:11.5px;color:var(--faint)">调低让 Codex 更早自动压缩，避免逼近上游 1M 硬顶时 400。Codex 端重开会话生效。</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span class="t">运行维护</span><span class="spacer"></span>
+          <button class="text" onclick="loadMaint()">刷新</button></div>
+        <div class="ctx-row"><span>数据根：</span><span class="mono" id="maint-root">—</span></div>
+        <div id="maint-logs" class="maint-logs"><div class="gw-desc">点「刷新」查看日志体积</div></div>
+        <div class="ctx-row" style="margin-top:8px">
+          <span class="hint" style="font-size:11.5px;color:var(--faint)">这里只读不改：日志与失败样本 dump 的清理由你自己决定（<span class="mono">rm</span> 掉对应文件即可，hub.log 可随时删除，进程会重新创建）。</span>
         </div>
       </div>
     </div>
@@ -809,6 +833,130 @@ function closeLog() {
   logKey = '';
 }
 
+// ---------- 总览「今日」摘要（第 3 项） ----------
+// 只读 /api/usage?days=1，60 秒节流：这个数字变化慢，没必要跟 2 秒轮询一起翻。
+let todayUsage = null;
+let lastTodayAt = 0;
+
+async function loadTodayUsage(force) {
+  const now = Date.now();
+  if (!force && now - lastTodayAt < 60000) return;
+  lastTodayAt = now;
+  try {
+    const r = await fetch('/api/usage?days=1', { signal: AbortSignal.timeout(10000) });
+    const d = await r.json();
+    if (d && d.ok) { todayUsage = d; renderToday(); }
+  } catch (e) { /* 取不到就保持「—」 */ }
+}
+
+function renderToday() {
+  const el = document.getElementById('hero-today');
+  if (!el) return;
+  if (!todayUsage || !todayUsage.summary) { el.textContent = '—'; el.title = ''; return; }
+  const s = todayUsage.summary;
+  const total = (s.in || 0) + (s.out || 0);
+  el.textContent = fmtTok(total) + ' · ' + s.reqs + ' 请求';
+  const failPct = s.reqs ? (s.fail / s.reqs * 100).toFixed(1) : '0.0';
+  el.title = '今日（本地 0 点起）\n' +
+    '输入 ' + fmtTok(s.in) + '（缓存命中 ' + fmtTok(s.cached) + '）\n' +
+    '输出 ' + fmtTok(s.out) + '（其中思考 ' + fmtTok(s.reason) + '）\n' +
+    '请求 ' + s.reqs + ' 次，失败 ' + s.fail + ' 次（' + failPct + '%）';
+}
+
+// ---------- 用量页：排序 + 导出 CSV（第 2 项） ----------
+let usageSort = 'tok';
+
+function setUsageSort(k) {
+  usageSort = k;
+  document.querySelectorAll('#usage-sort button').forEach(function (b) {
+    b.classList.toggle('on', b.dataset.s === k);
+  });
+  renderUsage();
+}
+
+function usageSortedModels() {
+  const rows = ((usageData && usageData.models) || []).slice();
+  const key = function (r) {
+    if (usageSort === 'reqs') return r.agg.reqs || 0;
+    if (usageSort === 'fail') return r.agg.fail || 0;
+    return (r.agg.in || 0) + (r.agg.out || 0);
+  };
+  rows.sort(function (a, b) { return key(b) - key(a); });
+  return rows;
+}
+
+function csvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function csvLine(cells) { return cells.map(csvCell).join(',') + '\r\n'; }
+
+function exportUsageCSV() {
+  if (!usageData || !usageData.ok) { showMsg('还没有用量数据可导出', true); return; }
+  const s = usageData.summary;
+  let out = '\ufeff';
+  out += csvLine(['AIHub 用量导出', '窗口', usageDays === 0 ? '全部' : ('近 ' + usageDays + ' 天'), '范围', (usageData.from || '') + ' ~ ' + (usageData.to || '')]);
+  out += '\r\n';
+  out += csvLine(['指标', '值']);
+  out += csvLine(['总 tokens', s.in + s.out]);
+  out += csvLine(['输入 tokens', s.in]);
+  out += csvLine(['输出 tokens', s.out]);
+  out += csvLine(['缓存命中 tokens', s.cached]);
+  out += csvLine(['思考 tokens', s.reason]);
+  out += csvLine(['请求数', s.reqs]);
+  out += csvLine(['失败数', s.fail]);
+  out += '\r\n';
+  out += csvLine(['日期', '输入', '输出', '缓存命中', '思考', '请求数', '失败数']);
+  (usageData.days || []).slice().reverse().forEach(function (d) {
+    out += csvLine([d.date, d.agg.in, d.agg.out, d.agg.cached, d.agg.reason, d.agg.reqs, d.agg.fail]);
+  });
+  out += '\r\n';
+  out += csvLine(['模型', '线路', '输入', '输出', '缓存命中', '思考', '请求数', '失败数']);
+  usageSortedModels().forEach(function (m) {
+    out += csvLine([m.slug, m.line, m.agg.in, m.agg.out, m.agg.cached, m.agg.reason, m.agg.reqs, m.agg.fail]);
+  });
+  out += '\r\n';
+  out += csvLine(['线路', '输入', '输出', '请求数', '失败数']);
+  (usageData.lines || []).forEach(function (l) {
+    out += csvLine([l.line_cn || l.line, l.agg.in, l.agg.out, l.agg.reqs, l.agg.fail]);
+  });
+  const blob = new Blob([out], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  const now = new Date();
+  const stamp = now.getFullYear() + String(now.getMonth() + 1).padStart(2, '0') + String(now.getDate()).padStart(2, '0');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'aihub-usage-' + (usageDays || 'all') + 'd-' + stamp + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  showMsg('已导出 CSV');
+}
+
+// ---------- 设置页维护区（第 5 项，只读） ----------
+async function loadMaint() {
+  const rootEl = document.getElementById('maint-root');
+  const box = document.getElementById('maint-logs');
+  if (!box) return;
+  box.innerHTML = '<div class="gw-desc">读取中…</div>';
+  try {
+    const r = await fetch('/api/logs/sizes', { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    if (!d || !d.ok) { box.innerHTML = '<div class="gw-desc">读不到：' + ((d && d.msg) || '未知错误') + '</div>'; return; }
+    if (rootEl) { rootEl.textContent = d.root || '—'; rootEl.title = d.root || ''; }
+    const rows = (d.logs || []).map(function (l) {
+      return '<div class="maint-row"><span class="m-k">' + l.key + '</span>' +
+        '<span class="m-f mono" title="' + l.path + '">' + l.file + '</span>' +
+        '<span class="m-s mono">' + (l.size_text || '—') + '</span>' +
+        '<span class="m-t mono">' + (l.mod_time || '—') + '</span></div>';
+    }).join('');
+    box.innerHTML = rows + '<div class="maint-row"><span class="m-k">dump</span>' +
+      '<span class="m-f">失败样本（*-dump-*.json）</span>' +
+      '<span class="m-s mono">' + (d.dumps || 0) + ' 个</span><span class="m-t"></span></div>';
+  } catch (e) {
+    box.innerHTML = '<div class="gw-desc">请求失败：' + e + '</div>';
+  }
+}
+
 // ---------- 页面切换 ----------
 const PAGE_TITLES = { dash:'总览', lines:'线路与凭证', models:'模型', usage:'用量', settings:'设置' };
 function switchPage(name) {
@@ -822,7 +970,7 @@ function switchPage(name) {
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   if (name === 'lines') { loadCredStatus(false); loadFailures(false); }
   if (name === 'usage') loadUsage();
-  if (name === 'settings') { renderClients(); loadCtx(); }
+  if (name === 'settings') { renderClients(); loadCtx(); loadMaint(); }
 }
 
 async function post(path, body) {
@@ -848,7 +996,8 @@ async function refresh() {
     const r = await fetch('/api/status', { signal: AbortSignal.timeout(5000) });
     state = await r.json();
     render();
-    loadLimits(false); // 限流看板：只读快照，8 秒节流
+    loadLimits(false);    // 限流看板：只读快照，8 秒节流
+    loadTodayUsage(false); // 今日摘要：60 秒节流
   } catch (e) { /* 控制台连接中断：保留旧画面 */ }
 }
 async function refreshNick() {
@@ -1641,7 +1790,7 @@ function renderUsage() {
   }
 
   // 榜单：排名徽标 + 线路配色条 + 右侧数值
-  const models = (usageData.models || []).slice(0, 10);
+  const models = usageSortedModels().slice(0, 10);
   const maxM = Math.max.apply(null, models.map(function (m) { return m.agg.in + m.agg.out; })) || 1;
   const mTotal = models.reduce(function (a, m) { return a + m.agg.in + m.agg.out; }, 0) || 1;
   const lines = (usageData.lines || []);

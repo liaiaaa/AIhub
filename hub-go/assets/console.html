@@ -471,11 +471,14 @@
                           padding:0 7px; font-size:11px; font-weight:700; line-height:17px; }
   .att-group { border-top:1px solid #f1e4cd; }
   .att-group > summary { display:flex; align-items:center; gap:8px; cursor:pointer;
-                         list-style:none; padding:5px 0; font-size:12px; font-weight:650;
-                         color:#7a4300; }
+                         list-style:none; padding:6px 6px; margin:1px 0; border-radius:6px;
+                         font-size:12px; font-weight:650; color:#7a4300; user-select:none; }
+  .att-group > summary:hover { background:#fff3df; }
   .att-group > summary::-webkit-details-marker { display:none; }
-  .att-group > summary::before { content:"▸"; font-size:10px; color:#b4884a; }
-  .att-group[open] > summary::before { content:"▾"; }
+  /* 三角给足点击面积：14px 宽 + 整行都是热区 */
+  .att-group > summary::before { content:"▾"; flex:none; width:14px; text-align:center;
+                                 font-size:11px; color:#b4884a; line-height:1; }
+  .att-group:not([open]) > summary::before { content:"▸"; }
   .att-group .g-n { margin-left:auto; font-size:11px; font-weight:700; color:#a2632a;
                     background:#f8ebd6; border-radius:999px; padding:0 6px; line-height:16px; }
   .att-row { display:flex; align-items:center; gap:8px; font-size:12px; line-height:1;
@@ -838,6 +841,11 @@ function showMsg(text, err) {
 // ---------- 限流看板 / 最近失败 / 日志弹层（2026-10-31） ----------
 // 数据来源：/api/limits（限流台账快照）与 /api/logs/tail（白名单只读）。
 // 这两个接口都是只读的，取不到时只是这块不显示，绝不影响主状态轮询。
+// 需要关注各分组的展开状态。refresh() 每 2 秒重建一次总览 DOM，
+// 若每次都按「默认展开」渲染，用户一折叠就会被下一次轮询弹回（2026-10-31 用户报的 bug）。
+let attOpen = { risk: true, limit: true, quota: true };
+let attSig = ''; // 上次渲染出来的 HTML 签名：内容没变就不重建 DOM
+
 let limits = [];        // [{name,kind,code,reason,hits,until,remain,model?}]
 let failures = {};      // 线路 key -> 最近一条含 ✗ 的日志行
 let lastLimitsAt = 0;
@@ -855,6 +863,11 @@ async function loadLimits(force) {
     renderLimits();
     renderOverview();
   } catch (e) { /* 看板取不到不影响主状态 */ }
+}
+
+// attOnToggle 记录用户在「需要关注」里对某个分组的折叠选择。
+function attOnToggle(kind, open) {
+  attOpen[kind] = !!open;
 }
 
 // 冷却归属：后端台账记的是账号昵称/模型名，没有线路字段，
@@ -1208,7 +1221,11 @@ function renderOverview() {
     });
   });
   const box = document.getElementById('attention');
-  if (!att.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+  if (!att.length) {
+    if (attSig !== '') { box.innerHTML = ''; attSig = ''; }
+    box.style.display = 'none';
+    return;
+  }
   box.style.display = '';
   // v3：按类别分组 + 计数，条目压成一行（此前是 9 行等宽纯文本，一扫看不出轻重）
   const GROUPS = [
@@ -1220,7 +1237,11 @@ function renderOverview() {
   GROUPS.forEach(function (g) {
     const rows = att.filter(function (x) { return x.kind === g.kind; });
     if (!rows.length) return;
-    html += '<details class="att-group" open><summary>' + g.label +
+    // open 由 attOpen 决定；ontoggle 把用户的选择记下来，跨轮询保留
+    const isOpen = attOpen[g.kind] !== false;
+    html += '<details class="att-group" data-kind="' + g.kind + '"' + (isOpen ? ' open' : '') +
+      ' ontoggle="attOnToggle(\'' + g.kind + '\', this.open)">' +
+      '<summary title="点击折叠/展开">' + g.label +
       '<span class="g-n">' + rows.length + '</span></summary>' +
       rows.map(function (x) {
         return '<div class="att-row ' + g.kind + '" onclick="gotoLine(\'' + x.name + '\')">' +
@@ -1229,7 +1250,11 @@ function renderOverview() {
           '<span class="why" title="' + x.why + '">' + x.why + '</span></div>';
       }).join('') + '</details>';
   });
-  box.innerHTML = html;
+  // 内容没变就不重写 DOM：否则每 2 秒重建一次，折叠状态、鼠标悬停、选中文本都会被清掉
+  if (html !== attSig) {
+    box.innerHTML = html;
+    attSig = html;
+  }
 }
 
 function gotoLine(name) {

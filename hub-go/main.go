@@ -84,6 +84,10 @@ func main() {
 	mux.HandleFunc("/api/dom/cred", hub.apiDomCred)
 	mux.HandleFunc("/api/dom/switch", hub.apiDomSwitch)
 	mux.HandleFunc("/api/models/probe", hub.apiModelsProbe)
+	// 观测类只读接口（UI 的限流看板 / 日志弹层 / 设置页维护区）
+	mux.HandleFunc("/api/limits", hub.apiLimits)
+	mux.HandleFunc("/api/logs/tail", hub.apiLogsTail)
+	mux.HandleFunc("/api/logs/sizes", hub.apiLogsSizes)
 	// 线路启停路由按 lines.go 的 lineSpecs 生成（A2）。
 	// 加一条线路只需改 lines.go 元数据 + hub_api.go 的 lineToggles，不用再动路由表。
 	for _, spec := range lineSpecs {

@@ -225,25 +225,14 @@ func (p *OpencodeProxy) Start() (bool, string) {
 	if p.Running() {
 		return true, "已在运行"
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", p.Port)
-	var ln net.Listener
-	var err error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		if ln, err = net.Listen("tcp", addr); err == nil {
-			break
-		}
-		stopPort(p.Port)
-	}
+	ln, err := listenLinePort(p.Port)
 	if err != nil {
 		return false, fmt.Sprintf("端口 %d 占用：%v", p.Port, err)
 	}
 	p.mu.Lock()
 	p.ln = ln
 	p.cli = newBackendClient() // 走系统/环境代理：免费档有区域校验
-	p.portS = &http.Server{Handler: p, ReadHeaderTimeout: 20 * time.Second}
+	p.portS = newLineServer(p)
 	p.mu.Unlock()
 
 	go func() {
@@ -260,22 +249,8 @@ func (p *OpencodeProxy) Stop() bool {
 	srv, ln := p.portS, p.ln
 	p.portS, p.ln = nil, nil
 	p.mu.Unlock()
-	if srv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = srv.Shutdown(ctx)
-		cancel()
-		_ = srv.Close()
-	}
-	if ln != nil {
-		_ = ln.Close()
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !portListening(p.Port) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	closeLineServer(srv, ln)
+	_ = waitPortFree(p.Port, lineShutdownGrace)
 	return false
 }
 

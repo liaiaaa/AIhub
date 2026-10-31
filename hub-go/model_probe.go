@@ -326,6 +326,7 @@ func probeAllModels(h *Hub) []modelProbeLine {
 	for i, key := range modelProbeLines {
 		wg.Add(1)
 		go func(i int, key string) {
+			defer recoverGoroutine("model_probe.go:328")
 			defer wg.Done()
 			out[i] = probeLine(h, key)
 		}(i, key)

@@ -393,8 +393,10 @@ func (h *Hub) apiStopAll(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) apiExit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "正在退出…"})
 	go func() {
+		defer recoverGoroutine("hub_api.go:395")
 		done := make(chan struct{})
 		go func() {
+			defer recoverGoroutine("hub_api.go:397")
 			h.stopDom()
 			h.stopIntl()
 			h.stopMimo()

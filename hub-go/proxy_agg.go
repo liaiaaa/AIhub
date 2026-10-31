@@ -321,6 +321,7 @@ func (h *Hub) startAggLine() (bool, string) {
 	done := make(chan struct{})
 	aggServeDone = done
 	go func() {
+		defer recoverGoroutine("proxy_agg.go:323")
 		defer close(done)
 		_ = srv.Serve(ln)
 		aggSrvMu.Lock()

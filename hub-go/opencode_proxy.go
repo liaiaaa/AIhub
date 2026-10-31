@@ -236,6 +236,7 @@ func (p *OpencodeProxy) Start() (bool, string) {
 	p.mu.Unlock()
 
 	go func() {
+		defer recoverGoroutine("opencode_proxy.go:238")
 		if e := p.portS.Serve(ln); e != nil && !errors.Is(e, http.ErrServerClosed) {
 			p.log.Log("serve error: %v", e)
 		}

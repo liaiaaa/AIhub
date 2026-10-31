@@ -184,6 +184,7 @@ func (p *TraeProxy) Start() (bool, string) {
 		p.log = NewFileLogger(dataPath("converter-trae.log"))
 	}
 	go func() {
+		defer recoverGoroutine("trae_proxy.go:186")
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			p.log.Log("serve error: %v", err)
 		}
@@ -753,6 +754,7 @@ func (p *TraeProxy) streamToClient(ctx context.Context, cancel context.CancelFun
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
+		defer recoverGoroutine("trae_proxy.go:755")
 		idle := traeIdleTimeout()
 		tk := time.NewTicker(time.Second)
 		defer tk.Stop()

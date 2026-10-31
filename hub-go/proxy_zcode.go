@@ -208,6 +208,7 @@ func (p *ZcodeProxy) Start() (bool, string) {
 	relayReady := make(chan struct{})
 	p.relayReadyOnce = new(sync.Once)
 	go func() {
+		defer recoverGoroutine("proxy_zcode.go:210")
 		defer p.relayReadyOnce.Do(func() { close(relayReady) })
 		p.spawnRelayStack()
 		p.detectRelay(true)
@@ -241,6 +242,7 @@ func (p *ZcodeProxy) Start() (bool, string) {
 	p.mu.Unlock()
 
 	go func() {
+		defer recoverGoroutine("proxy_zcode.go:243")
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			if p.log != nil {
 				p.log.Log("serve error: %v", err)

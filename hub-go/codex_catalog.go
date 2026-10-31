@@ -208,6 +208,7 @@ func codexCatalogRefresh() {
 		return
 	}
 	go func() {
+		defer recoverGoroutine("codex_catalog.go:210")
 		if _, err := writeCodexCatalogFile(sharedHub); err != nil {
 			logHub("桌面版目录文件刷新失败：%v", err)
 		}

@@ -134,6 +134,32 @@ DSH 里填：
 > `client/configs` 实时刷新（快照兜底），`agent/configs` 端点改写表 fail-open
 > 跟随；套餐余额经 `billing/balance` 透出到 `/health` 的 `quota` 字段。
 
+## 封号风险与出站身份（2026-10-25）
+
+上游从 2026-10-23 起收紧了对**非官方客户端**的识别（社区公告见
+`ardeyouxipianyi/workbuddy2api-hub` 与 `linguo2625469/workbuddy2api-panel` issue #197）。
+反代到 dsh / Codex 这类 agent 框架时，三类信号会被串起来看：请求头里的客户端版本、
+system 里的「You are … powered by …」身份句、以及请求节奏（单日上千次、单次十几万 tokens）。
+
+hub-go 这轮做的事（细节与真机结果见 `hub-go/docs/2026-10-25-封号风险与出站身份对齐.md`）：
+
+- **出站身份统一**：所有非对话请求（签到 / 探活 / 模型目录 / billing）不再各写一套 UA，
+  统一取官方常量（国内 `5.8.3` / `CLI 2.161.0`，国际 `5.8.4`），`Accept` 也对齐官方。
+- **身份句清洗**：system/developer 里的「You are an AI agent powered by …」
+  「You are a coding agent powered by the <model> model.」「built on / created by …」
+  整句替换成中性表述；大小写不敏感，只改 system，不动用户消息与工具输出。
+- **11128 不再静默重试**：默认 0 次（旧行为是 3 次，一次客户端请求最多打 4 次上游）。
+  确需旧行为用 `AIHUB_CHANNEL_RETRY=N`（上限 3）；`AIHUB_NO_CHANNEL_RETRY=1` 强制关闭。
+  10 分钟内累计 3 次会按账号暂停出站 30 分钟（本地闸门，记录落 `rate_limit.json`）。
+- **冷却闸门**：台账里有 11140 / 11128 / 6004 记录时，请求在 hub 内直接回 429 +
+  `Retry-After`，不再打到上游；控制台凭证卡显示「风控 / 渠道拦截」与可读原因。
+- **国内线路标红**：控制台线路卡、聚合模型名都带「⚠高风险」；dsh 模型选择器里的三个
+  `dom.*` 也改成「⚠高风险 … · 手动才用」。**保留可选**，是否使用仍由你决定。
+
+建议：重活（agent 长会话、大工具集）走 `intl` / `qoder` / `trae`；国内线路只在需要时手动开，
+别用主账号、别同 IP 多号并发。设备指纹（qimei 等）与多出口隔离本轮**没有做**——
+没有抓包证据时乱加头比不加更可疑。
+
 ## 思考档位（reasoning effort）
 
 **hub-go 侧规则**（2026-10-08 用户要求：客户端没发档位就用最高档）：
@@ -326,3 +352,16 @@ GOOS=windows go build -o /dev/null .    # 需 -ldflags "-s -w -H=windowsgui" 才
 - 关浏览器窗口 ≠ 退出控制台；代理继续跑。要退出请点网页上的「退出控制台」。
 - 重复双击 exe 不会把正在跑的代理打掉：第二个实例发现端口占用时只打开浏览器。
 - `qoder-sandbox\` 是独立的实验目录，与 Go 代理无关，未纳入版本控制。
+- **Trae 思考模型（`kimi-k3` 等）**：上游先吐 `reasoning_content`，正文要等思考结束，
+  首帧十几秒、整段一两分钟都可能（2026-10-27 排查见
+  `hub-go\docs\2026-10-27-trae流式与卡顿.md`）。hub 现在的行为：
+  - 客户端断开（Esc / 关页面）→ 立刻中止上游，不再白烧额度；
+  - 上游连续 `AIHUB_TRAE_IDLE_SECS` 秒（默认 120）没有任何帧 → 中止并回
+    `upstream_timeout` 错误帧，客户端能看到「为什么失败」而不是无限等待；
+  - `converter-trae.log` 的完成行带 `首帧=… | think=…帧 | content=…字节`，
+    一眼区分「上游慢」还是「hub 慢」；
+  - **思考档位默认不注入**（2026-10-27 用户决定：kimi-k3 就用最强思考，不接受降档换速度）。
+    只在实验时用 `AIHUB_TRAE_EFFORT` 或**数据根** `trae_effort.txt`（`low`/`medium`/`high`，
+    每请求现读、改完不用重启；桌面快捷方式启动带不了环境变量，用文件）。
+    实测样本方差很大（默认 14–30s，`low` 4–14s，`high` 9–14s），只在明确想牺牲思考深度时用；
+    注入后日志 `▶ REQUEST` 行会带 `effort=…`。

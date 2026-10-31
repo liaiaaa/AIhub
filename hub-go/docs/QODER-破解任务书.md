@@ -32,7 +32,7 @@
 | **CLI 本体** | 已删除 | 原为 `~/.qoder-cn/bin/qoderclicn/qoderclicn-1.1.59.exe`（Bun 打包，222MB）。如动态 hook 确实需要，可经官方渠道重装，**用完删掉**（用户不想留 CLI） |
 | 沙盒工作目录 | `D:\C\Desktop\workbuddy-hub\qoder-sandbox\` | 所有实验代码、解包产物、抓包记录放这里 |
 | 环境 | Node `E:\software\nodejs\node.exe`；Go `E:\software\go\bin\go.exe`（GOCACHE=`E:\software\go-cache`，GOPATH=`E:\software\go-path`） | |
-| machineToken（本机） | `P1gAuQTUR1HKGk0h8gjRW3heL7u8jHBmj4zp_ElDzDXm-Go0ngjtOr4LAyxhktdGncmW8uAT0PyOT664xF-Vnp0y` | runtime-info.exe 产物；如过期用它重新生成。仅本机使用 |
+| machineToken（本机） | `P1gA...`（已脱敏） | runtime-info.exe 产物；需用时在本机重新生成，不要写进文档 |
 
 ⚠️ **别被误导**：`E:\software\db\Doubao` 是字节的豆包桌面端（liblark.dll / VolcEngineRTC 那套），**与 Qoder 无关**，不要去逆它。
 

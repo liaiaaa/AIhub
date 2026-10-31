@@ -16,12 +16,21 @@ BIN="$SRC_DIR/bin/aihub"
 
 echo "控制台： http://127.0.0.1:8801/（-port 可改）"
 
-# systemd 服务不继承当前 shell 的环境，这里把会影响代理行为的变量显式带进去：
-# 代理（国际线路要 VPN/代理出网）、数据根、凭据目录覆盖、Zcode 中继开关。
+# systemd 服务不继承当前 shell 的环境，这里把会影响运行时行为的变量显式带进去：
+# 代理（国际线路要 VPN/代理出网）、数据根、凭据目录覆盖、Zcode 中继开关，
+# 以及几个「排障才用」的开关（2026-10-31 补：此前它们根本透不进来，
+# 设了也不生效，只能靠改代码默认值）。
+#   AIHUB_CHANNEL_RETRY=N     重建渠道拦截（11128）重试，N 上限 3（默认不重试）
+#   AIHUB_NO_CHANNEL_RETRY=1  强制关闭上述重试（优先级更高）
+#   AIHUB_KEEP_DUMPS=1        保留全部失败样本（默认只留最近 3 份）
+#   AIHUB_TRAE_IDLE_SECS=N    Trae 流式空闲看门狗阈值
+#   AIHUB_TRAE_EFFORT=low     Trae 思考档位覆盖（默认不注入，保持上游默认）
 ENVS=()
 for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy \
 	AIHUB_ROOT WORKBUDDY_AUTH_DIR TRAE_USER_DATA_DIR QODER_APP_DATA \
-	ZCODE_RELAY_URL ZCODE_RELAY_KEY; do
+	ZCODE_RELAY_URL ZCODE_RELAY_KEY \
+	AIHUB_CHANNEL_RETRY AIHUB_NO_CHANNEL_RETRY AIHUB_KEEP_DUMPS \
+	AIHUB_TRAE_IDLE_SECS AIHUB_TRAE_EFFORT; do
 	if [ -n "${!v:-}" ]; then ENVS+=(--setenv="$v=${!v}"); fi
 done
 [ ${#ENVS[@]} -gt 0 ] && echo "带入环境变量：${ENVS[*]#--setenv=}"

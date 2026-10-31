@@ -361,6 +361,27 @@
 
   .foot-hint { font-size:11.5px; color:var(--faint); text-align:center; padding:6px 0 2px; }
 
+  /* 限流冷却徽章 + 最近失败 + 日志弹层（2026-10-31） */
+  .tile-cool { display:none; font-size:11.5px; font-weight:650; color:#c77700;
+               background:rgba(199,119,0,.12); border-radius:8px; padding:3px 8px; margin:2px 0 6px; }
+  .tile-cool.on { display:block; }
+  .tile-fail { display:none; font-size:11.5px; color:var(--muted); margin:2px 0 6px;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+  .tile-fail.on { display:block; }
+  .tile-fail:hover { color:var(--err); }
+  /* .modal-mask 自带 display:flex，会盖过 hidden 属性的 UA 样式（display:none），
+     所以必须显式补一条 [hidden] —— 否则日志弹层一进页面就敞着。 */
+  .modal-mask[hidden] { display:none; }
+  .modal-mask { position:fixed; inset:0; background:rgba(12,16,24,.55); z-index:60;
+                display:flex; align-items:center; justify-content:center; padding:24px; }
+  .modal { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+           box-shadow:0 12px 40px rgba(16,24,40,.18); width:min(920px,100%);
+           max-height:min(78vh,720px); display:flex; flex-direction:column; overflow:hidden; }
+  .modal-head { display:flex; align-items:center; gap:8px; padding:10px 14px;
+                border-bottom:1px solid var(--line2); font-size:13px; }
+  .modal pre { margin:0; padding:12px 14px; overflow:auto; font-family:var(--mono);
+               font-size:11.5px; line-height:1.55; color:var(--txt); white-space:pre-wrap; }
+
   @media (prefers-color-scheme: dark) {
     :root {
       --bg:#101318; --card:#171b22; --line:#262c36; --line2:#20252e;
@@ -390,6 +411,8 @@
     .line-row:hover { background:#20252e; }
     .hero-gw { border-top-color:#262c36; }
     #toast .toast-item { background:#22262d; }
+    .modal { background:#181c23; border-color:#262c36; }
+    .tile-cool { color:#e0a94a; background:rgba(224,169,74,.14); }
   }
 </style>
 </head>
@@ -605,6 +628,19 @@
 
 <div id="toast"></div>
 
+<!-- 日志弹层（2026-10-31）：点线路卡片上的「日志」打开，读 /api/logs/tail -->
+<div id="log-mask" class="modal-mask" hidden onclick="if (event.target === this) closeLog()">
+  <div class="modal">
+    <div class="modal-head">
+      <b id="log-title">日志</b>
+      <span class="spacer"></span>
+      <button class="text" onclick="refreshLog()">刷新</button>
+      <button class="text" onclick="closeLog()">关闭</button>
+    </div>
+    <pre id="log-body">—</pre>
+  </div>
+</div>
+
 <script>
 // quota:true = 这条线路有「账号额度」可查（后端 creditKeys 里就有它）。
 // OpenCode 免费档走匿名公开凭据（Bearer public），上游没有账号额度这回事；
@@ -647,6 +683,132 @@ function showMsg(text, err) {
   setTimeout(function () { item.remove(); }, err ? 8000 : 5000);
 }
 
+// ---------- 限流看板 / 最近失败 / 日志弹层（2026-10-31） ----------
+// 数据来源：/api/limits（限流台账快照）与 /api/logs/tail（白名单只读）。
+// 这两个接口都是只读的，取不到时只是这块不显示，绝不影响主状态轮询。
+let limits = [];        // [{name,kind,code,reason,hits,until,remain,model?}]
+let failures = {};      // 线路 key -> 最近一条含 ✗ 的日志行
+let lastLimitsAt = 0;
+let lastFailuresAt = 0;
+let logKey = '';
+
+async function loadLimits(force) {
+  const now = Date.now();
+  if (!force && now - lastLimitsAt < 8000) return; // 8 秒内不重复拉
+  lastLimitsAt = now;
+  try {
+    const r = await fetch('/api/limits', { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    limits = (d && d.limits) || [];
+    renderLimits();
+    renderOverview();
+  } catch (e) { /* 看板取不到不影响主状态 */ }
+}
+
+// 冷却归属：后端台账记的是账号昵称/模型名，没有线路字段，
+// 所以按「当前凭证名 or 线路昵称」做包含匹配做近似归属。
+function coolFor(key) {
+  const svc = SERVICES.find(function (s) { return s.key === key; }) || {};
+  // 三个候选：当前选中的凭证名、线路账号昵称、线路显示名（台账里记的就是这些）
+  const cands = [
+    (state && state[key + '_cred']) || '',
+    nicks[key] || '',
+    svc.name || ''
+  ].filter(function (x) { return !!x; });
+  return limits.filter(function (l) {
+    const hay = (l.name || '') + ' ' + (l.model || '');
+    if (cands.some(function (c) { return hay.indexOf(c) >= 0; })) return true;
+    // 兜底：台账里直接写了线路 key（脚本或手工写入的记录常见）
+    return (l.name || '').toLowerCase() === key;
+  });
+}
+
+function coolTip(l) {
+  return (l.name || '账号') + (l.model ? ' / ' + l.model : '') +
+    '：' + (l.reason || '限流') + '（' + (l.remain || '—') +
+    '，命中 ' + (l.hits || 0) + ' 次' + (l.code ? '，码 ' + l.code : '') + '）';
+}
+
+function renderLimits() {
+  SERVICES.forEach(function (s) {
+    const el = document.getElementById('scool-' + s.key);
+    if (!el) return;
+    const list = coolFor(s.key);
+    if (!list.length) { el.className = 'tile-cool'; el.textContent = ''; el.title = ''; return; }
+    const f = list[0];
+    el.className = 'tile-cool on';
+    el.textContent = '⚠ 限流冷却 · ' + (f.remain || '—') +
+      (f.model ? ' · ' + f.model : '') + (f.reason ? ' · ' + f.reason : '');
+    el.title = list.map(coolTip).join('\n');
+  });
+}
+
+// 最近失败：每 30 秒拉一次各线路日志尾部，取最后一条带 ✗ 的行。
+async function loadFailures(force) {
+  const now = Date.now();
+  if (!force && now - lastFailuresAt < 30000) return;
+  lastFailuresAt = now;
+  await Promise.all(SERVICES.map(async function (s) {
+    try {
+      const r = await fetch('/api/logs/tail?file=' + s.key + '&lines=120',
+        { signal: AbortSignal.timeout(5000) });
+      const d = await r.json();
+      const tail = (d && d.tail) || [];
+      let last = '';
+      for (let i = tail.length - 1; i >= 0; i--) {
+        if (tail[i].indexOf('✗') >= 0) { last = tail[i]; break; }
+      }
+      failures[s.key] = last;
+    } catch (e) { /* 单条线路读不到就跳过 */ }
+  }));
+  renderFailures();
+}
+
+function renderFailures() {
+  SERVICES.forEach(function (s) {
+    const el = document.getElementById('sfail-' + s.key);
+    if (!el) return;
+    const line = failures[s.key] || '';
+    if (!line) { el.className = 'tile-fail'; el.textContent = ''; el.title = ''; return; }
+    // 日志行前面带时间戳，去掉一部分让卡片不至于太长
+    const short = line.length > 78 ? line.slice(0, 78) + '…' : line;
+    el.className = 'tile-fail on';
+    el.textContent = '最近失败：' + short;
+    el.title = line + '\n（点这里看完整日志）';
+    el.onclick = function () { openLog(s.key); };
+  });
+}
+
+async function openLog(key) {
+  logKey = key;
+  const name = (SERVICES.find(function (s) { return s.key === key; }) || {}).name || key;
+  document.getElementById('log-title').textContent = name + ' · 日志';
+  document.getElementById('log-body').textContent = '读取中…';
+  document.getElementById('log-mask').hidden = false;
+  await refreshLog();
+}
+
+async function refreshLog() {
+  if (!logKey) return;
+  const body = document.getElementById('log-body');
+  try {
+    const r = await fetch('/api/logs/tail?file=' + logKey + '&lines=200',
+      { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    if (!d.ok) { body.textContent = (d.msg || '读不到日志') + '\n' + (d.path || ''); return; }
+    const tail = d.tail || [];
+    body.textContent = tail.length ? tail.join('\n') : '（日志为空）';
+    body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    body.textContent = '请求失败：' + e;
+  }
+}
+
+function closeLog() {
+  document.getElementById('log-mask').hidden = true;
+  logKey = '';
+}
+
 // ---------- 页面切换 ----------
 const PAGE_TITLES = { dash:'总览', lines:'线路与凭证', models:'模型', usage:'用量', settings:'设置' };
 function switchPage(name) {
@@ -656,7 +818,9 @@ function switchPage(name) {
     b.classList.toggle('active', b.dataset.page === name);
   });
   document.getElementById('page-title').textContent = PAGE_TITLES[name] || '';
-  if (name === 'lines') loadCredStatus(false);
+  // 地址栏带 #lines 这种锚点：刷新/分享能停在同一页（也方便自动化截图）
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  if (name === 'lines') { loadCredStatus(false); loadFailures(false); }
   if (name === 'usage') loadUsage();
   if (name === 'settings') { renderClients(); loadCtx(); }
 }
@@ -684,6 +848,7 @@ async function refresh() {
     const r = await fetch('/api/status', { signal: AbortSignal.timeout(5000) });
     state = await r.json();
     render();
+    loadLimits(false); // 限流看板：只读快照，8 秒节流
   } catch (e) { /* 控制台连接中断：保留旧画面 */ }
 }
 async function refreshNick() {
@@ -752,6 +917,17 @@ function renderOverview() {
     const k = x.key;
     const c = credits && credits[k];
     if (c && c.ok === false && c.text && c.text !== '查询中…') att.push({ name: k, why: '额度查询失败：' + c.text });
+  });
+  // 限流冷却：台账里一条就是「某账号/某模型正在冷却」，直接进「需要关注」，
+  // 并说清剩余时间与命中次数（这是之前界面上完全看不到的信息）。
+  limits.forEach(function (l) {
+    att.push({
+      name: l.name || l.model || '账号',
+      why: '限流冷却 · ' + (l.remain || '—') +
+        (l.model ? ' · ' + l.model : '') +
+        (l.reason ? ' · ' + l.reason : '') +
+        '（命中 ' + (l.hits || 0) + ' 次' + (l.code ? '，码 ' + l.code : '') + '）'
+    });
   });
   const box = document.getElementById('attention');
   if (!att.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
@@ -913,6 +1089,8 @@ function svcTile(s) {
     '<div class="tile-body">' +
     (s.risk ? '<div class="tile-risk-note">' + s.risk + '</div>' : '') +
     '<div class="tile-acct off" id="sacct-' + s.key + '">—</div>' +
+    '<div class="tile-cool" id="scool-' + s.key + '"></div>' +
+    '<div class="tile-fail" id="sfail-' + s.key + '"></div>' +
     credSum +
     (s.quota ? '<div class="tile-credit"><span id="credit-' + s.key + '">额度 —</span>' +
       '<button class="credit-ref text" onclick="refreshQuota(\'' + s.key + '\')">刷新额度</button></div>' : '') +
@@ -921,6 +1099,7 @@ function svcTile(s) {
     '<button id="tile-primary-' + s.key + '" class="sm" onclick="act(\'' + s.key + '/start\')">启用</button>' +
     '<span class="spacer"></span>' +
     (s.cred ? '<button class="text" onclick="act(\'' + s.key + '/switch\')">换凭证并重启</button>' : '') +
+    '<button class="text" onclick="openLog(\'' + s.key + '\')">日志</button>' +
     (s.key === 'intl' || s.key === 'dom' ? '<span class="golink" onclick="gotoModels(\'' + s.key + '\')">在模型页查看线路模型 →</span>' : '') +
     '</div></div></div>';
 }
@@ -970,6 +1149,9 @@ function updateLineTiles() {
       el.className = '';
     }
   });
+  // 冷却徽章与最近失败行跟着主轮询一起刷新（数据本身是别的接口给的）
+  renderLimits();
+  renderFailures();
 }
 function setLineFilter(f) {
   lineFilter = f;
@@ -1705,6 +1887,9 @@ function niceMax(v) {
 }
 
 // ---------- 启动 ----------
+// 地址栏锚点（#lines / #usage …）优先：刷新后仍停在同一页。
+const startPage = (location.hash || '').replace('#', '');
+if (startPage && PAGE_TITLES[startPage]) switchPage(startPage);
 ensureLineTiles();
 render();
 refresh();

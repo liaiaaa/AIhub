@@ -397,19 +397,67 @@ func isQuotaSignal(code int, msg string) bool {
 // channelBlockCode 渠道校验拦截的业务码。
 const channelBlockCode = 11128
 
-// channelBlockRetries 最多重试次数（原始 1 次 + 这里 3 次 = 4 次请求）。
-const channelBlockRetries = 3
+// channelBlockRetriesDefault 默认**不**在 hub 内静默重试。
+//
+// 2026-10-21 曾设 3（一次客户端请求最多打 4 次上游），依据是上游 displayMsg
+// 自己写「请重新发送」。2026-10-23 上游收紧非官方客户端识别后这个判断要反过来：
+// 11128 不再只是随机误拦，它开始和账号风险挂钩（社区反馈反复命中后账号进入
+// 11140）。在 hub 里把一个可疑请求连打 4 次，等于主动把风险信号放大 4 倍；
+// 而真正的根因（请求指纹 / 身份句）已经由 officialChatHeaders 与
+// sanitizeHarnessPrompt 处理。
+//
+// 确需旧行为时用 AIHUB_CHANNEL_RETRY=N 显式打开（上限 3）；
+// AIHUB_NO_CHANNEL_RETRY=1 仍然强制关闭。
+const channelBlockRetriesDefault = 0
+const channelBlockRetriesMax = 3
+
+// channelBlockRetryEnv 覆盖默认重试次数。
+const channelBlockRetryEnv = "AIHUB_CHANNEL_RETRY"
+
+// channelBlockRetries 当前生效的重试次数。
+func channelBlockRetries() int {
+	if channelBlockDisabled() {
+		return 0
+	}
+	v := strings.TrimSpace(os.Getenv(channelBlockRetryEnv))
+	if v == "" {
+		return channelBlockRetriesDefault
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return channelBlockRetriesDefault
+	}
+	if n > channelBlockRetriesMax {
+		n = channelBlockRetriesMax
+	}
+	return n
+}
 
 // channelBlockWait 第 n 次重试前的等待：1.5s / 3s / 4.5s。
 func channelBlockWait(attempt int) time.Duration {
 	return time.Duration(attempt) * 1500 * time.Millisecond
 }
 
-// channelBlockDisabled 环境变量关闭开关（设为 1 即退回原样透传）。
+// channelBlockDisabled 环境变量关闭开关（设为 1 即强制不重试）。
 const channelBlockDisabledEnv = "AIHUB_NO_CHANNEL_RETRY"
 
 func channelBlockDisabled() bool {
 	return strings.TrimSpace(os.Getenv(channelBlockDisabledEnv)) == "1"
+}
+
+// markChannelBlock 把这次 11128 记进渠道拦截窗口；累计到阈值就开账号闸门。
+// 返回闸门截止时刻与是否已开闸门。记录失败不影响请求本身。
+func markChannelBlock(auth AuthProvider) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	sum, err := auth.Summary()
+	if err != nil {
+		return time.Time{}, false
+	}
+	uid, _ := sum["uid"].(string)
+	nick, _ := sum["nickname"].(string)
+	return rateLimitRecordChannel(uid, nick)
 }
 
 // isChannelBlockBody 判断响应体是不是 11128 渠道拦截。
@@ -435,9 +483,10 @@ func isChannelBlockBody(status int, body []byte) bool {
 // 状态码非 200 的分支），所以重试安全。若 11128 出现在 200 之后的 SSE 帧里
 // （intl 2026-10-16 踩过这种形态），本函数管不到，由上层错误帧逻辑处理。
 func (p *Proxy) retryChannelBlock(ctx context.Context, client *http.Client, auth AuthProvider, url string, headers map[string]string, payload []byte, logger *FileLogger, rid string, resp *http.Response, err error) (*http.Response, error) {
-	if err != nil || resp == nil || channelBlockDisabled() {
+	if err != nil || resp == nil {
 		return resp, err
 	}
+	retries := channelBlockRetries()
 	for attempt := 1; ; attempt++ {
 		if resp.StatusCode != http.StatusBadRequest {
 			return resp, nil
@@ -451,15 +500,22 @@ func (p *Proxy) retryChannelBlock(ctx context.Context, client *http.Client, auth
 			setRespBody(resp, body)
 			return resp, nil
 		}
-		if attempt > channelBlockRetries {
-			logger.Log("[%s] ✗ 渠道校验拦截（11128）重试 %d 次仍失败 | %s",
-				rid, attempt-1, truncate(string(body), 160))
-			setRespBody(resp, annotateChannelBlockGiveUp(body, attempt-1))
+		if attempt > retries {
+			until, gated := markChannelBlock(auth)
+			if gated {
+				logger.Log("[%s] ✗ 渠道校验拦截（11128）重试 %d 次仍失败；10 分钟内累计 %d 次，"+
+					"账号闸门开到 %s | %s",
+					rid, attempt-1, channelBlockGateHits, rateLimitShortUntil(until), truncate(string(body), 160))
+			} else {
+				logger.Log("[%s] ✗ 渠道校验拦截（11128）重试 %d 次仍失败 | %s",
+					rid, attempt-1, truncate(string(body), 160))
+			}
+			setRespBody(resp, annotateChannelBlockGiveUp(body, attempt-1, gated, until))
 			return resp, nil
 		}
 		wait := channelBlockWait(attempt)
 		logger.Log("[%s] ⏳ 渠道校验拦截（11128），%.1fs 后重试（第 %d/%d 次）",
-			rid, wait.Seconds(), attempt, channelBlockRetries)
+			rid, wait.Seconds(), attempt, retries)
 		if !sleepCtx(ctx, wait) {
 			logger.Log("[%s] ✗ 渠道拦截重试等待中被取消", rid)
 			setRespBody(resp, body)
@@ -479,10 +535,21 @@ func (p *Proxy) retryChannelBlock(ctx context.Context, client *http.Client, auth
 }
 
 // annotateChannelBlockGiveUp 重试也失败时，给客户端一句能行动的说明。
-func annotateChannelBlockGiveUp(body []byte, attempts int) []byte {
-	note := fmt.Sprintf("\n\n[hub] 渠道校验拦截（11128）：已在 hub 内部重试 %d 次仍未通过。"+
-		"这类拦截大多是上游随机风控，隔几分钟再发通常就过；"+
-		"若持续出现，可在控制台换一条线路或换个模型。", attempts)
+func annotateChannelBlockGiveUp(body []byte, attempts int, gated bool, until time.Time) []byte {
+	var note string
+	switch {
+	case gated:
+		note = fmt.Sprintf("\n\n[hub] 渠道校验拦截（11128）：10 分钟内已累计 %d 次，"+
+			"本账号已暂停出站到 %s（本地闸门，上游未给恢复时刻）。"+
+			"请改用其它线路/模型；恢复后若再次命中，说明请求形状仍被识别，需要更新官方客户端版本或换账号。",
+			channelBlockGateHits, rateLimitShortUntil(until))
+	case attempts == 0:
+		note = "\n\n[hub] 渠道校验拦截（11128）：hub 已默认不再静默重试（反复重试会放大风险信号）。" +
+			"请稍后手动重发或改用其它线路；若持续出现，先核对官方客户端版本是否被上游更新。"
+	default:
+		note = fmt.Sprintf("\n\n[hub] 渠道校验拦截（11128）：已在 hub 内部重试 %d 次仍未通过。"+
+			"请改用其它线路，或等几分钟再手动重发。", attempts)
+	}
 	var m map[string]any
 	if json.Unmarshal(body, &m) != nil {
 		return append(body, []byte(note)...)

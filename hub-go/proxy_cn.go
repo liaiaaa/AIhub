@@ -17,7 +17,9 @@ func NewDomProxyDir(dir string) *Proxy {
 		Port:          DomPort,
 		Backend:       "https://copilot.tencent.com",
 		DefaultDomain: "www.codebuddy.cn",
-		UserAgent:     "codebuddy2openai/2.0",
+		// 所有不经 officialChatHeaders 的国内请求（签到 / 探活 / 模型列表探测）
+		// 都必须报官方身份。旧值 codebuddy2openai/2.0 是自报家门的字符串。
+		UserAgent:     officialDomUA(),
 		DefaultModel:  "auto",
 		Models: []string{
 			"space-bunny", "glm-5.3", "glm-5.3-flash",
@@ -33,6 +35,9 @@ func NewDomProxyDir(dir string) *Proxy {
 		// 2026-10-20 23:00 起腾讯给对话网关加了第三方客户端渠道校验（11128），
 		// 整套请求指纹按官方桌面端内置 CLI 对齐，见 officialChatHeaders。
 		OfficialChatClient: true,
+		// 上游对 system 里的「You are … powered by …」身份句做连续子串匹配，
+		// 命中即 11128；转发前替换成中性表述。
+		SanitizeHarness: true,
 		// 客户端没指定思考档位时补最高档（2026-10-08 用户要求，见 default_thinking.go）。
 		// 实测 copilot.tencent.com 对 glm-5.1/glm-5.3/deepseek-v4-flash/minimax-m3-pay/auto
 		// 接受 reasoning_effort=max，不支持的模型会忽略该字段。

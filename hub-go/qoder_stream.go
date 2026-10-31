@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -374,14 +375,58 @@ func qoderMsgContentEmpty(v any) bool {
 	return false
 }
 
+// qoderRetryableStatus 判断该 HTTP 状态是否值得重试。
+// 429/403/401 一律不重试：429=被限流（再打就是放大器）、403=被封/无权限，
+// 401 只在 openInfer 内部「换凭据」路径重试一次。
+// 501/505 是确定性失败（未实现/版本不支持），重试没有意义。
+func qoderRetryableStatus(code int) bool {
+	return code >= 500 && code != http.StatusNotImplemented && code != http.StatusHTTPVersionNotSupported
+}
+
+// qoderMaybeDecompress 兜底：上游无视 Accept-Encoding: identity 仍回 gzip 时，
+// 在进入 SSE 解析前解压（否则拿到的是一堆压缩字节）。
+func qoderMaybeDecompress(resp *http.Response) *http.Response {
+	if resp == nil || resp.Body == nil {
+		return resp
+	}
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
+		return resp
+	}
+	zr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return resp
+	}
+	resp.Body = &qoderGzipBody{zr: zr, c: resp.Body}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	return resp
+}
+
+type qoderGzipBody struct {
+	zr *gzip.Reader
+	c  io.Closer
+}
+
+func (b *qoderGzipBody) Read(p []byte) (int, error) { return b.zr.Read(p) }
+
+func (b *qoderGzipBody) Close() error {
+	err := b.zr.Close()
+	if cerr := b.c.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // openInfer 签名并调用上游，带自愈重试：
-//   - 网络错误 / 5xx：等 700ms 重试（最多 3 次尝试）
-//   - 401：重读桌面端凭据后重签重试（桌面端平时会自动刷新 auth.v1.dat）
+//   - 网络错误 / 可重试 5xx：等 700ms 重试（最多 3 次尝试）
+//   - 401：重读桌面端凭据后重签重试（只重试一次）
+//   - 429/403/501/505：不重试，原样交给上层分类
 //
 // 返回的 resp 由调用方关闭。
 func (p *QoderProxy) openInfer(ctx context.Context, payload []byte) (*http.Response, error) {
 	var resp *http.Response
 	var err error
+	reloaded := false
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			// 2026-10-21 开源审查修：原先直接 time.Sleep，客户端已断开
@@ -408,21 +453,30 @@ func (p *QoderProxy) openInfer(ctx context.Context, payload []byte) (*http.Respo
 			}
 			continue // 网络抖动重试
 		}
+		resp = qoderMaybeDecompress(resp)
 		if resp.StatusCode == http.StatusUnauthorized {
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 			resp.Body.Close()
 			resp = nil
-			if rerr := p.auth.Reload(); rerr != nil && attempt == 2 {
+			if reloaded {
+				return nil, fmt.Errorf("凭据无效（已重读一次仍 401）")
+			}
+			reloaded = true
+			if rerr := p.auth.Reload(); rerr != nil {
 				return nil, fmt.Errorf("凭据已过期且重读失败：%v", rerr)
 			}
-			continue // 换新凭据重试
+			continue // 换新凭据重试一次
 		}
 		if resp.StatusCode >= 500 {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+			code := resp.StatusCode
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 			resp.Body.Close()
 			resp = nil
+			if !qoderRetryableStatus(code) {
+				return nil, fmt.Errorf("上游 %d（不重试）：%s", code, truncate(string(b), 300))
+			}
 			if attempt == 2 {
-				return nil, fmt.Errorf("上游持续 5xx")
+				return nil, fmt.Errorf("上游持续 %d（已重试 2 次）：%s", code, truncate(string(b), 300))
 			}
 			continue
 		}
@@ -490,6 +544,29 @@ func decisiveFirstFrame(head []byte) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// qoderFatalFirstFrame 判断首帧错误是否属于「重试无用」的确定性失败。
+// 实际帧里的 code 是字符串（"110"），数字形态也兼容：
+//
+//	110 = 额度耗尽（Billing daily count exceeded）
+//	101 = 签名无效（重试只会暴露更多）
+//	418 = 内容审查
+//	406 = Session blocked
+//
+// 这些重试 2 次毫无意义，只会让上游多记两笔失败请求。
+func qoderFatalFirstFrame(data string) bool {
+	var probe struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if json.Unmarshal([]byte(data), &probe) != nil || len(probe.Code) == 0 {
+		return false
+	}
+	switch strings.Trim(strings.TrimSpace(string(probe.Code)), `"`) {
+	case "110", "101", "418", "406":
+		return true
+	}
+	return false
 }
 
 // openInferValidated 在 openInfer 之上多做两层首帧错误处理：
@@ -577,6 +654,14 @@ func (p *QoderProxy) openInferValidated(ctx context.Context, payload []byte, log
 				}
 				return nil, &qoderQueueError{Info: qi, Waited: queueWait}
 			}
+			if qoderFatalFirstFrame(data) {
+				// 确定性失败：重试只会让上游多记失败笔数，直接透传给客户端。
+				if log != nil {
+					log.Log("[%s] ✗ 上游确定性失败(不重试): %s", rid, truncate(data, 2000))
+				}
+				resp.Body = &qBodyReader{r: br, c: resp.Body}
+				return resp, nil
+			}
 			if providerErrs < 2 {
 				resp.Body.Close()
 				if log != nil {
@@ -637,7 +722,7 @@ func qoderDumpFailedPayload(rid string, payload []byte, log *FileLogger) {
 		return
 	}
 	dumpPath := dataPath("qoder-dump-" + rid + "-upstream.json")
-	if err := os.WriteFile(dumpPath, payload, 0644); err == nil {
+	if err := os.WriteFile(dumpPath, payload, 0600); err == nil {
 		log.Log("[%s] ⚠ 已 dump 失败载荷: %s (%dKB)，可重放定位", rid, dumpPath, len(payload)/1024)
 		qoderPruneDumps(log)
 	}

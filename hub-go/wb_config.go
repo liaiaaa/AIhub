@@ -123,17 +123,20 @@ func wbCatalogPath(line string) string { return dataPath("wb_catalog_" + line + 
 // 调用方是 CLI 客户端，才下发带计价字段的那份目录。国际线路继续用 WorkBuddy/<版本>。
 func wbCatalogUA(line string) string {
 	if line == "dom" {
-		return "CLI/" + wbCatalogCLIVersion + " CodeBuddy/" + wbCatalogCLIVersion
+		return officialCLICodeBuddyUA()
 	}
 	return "WorkBuddy/" + wbCatalogVersion
 }
 
-const wbCatalogVersion = "5.7.6"
+// wbCatalogVersion 国际目录接口的桌面端版本号。
+// 2026-10-25 起不再自带字面量，统一取官方常量——旧值 5.7.6 与对话路径的
+// 5.8.4 不一致，等于在目录接口上自报一个不存在的客户端版本。
+const wbCatalogVersion = officialIntlWBVersion
 
 // wbCatalogCLIVersion 国内目录接口要求的 CLI 身份版本号。
-// 与 dsh-workbuddy-bridge 插件实测一致（其 CLIENT_UA 常量）。
-// 上游对版本号本身不敏感，敏感的是「CLI/... CodeBuddy/...」这个形状。
-const wbCatalogCLIVersion = "2.63.2"
+// 上游对版本号本身不敏感、敏感的是「CLI/... CodeBuddy/...」这个形状，
+// 但版本串必须与对话路径一致（旧值 2.63.2 与官方的 2.161.0 对不上）。
+const wbCatalogCLIVersion = officialCLIVersion
 
 // 上游 credits 文案形态："x0.79 credits" / "x0.00" / "0.79"。
 var wbCreditsRe = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)`)

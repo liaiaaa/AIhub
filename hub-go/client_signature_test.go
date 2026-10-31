@@ -32,16 +32,61 @@ func TestSanitizeRemovesDshSignature(t *testing.T) {
 	if strings.Contains(got, "DeepSeek Harness") {
 		t.Errorf("签名没清掉：%q", got)
 	}
-	if !strings.HasPrefix(got, "You are an AI agent.") {
-		t.Errorf("应替换成中性表述，实际开头：%q", got[:40])
+	// 2026-10-25：第二句「coding agent powered by …」也是上游判据，必须一起清。
+	if strings.Contains(strings.ToLower(got), "coding agent powered by") {
+		t.Errorf("coding agent 身份句没清掉：%q", got)
+	}
+	if !strings.HasPrefix(got, harnessNeutralIdentity) {
+		t.Errorf("应替换成中性表述，实际开头：%q", got[:min(40, len(got))])
 	}
 	// 功能性内容必须原样保留 —— 改写提示词会改变模型行为
-	if !strings.Contains(got, "dom.step-5-preview") || !strings.Contains(got, "Agent Teams is available") {
+	if !strings.Contains(got, "Agent Teams is available") {
 		t.Errorf("功能性内容被破坏：%q", got)
 	}
 	// 其它消息不动
 	if out[1].(map[string]any)["content"] != "hi" {
 		t.Error("user 消息不该被改")
+	}
+}
+
+// 身份句的六种已知写法都要清掉（大小写不敏感），且不能误伤普通句子。
+// 判据来自社区实现与本地真实失败 dump：动词可换、名词可省略、产品名可不带冠词。
+func TestSanitizeIdentitySentenceTable(t *testing.T) {
+	cases := []struct{ name, in, mustNot string }{
+		{"dsh 开场白", dshSignature, "DeepSeek Harness"},
+		{"coding agent + 模型名", "You are a coding agent powered by the deepseek-v4.1-flash model.", "powered by"},
+		{"小写变体", "you are an ai agent powered by deepseek harness.", "deepseek"},
+		{"built on", "You are an AI assistant built on DeepSeek.", "built on"},
+		{"created by", "You are a helpful assistant created by Tencent.", "created by"},
+		{"产品名无冠词", "You are WorkBuddy Agent, built by Tencent.", "built by"},
+		{"省略名词", "You are powered by deepseek-v4.1-flash.", "powered by"},
+	}
+	for _, c := range cases {
+		got := sanitizeHarnessPrompt(c.in)
+		if strings.Contains(strings.ToLower(got), strings.ToLower(c.mustNot)) {
+			t.Errorf("%s：没清掉 %q，得到 %q", c.name, c.mustNot, got)
+		}
+		if !strings.Contains(got, harnessNeutralIdentity) {
+			t.Errorf("%s：应替换成中性表述，得到 %q", c.name, got)
+		}
+	}
+
+	// 不能误伤：没有「身份句 + 品牌」结构的普通句子必须原样返回
+	safe := []string{
+		"You are a helpful assistant.",
+		"You are free to use tools built by other agents.",
+		"Users are humans. They are powered by coffee.",
+	}
+	for _, s := range safe {
+		if got := sanitizeHarnessPrompt(s); got != s {
+			t.Errorf("误伤了普通句子：%q → %q", s, got)
+		}
+	}
+
+	// 幂等：清洗过的文本再清洗不变（否则重试/多路径清洗会反复改）
+	once := sanitizeHarnessPrompt(dshSignature)
+	if twice := sanitizeHarnessPrompt(once); twice != once {
+		t.Errorf("清洗不幂等：%q → %q", once, twice)
 	}
 }
 
@@ -100,7 +145,7 @@ func TestSanitizeCoversBothKnownRules(t *testing.T) {
 	if strings.Contains(got, "DeepSeek Harness") {
 		t.Errorf("dsh 签名没清掉：%q", got)
 	}
-	if got != "You are an AI agent." {
+	if got != harnessNeutralIdentity {
 		t.Errorf("应替换成中性表述，实际：%q", got)
 	}
 	// 正常内容不能被误伤

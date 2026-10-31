@@ -22,8 +22,6 @@ package main
 
 import (
 	"bytes"
-	"sync/atomic"
-	"encoding/binary"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -32,6 +30,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -41,6 +40,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -295,12 +295,13 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 		binary.BigEndian.PutUint64(ridBytes[8:], uint64(qoderRidSeq.Add(1)))
 	}
 	requestID := hex.EncodeToString(ridBytes)
+	id := currentQoderIdentity()
 	payloadBytes, _ := json.Marshal(map[string]string{
 		"version":     "v1",
 		"requestId":   requestID,
 		"info":        infoB64,
 		"cosyVersion": "1.0.0",
-		"ideVersion":  "0.3.4",
+		"ideVersion":  id.Version,
 	})
 	payloadB64 := base64.StdEncoding.EncodeToString(payloadBytes)
 
@@ -328,17 +329,37 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 	hash := md5.Sum([]byte(signStr))
 
 	headers := map[string]string{
-		"Accept":          "text/event-stream, application/json",
+		"Accept":          id.Accept,
 		"Content-Type":    "application/json",
 		"Authorization":   fmt.Sprintf("Bearer COSY.%s.%s", payloadB64, hex.EncodeToString(hash[:])),
 		"Cosy-User":       creds.User.ID,
 		"Cosy-Key":        keyB64,
 		"Cosy-Date":       fmt.Sprintf("%d", ts),
-		"Cosy-ClientType": "0",
-		"Cosy-Version":    "1.0.0",
+		"Cosy-ClientType": id.ClientType,
+		"Cosy-Version":    id.CosyVersion,
 		"X-Request-Id":    requestID,
-		"X-IDE-Platform":  "Qoder",
-		"X-Version":       "0.3.4",
+		"X-IDE-Platform":  id.IDEPlatform,
+		"X-Version":       id.Version,
+	}
+	if id.UserAgent != "" {
+		headers["User-Agent"] = id.UserAgent
+	}
+	if id.AcceptEnc != "" {
+		headers["Accept-Encoding"] = id.AcceptEnc
+	}
+	if id.AcceptLang != "" {
+		headers["Accept-Language"] = id.AcceptLang
+	}
+	if id.Product != "" {
+		headers["Cosy-Business-Product"] = id.Product
+	}
+	if id.SendMachineOS {
+		headers["Cosy-MachineOS"] = qoderMachineOS()
+	}
+	if id.SendHostname {
+		if h, err := os.Hostname(); err == nil && h != "" {
+			headers["Cosy-MachineHostname"] = h
+		}
 	}
 	if machineID != "" {
 		headers["Cosy-MachineId"] = machineID

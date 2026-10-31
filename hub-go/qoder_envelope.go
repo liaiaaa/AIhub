@@ -16,7 +16,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -36,14 +38,70 @@ func qoderUUID() string {
 }
 
 // qoderSessionID 会话 id：用户维度的稳定前缀 + 每请求随机段。
-// 官方客户端用它聚合 Credits 面板的单次运行消耗；代理无真实会话状态，
-// 采用插件在「无会话」路径的等价做法（每请求新 id）。
+// 有租约时外层直接用租约里的值，这个随机段只在无租约（测试/兼容）路径生效。
 func qoderSessionID(uid string) string {
 	h := sha256.New()
 	h.Write([]byte("qoder-session"))
 	h.Write([]byte{0})
 	h.Write([]byte(uid))
 	return hex.EncodeToString(h.Sum(nil)[:8]) + "-" + qoderUUID()
+}
+
+// qoderSessionLease 一次「真实对话」的身份三元组，TTL 内复用。
+// 官方客户端在一个 run 内 requestSetId 稳定、session_id 整段对话复用；
+// 此前 hub 每请求新建，等于每请求开一个新会话（风控信号「批量建会话」）。
+type qoderSessionLease struct {
+	SessionID    string
+	RequestSetID string
+	BusinessID   string
+	lastSeen     time.Time
+}
+
+// qoderSessionLeaseTTL 租约有效期：超过则视为新对话（重新建会话）。
+const qoderSessionLeaseTTL = 30 * time.Minute
+
+// qoderLeaseKey 推导租约 key。
+// 优先用客户端显式会话标识（header X-Session-Id / body conversation_id）；
+// 否则用 system + 前 2 条消息的摘要——同一段对话的头部稳定，新对话则不同。
+// 最后一条 user 每轮都在变，绝不能拿来当 key。
+func qoderLeaseKey(clientKey string, msgs []any) string {
+	if k := strings.TrimSpace(clientKey); k != "" {
+		return "client:" + k
+	}
+	h := sha256.New()
+	h.Write([]byte("qoder-lease"))
+	h.Write([]byte{0})
+	if sys, ok := firstSystemSnippet(msgs); ok {
+		h.Write([]byte(sys))
+	}
+	h.Write([]byte{0})
+	for i, m := range msgs {
+		if i >= 2 {
+			break
+		}
+		b, _ := json.Marshal(m)
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	return "msgs:" + hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+// qoderBusinessName 官方 business.name 截 10 字符（sAa()），不带省略号。
+//
+// 这里单独去掉 ACP 标注标签，与 sanitizeHarnessMessages 是否清洗无关：
+// business.name 只截 10 字符，若带着 "<acp tokens=…" 前缀会被截成
+// "<acp token" 这种一眼假的名字（Credits 面板上直接可见）。
+// 注意 messages 里的 ACP 标签按用户 2026-10-27 的决定**保留不动**——
+// 那是 dsh 的消息引用编号，清掉会让模型无法按编号定位历史消息。
+func qoderBusinessName(s string) string {
+	s = sanitizeACPTags(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) > 10 {
+		r = r[:10]
+	}
+	return string(r)
 }
 
 // qoderLastUserText 取最后一条 user 消息的纯文本（多段 content 取 text 部分拼接）。
@@ -127,7 +185,7 @@ func qoderEffortToWire(spec qoderThinkingSpec, entry *qoderModelEntry) (effort s
 // max_tokens 等）不整体透传——官方信封字段是白名单形态，多余字段属于网关
 // 兜底才容忍的噪音；messages/tools 原样带入（含客户端回传的
 // reasoning_content，等价插件的 preserveThinking=true）。
-func qoderEnvelope(messages []any, tools any, modelKey, uid string, spec qoderThinkingSpec, entry *qoderModelEntry, raw map[string]any) map[string]any {
+func qoderEnvelope(messages []any, tools any, modelKey, uid string, spec qoderThinkingSpec, entry *qoderModelEntry, raw map[string]any, lease *qoderSessionLease) map[string]any {
 	effort, isReasoning := qoderEffortToWire(spec, entry)
 	maxTokens := qoderClientMaxTokens(raw, entry)
 
@@ -139,22 +197,36 @@ func qoderEnvelope(messages []any, tools any, modelKey, uid string, spec qoderTh
 	lastUser := qoderLastUserText(messages)
 	requestID := qoderUUID()
 
+	id := currentQoderIdentity()
+	sessionID := qoderSessionID(uid)
+	requestSetID := "qoder-request-" + qoderUUID()
+	businessID := qoderUUID()
+	if lease != nil {
+		if lease.SessionID != "" {
+			sessionID = lease.SessionID
+		}
+		if lease.RequestSetID != "" {
+			requestSetID = lease.RequestSetID
+		}
+		if lease.BusinessID != "" {
+			businessID = lease.BusinessID
+		}
+	}
+
 	env := map[string]any{
 		"request_id":       requestID,
-		"request_set_id":   "qoder-request-" + qoderUUID(),
+		"request_set_id":   requestSetID,
 		"chat_record_id":   requestID,
-		"session_id":       qoderSessionID(uid),
+		"session_id":       sessionID,
 		"stream":           true,
 		"chat_task":        "FREE_INPUT",
 		"is_reply":         true,
 		"is_retry":         false,
 		"source":           1,
 		"version":          "3",
-		"session_type":     "qodercli",
+		"session_type":     id.SessionType,
 		"agent_id":         "agent_common",
 		"task_id":          "common",
-		"code_language":    "",
-		"chat_prompt":      "",
 		"image_urls":       nil,
 		"aliyun_user_type": "",
 		"system":           "",
@@ -186,13 +258,14 @@ func qoderEnvelope(messages []any, tools any, modelKey, uid string, spec qoderTh
 			return mc
 		}(),
 		"business": map[string]any{
-			"product":  "cli",
-			"version":  "1.0.60",
+			"product":  id.Product,
+			"version":  id.Version,
 			"type":     "agent",
-			"stage":    "start",
-			"id":       qoderUUID(),
-			"name":     truncate(lastUser, 30),
+			"stage":    "init",
+			"id":       businessID,
+			"name":     qoderBusinessName(lastUser),
 			"begin_at": time.Now().UnixMilli(),
+			"end_at":   0,
 		},
 	}
 	if tools != nil {

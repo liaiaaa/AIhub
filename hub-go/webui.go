@@ -228,6 +228,11 @@ const webHTML = `<!DOCTYPE html>
   .tile-head { display:flex; align-items:center; gap:8px; }
   .tile-name { font-weight:650; font-size:13.5px; flex:1;
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 高风险线路（dom）的固定徽章：上游 2026-10-23 收紧非官方客户端识别后，
+     国内反代到 agent 框架是明确高风险，界面必须一眼可见，不能只写在文档里。 */
+  .tile-risk { font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:999px;
+               background:#fdecea; color:#b3261e; border:1px solid #f7c9c4; flex:none; }
+  .tile-risk-note { font-size:11px; color:#b3261e; line-height:1.45; }
   .tile-port { font-size:11px; color:var(--faint); flex:none; }
   .tile-acct { font-size:12px; color:var(--muted); min-height:17px;
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -619,7 +624,7 @@ const webHTML = `<!DOCTYPE html>
 // 加一个点了只会回「未知平台」的按钮，是噪音（用户 2026-10-17 指出）。
 // 两边一致性由 TestServiceQuotaFlagsMatchCreditKeys 钉住。
 const SERVICES = [
-  { key:'dom',   name:'国内 WorkBuddy', cred:true,  quota:true },
+  { key:'dom',   name:'国内 WorkBuddy', cred:true,  quota:true, risk:'上游 10-23 收紧非官方客户端识别：反代到 dsh/Codex 这类 agent 框架是明确高风险，建议只在需要时手动启用，别用主账号。' },
   { key:'intl',  name:'国际 WorkBuddy AI', cred:true,  quota:true },
   { key:'qoder', name:'Qoder CN（阿里）', quota:true },
   { key:'trae',  name:'Trae CN（字节）', quota:true },
@@ -749,6 +754,7 @@ function renderOverview() {
   ['dom','intl'].forEach(function (line) {
     (credStatus[line] || []).forEach(function (c) {
       if (c.state === '风控') att.push({ name: c.name, why: '风控 · 推理被拦，建议换其它凭证' });
+      else if (c.state === '渠道拦截') att.push({ name: c.name, why: '渠道拦截（11128）· 已本地暂停出站，建议改用其它线路' });
       else if (!c.ok && c.until) att.push({ name: c.name, why: (c.state || '') + '：' + credWhy(c) });
     });
   });
@@ -913,9 +919,11 @@ function svcTile(s) {
     '<div class="tile-head" onclick="toggleTileCollapse(\'' + s.key + '\')">' +
     '<span class="dot" id="sdot-' + s.key + '"></span>' +
     '<span class="tile-name">' + s.name + '</span>' +
+    (s.risk ? '<span class="tile-risk" title="' + s.risk + '">高风险·手动</span>' : '') +
     '<span class="tile-port" id="stile-state-' + s.key + '">—</span>' +
     '<span class="fold-arrow">▾</span></div>' +
     '<div class="tile-body">' +
+    (s.risk ? '<div class="tile-risk-note">' + s.risk + '</div>' : '') +
     '<div class="tile-acct off" id="sacct-' + s.key + '">—</div>' +
     credSum +
     (s.quota ? '<div class="tile-credit"><span id="credit-' + s.key + '">额度 —</span>' +
@@ -1049,8 +1057,8 @@ function renderCreds(line) {
     // 设过一次 checked，之后 cur 变了但 sig 没变（或反过来）就会两者不一致。
     const radio = card.querySelector('input[type="radio"]');
     if (radio) radio.checked = (c.name === cur);
-    card.classList.toggle('bad', !c.ok && c.state === '风控');
-    card.classList.toggle('warn', (!c.ok && c.state !== '风控') || (c.ok && c.model_limits && c.model_limits.length));
+    card.classList.toggle('bad', !c.ok && (c.state === '风控' || c.state === '渠道拦截'));
+    card.classList.toggle('warn', (!c.ok && c.state !== '风控' && c.state !== '渠道拦截') || (c.ok && c.model_limits && c.model_limits.length));
     card.title = credTitle(c);
     const badge = card.querySelector('.cred-badge');
     if (badge) { badge.className = 'cred-badge ' + credCls(c); badge.textContent = credBadgeText(c); }
@@ -1078,6 +1086,7 @@ function renderCreds(line) {
 function credCls(c) {
   if (c.ok) return (c.model_limits && c.model_limits.length) ? 'warn' : 'ok';
   if (c.state === '风控') return 'bad';
+  if (c.state === '渠道拦截') return 'bad';
   if (c.state === '限流') return 'warn';
   return '';
 }
@@ -1100,6 +1109,7 @@ function modelLimitsTxt(list) {
 function credBadgeText(c) {
   if (c.ok) return (c.model_limits && c.model_limits.length) ? '可用·模型限流' : '✓ 可用';
   if (c.state === '风控') return '风控';
+  if (c.state === '渠道拦截') return c.until ? '渠道拦截·暂缓到 ' + c.until : '渠道拦截';
   if (c.until && c.upstream_reset) return '限流到 ' + c.until;
   if (c.until) return '限流中';
   return c.state;
@@ -1122,6 +1132,8 @@ function credWhy(c) {
   // 这一句）。数据后端一直有，是前端没显示。
   if (c.ok) return (c.model_limits && c.model_limits.length) ? '模型限流：' + modelLimitsTxt(c.model_limits) : '';
   if (c.state === '风控') return '账号级风控：推理被拦（账号正常），上游未给恢复时刻，建议换其它凭证';
+  if (c.state === '渠道拦截') return '渠道校验拦截（11128）：10 分钟内累计 3 次，已本地暂停出站' +
+    (c.until ? '到 ' + c.until : '') + '；上游未给恢复时刻，请改用其它线路或等闸门放开';
   if (c.until && c.upstream_reset) return '上游称 ' + c.until + ' 恢复' + (c.remain_txt ? '（' + c.remain_txt + '）' : '');
   if (c.until) return '限流中（' + (c.remain_txt || '') + '后本地重试；上游未给恢复时刻）';
   return c.reason || c.state;

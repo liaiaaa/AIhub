@@ -152,7 +152,8 @@ func TestAggDisplayNamePretty(t *testing.T) {
 	cases := []struct{ line, backend, want string }{
 		{"intl", "kimi-k3", "Kimi K3（国际）"},
 		{"intl", "gpt-6-luna", "GPT 6 Luna（国际）"},
-		{"dom", "glm-5.3-flash", "GLM 5.3 Flash（国内）"},
+		// 2026-10-25 起 dom 显示名带高风险前缀（保留可选、但标红）
+		{"dom", "glm-5.3-flash", aggRiskTag + "GLM 5.3 Flash（国内）"},
 		{"qoder", "Qwen3.8-Flash", "Qwen3.8 Flash（Qoder）"},
 		// 未列入的回落 backend 原值
 		{"intl", "some-unknown-model", "some-unknown-model（国际）"},

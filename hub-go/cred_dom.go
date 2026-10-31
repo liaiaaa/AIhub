@@ -109,7 +109,7 @@ func domCreditsRaw(cm *CredentialManager, p *Proxy) (remain, total float64, ok b
 		return -1, -1, false
 	}
 	// billing 域只认 WorkBuddy/<版本> 形态的 UA，送错 UA 回业务码 10085（见 credits.go 顶部证据）。
-	headers["User-Agent"] = "WorkBuddy/5.5.4"
+	headers["User-Agent"] = officialDomBillingUA()
 	headers["X-Product"] = "SaaS"
 	headers["X-IDE-Type"] = "WorkBuddy"
 	_, _, client := p.runtime()
@@ -156,13 +156,20 @@ func domCredStatusOne(name, dir string, selected bool, force bool) intlCredStatu
 		st.OK = false
 		st.Reason = e.Reason
 		st.UpstreamReset = e.HasUpstreamReset()
-		if e.Kind == rlKindAccount {
+		switch e.Kind {
+		case rlKindAccount:
 			st.State = "风控"
+			// 风控（11140）上游从不给恢复时刻：只报"被拦"，不编时间。
 			if st.UpstreamReset {
 				st.Until = rateLimitShortUntil(e.Until)
 				st.RemainTx = rateLimitRemain(e.Until)
 			}
-		} else {
+		case rlKindChannel:
+			// 11128 闸门是本地暂停，上游没给任何时刻；Until 就是本地下次放行的时刻。
+			st.State = "渠道拦截"
+			st.Until = rateLimitShortUntil(e.Until)
+			st.RemainTx = rateLimitRemain(e.Until)
+		default:
 			st.State = "限流"
 			st.Until = rateLimitShortUntil(e.Until)
 			st.RemainTx = rateLimitRemain(e.Until)
@@ -325,7 +332,7 @@ func wbCreditExpiriesFetch(cm *CredentialManager, p *Proxy) []credExpiry {
 	if err != nil {
 		return nil
 	}
-	headers["User-Agent"] = "WorkBuddy/5.5.4"
+	headers["User-Agent"] = officialDomBillingUA()
 	headers["X-Product"] = "SaaS"
 	headers["X-IDE-Type"] = "WorkBuddy"
 	_, _, client := p.runtime()

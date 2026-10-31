@@ -13,12 +13,13 @@ package main
 
 import (
 	"bufio"
-	"sort"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -142,9 +143,8 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	chatBody["model"] = p.mapModel(fmt.Sprintf("%v", raw["model"]))
 	chatBody["messages"] = msgs
-	// 2026-10-21：dom 开了官方客户端伪装时，system 里的第三方客户端签名会被
-	// 上游渠道校验识别（11128）。Codex 走这条 /v1/responses 路径，同样要清洗。
-	if p.OfficialChatClient {
+	// 上游渠道校验会识别 system 里的第三方客户端签名句（11128），两条路径都清。
+	if p.SanitizeHarness {
 		chatBody["messages"] = sanitizeHarnessMessages(msgs)
 	}
 	if tools := responsesToolsToChat(raw["tools"]); tools != nil {
@@ -169,6 +169,10 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	modelName := fmt.Sprintf("%v", chatBody["model"])
 	logger.Log("[%s] ▶ R-REQUEST %s | stream=%v | msgs=%d%s", rid, modelName, clientStream, len(msgs),
 		lastUserSuffix(msgs))
+	// 与 chat 路径同一道冷却闸门（11140 / 11128 / 6004 命中即本地 429）。
+	if p.gateCooling(w, auth, modelName, rid, logger) {
+		return
+	}
 
 	headers, err := auth.Headers()
 	if err != nil {
@@ -217,37 +221,116 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 // sanitizeHarnessPrompt 轻微改写 agent 框架（Codex / dsh 等）注入的
 // developer/system 提示词。
 //
-// WorkBuddy 上游对官方客户端的原始提示词有关键词**组合/密度**风控（11128
-// "Illegal API invocation from an unapproved channel"）：几个词按官方原文
-// 同现才超阈值，任何一个单独出现都不触发。这是识别「第三方 harness」的
-// 手段，与 Anthropic 拦「You are Claude Code」同一类。
+// WorkBuddy 上游对「自报家门的身份句 + 品牌」做**大小写不敏感的连续子串匹配**：
+// 命中的整句会让请求被 11128 / "Illegal API invocation from an unapproved channel"
+// 拦下（社区实现 ardeyouxipianyi/workbuddy2api-hub 2026-10-23 的清洗规则同此）。
 //
-// 两类已实测的规则：
+// 已实测/已收录的句式（同一判据，动词可换）：
 //
-//  1. 2026-10-10（Codex）：OpenAI / Codex CLI / coding agent 同现即触发。
-//     把 "OpenAI" 写成 "Open AI" 就降到阈值以下（对完整捕获的 codex exec
-//     请求体验证通过）。
+//	You are an AI agent powered by DeepSeek Harness.
+//	You are a coding agent powered by the deepseek-v4.1-flash model.
+//	You are an AI assistant built on DeepSeek.
+//	You are <产品> Agent, built by <厂商>.
+//	（名词可省略）You are powered by <品牌>.
 //
-//  2. 2026-10-21（dsh）：`You are an AI agent powered by DeepSeek Harness.`
-//     这个完整开场白触发。同一份真实失败 dump 重复采样的稳定结果：
-//     原 system → 拦截 3/3；只留该句（48 字符）→ 拦截 3/3；
-//     去掉该句 → 通过 2/2；「You are an AI agent.」→ 通过 2/2；
-//     「You are an AI agent powered by X.」→ 通过 2/2；
-//     「You are a helpful assistant powered by DeepSeek Harness.」→ 通过 2/2。
-//     即需要**完整短语**，换成最朴素的「You are an AI agent.」即可。
+// 处理方式：整句替换成中性的「You are a helpful AI assistant.」——不依赖具体
+// 品牌，也不保留「由谁造」这一层语义。2026-10-21 曾只替换第一句、刻意保留
+// 「You are a coding agent powered by …」承载产品信息，2026-10-25 复核后放弃：
+// 那句本身就在上游的判据里，保留它等于留一个已知会触发的指纹。
 //
 // 只改 developer/system 文本，用户消息与工具输出原样透传——改写用户内容
 // 既越权，也会弄脏模型看到的代码。
 func sanitizeHarnessPrompt(s string) string {
 	s = strings.ReplaceAll(s, "OpenAI", "Open AI")
-	// 下游还有一段「You are a coding agent powered by the <model> model.」
-	// 承载产品信息，所以这里换成最朴素的表述不丢语义。
-	s = strings.ReplaceAll(s, "You are an AI agent powered by DeepSeek Harness.", "You are an AI agent.")
+	s = harnessIdentityRe.ReplaceAllString(s, harnessNeutralIdentity)
+	s = harnessPoweredByRe.ReplaceAllString(s, harnessNeutralIdentity)
+	// 2026-10-31：旧正则只认「You are … powered by …」结构，dsh 还会注入下面两段，
+	// 它们不带 powered by，旧正则一条都匹配不到（见 neutralizeFileReferenceAnchor）。
+	s = neutralizeFileReferenceAnchor(s)
+	s = webSurfaceRe.ReplaceAllString(s, webSurfaceSafe)
+	s = webURLRe.ReplaceAllString(s, webURLSafe)
+	// 兜底放在最后：上面两句整句替换后，残留的品牌连写也要拆开。
+	s = harnessBrandRe.ReplaceAllString(s, harnessBrandSafe)
 	return s
 }
 
-// sanitizeHarnessMessages 对一组 chat messages 做 sanitizeHarnessPrompt：
-// 只处理 role=system 的字符串 content，其余原样返回。
+const harnessNeutralIdentity = "You are a helpful AI assistant."
+
+// harnessFileReferencePrompt 是 dsh 内核 @deepseek-ai/dsh-file-reference 注入的
+// 整段原文（逐字取自真实 system prompt）。上游对段内字面量 @ 判 11128。
+const harnessFileReferencePrompt = `Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces.`
+
+const (
+	// fileReferenceAnchor 是宽松锚点：内核改措辞时，段首这句仍在。
+	fileReferenceAnchor     = "Tokens prefixed with @"
+	fileReferenceAnchorSafe = "Tokens prefixed with (at)"
+	// webSurfaceSafe / webURLSafe 去掉了品牌，保留「是什么」这层语义。
+	webSurfaceSafe = "You are interacting with the user through this Web GUI"
+	webURLSafe     = "Current Web GUI URL"
+	// harnessBrandSafe 是品牌连写的等义写法：不留「两个大写词相邻」这个形状。
+	harnessBrandSafe = "DeepSeek-Harness"
+)
+
+// neutralizeFileReferenceAnchor 只改文件引用段里的 @，不做全局替换：
+// 用户正文里的 @路径 是真实含义，改写它越权且会弄坏用户代码。
+func neutralizeFileReferenceAnchor(s string) string {
+	if !strings.Contains(s, fileReferenceAnchor) {
+		return s
+	}
+	// 整段命中时连段内其余的 @ 一起处理（@"..." 那句也在上游判据里）。
+	if strings.Contains(s, harnessFileReferencePrompt) {
+		s = strings.ReplaceAll(s, harnessFileReferencePrompt,
+			strings.ReplaceAll(harnessFileReferencePrompt, "@", "(at)"))
+	}
+	return strings.ReplaceAll(s, fileReferenceAnchor, fileReferenceAnchorSafe)
+}
+
+// acpTagRe 匹配 dsh 注入的 ACP 消息标注标签（含引用 ID 与闭合标签）：
+//
+//	<acp tokens="159" type="text">m00001</acp>
+//
+// 闭合标签缺失时至少去掉开标签，不吞正文。
+var acpTagRe = regexp.MustCompile(`<acp\b[^>]*>[^<]*</acp>|<acp\b[^>]*>`)
+
+// sanitizeACPTags 去掉 ACP 标注标签，保留标签外的正文。
+// 官方客户端不可能产生 <acp ...> 这种标签，是 dsh 独有指纹。
+func sanitizeACPTags(s string) string {
+	if !strings.Contains(s, "<acp") {
+		return s
+	}
+	return acpTagRe.ReplaceAllString(s, "")
+}
+
+var (
+	// harnessIdentityRe 匹配「You are <带冠词/产品名的名词短语> + 动词 + 品牌.」。
+	//
+	// 名词只认 agent/assistant/model/bot/ai 这几个，且允许前面有 0~3 个修饰词、
+	// 中间夹一个 coding：这样既覆盖官方探测到的三种写法，也不会误伤
+	// 「You are free to use tools built by …」这类分词修饰宾语的句子
+	// （上游规则同样不改写它）。
+	harnessIdentityRe = regexp.MustCompile(`(?i)you are\s+(?:(?:an?|the)\s+)?(?:[a-z0-9_.\-]+\s+){0,3}(?:coding\s+)?(?:agent|assistant|model|bot|ai)\b[^.\n]{0,40}?\s+(?:powered\s+by|built\s+on|built\s+by|created\s+by|developed\s+by|made\s+by|trained\s+by|using)\s+[^.\n]{0,100}(?:\.[^ \n.\t][^.\n]{0,100})*\.`)
+	// harnessPoweredByRe 覆盖省略名词的形态：「You are powered by <品牌>.」。
+	harnessPoweredByRe = regexp.MustCompile(`(?i)you are\s+powered\s+by\s+[^.\n]{0,100}(?:\.[^ \n.\t][^.\n]{0,100})*\.`)
+	// webSurfaceRe / webURLRe 匹配 @deepseek-ai/dsh-harness-dev-context 注入的两处
+	// （Web GUI 开场白与运行时上下文里的 console 地址行）。内核把零宽空格
+	// U+200B 夹在 DeepSeek 与 Harness 之间，字符类必须容忍它，否则漏判。
+	webSurfaceRe = regexp.MustCompile(`You are interacting with the user through the DeepSeek[\s\x{00A0}\x{200B}\x{2060}\x{FEFF}]*Harness Web GUI`)
+	webURLRe     = regexp.MustCompile(`Current DeepSeek[\s\x{00A0}\x{200B}\x{2060}\x{FEFF}]*Harness Web GUI URL`)
+	// harnessBrandRe 兜底残留的品牌连写（含不可见分隔）。故意用 + 而非 *：
+	// 已改写成 DeepSeek-Harness 的字符串不再命中，保证幂等。
+	harnessBrandRe = regexp.MustCompile(`DeepSeek[\s\x{00A0}\x{200B}\x{2060}\x{FEFF}]+Harness`)
+)
+
+// sanitizeHarnessMessages 清洗一组 chat messages：只处理 role=system 的字符串
+// content，其余原样返回。
+//
+// 只清 system、**不动 ACP 标注标签**——这是 2026-10-27 用户拍板的选择：
+// dsh 的 <acp tokens=".." type="..">m00123</acp> 是消息引用编号，清掉后模型
+// 无法按编号定位历史消息（「看 m00123 那条」会失效）。ref 能力换来的代价是
+// 出站请求保留这层 dsh 独有标注，已知并接受。
+//
+// 为什么非 system 消息也不做身份句替换：那是用户/工具的真实内容，改写它既越权
+// 也会弄脏模型看到的代码。
 //
 // chat 路径（dsh 走 /v1/chat/completions）此前没有清洗——2026-10-10 那次
 // 只修了 responses 路径，因为当时只有 Codex 在用 dom。dsh 的签名短语是
@@ -707,9 +790,9 @@ type respToolSlot struct {
 // 一个 summary_text 段，条目 index 在首次出现时即占用（后续 message/tool
 // 顺延），保证 added/done 的 output_index 一致。
 type respReasoningSlot struct {
-	rsID      string
-	outIndex  int
-	textBuf   strings.Builder
+	rsID     string
+	outIndex int
+	textBuf  strings.Builder
 }
 
 type respStreamState struct {
@@ -848,14 +931,14 @@ func (st *respStreamState) handleReasoning(w http.ResponseWriter, rc string) {
 			},
 		})
 		st.sse(w, "response.reasoning_summary_part.added", map[string]any{
-			"type": "response.reasoning_summary_part.added",
+			"type":    "response.reasoning_summary_part.added",
 			"item_id": st.reason.rsID, "output_index": st.reason.outIndex,
 			"summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""},
 		})
 	}
 	st.reason.textBuf.WriteString(rc)
 	st.sse(w, "response.reasoning_summary_text.delta", map[string]any{
-		"type": "response.reasoning_summary_text.delta",
+		"type":    "response.reasoning_summary_text.delta",
 		"item_id": st.reason.rsID, "output_index": st.reason.outIndex,
 		"summary_index": 0, "delta": rc,
 	})
@@ -867,7 +950,7 @@ func (st *respStreamState) closeReasoning(w http.ResponseWriter) {
 	}
 	text := st.reason.textBuf.String()
 	st.sse(w, "response.reasoning_summary_text.done", map[string]any{
-		"type": "response.reasoning_summary_text.done",
+		"type":    "response.reasoning_summary_text.done",
 		"item_id": st.reason.rsID, "output_index": st.reason.outIndex,
 		"summary_index": 0, "text": text,
 	})

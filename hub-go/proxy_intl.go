@@ -15,7 +15,8 @@ func NewIntlProxy(authDir string) *Proxy {
 		Port:          IntlPort,
 		Backend:       "https://www.workbuddy.ai",
 		DefaultDomain: "www.workbuddy.ai",
-		UserAgent:     "codebuddy-guoji/1.0",
+		// 国际版同样要报官方桌面端身份；旧值 codebuddy-guoji/1.0 是自报家门的字符串。
+		UserAgent:     officialIntlUA(),
 		DefaultModel:  "deepseek-v4.1-flash",
 		Models: []string{
 			"deepseek-v4.1-flash",
@@ -59,6 +60,9 @@ func NewIntlProxy(authDir string) *Proxy {
 		// 2026-10-16 起上游对 /v2/chat/completions 开通路校验，缺会话四头整条线路报
 		// 11128「conversation id missing」。见 withConversationHeaders。
 		ConversationHeaders: true,
+		// 与国内线路同一套清洗：上游对「You are … powered by …」身份句做连续
+		// 子串匹配，国际线路同样会命中 11128。
+		SanitizeHarness: true,
 		// 同国内线路：客户端没指定思考档位时补最高档（见 default_thinking.go）。
 		ThinkingDefault: wbThinkingDefaultEffort,
 		Owner:           "workbuddy-ai",

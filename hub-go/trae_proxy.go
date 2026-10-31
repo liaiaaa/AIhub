@@ -30,9 +30,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -53,6 +57,73 @@ const (
 
 // TraeDefaultModel 默认模型（glm-5.2 实测可用）。
 const TraeDefaultModel = "glm-5.2"
+
+// traeIdleEnv 上游连续多久没有任何字节算「卡死」（秒），默认 120。
+//
+// 2026-10-27 用户报 trae kimi-k3 一次对话在 dsh 里等一分钟没消息。实测该模型
+// 先吐一大段 reasoning_content，正文要等思考结束才出来；一旦上游静默，客户端
+// 又没有超时，就会一直干等。这里加空闲看门狗：超过阈值主动中止并回一条明确的
+// 错误帧，客户端至少能看到「为什么失败」。
+// 思考模型首帧十几秒是常态，所以默认给到 120s，可用环境变量调小。
+const (
+	traeIdleEnv     = "AIHUB_TRAE_IDLE_SECS"
+	traeIdleDefault = 120 * time.Second
+)
+
+// traeEffortEnv 客户端没带 reasoning_effort 时给 trae 注入的默认思考档位。
+//
+// 2026-10-27 实测（同一份 127KB 载荷、100 个工具、各两次）：
+//
+//	默认：14.4s / 20.2s；reasoning_effort=low：9.1s / 4.4s。
+//
+// kimi-k3 的思考帧从 1079 降到 65，几乎全花在 thinking 上，所以低档位明显更快。
+// 默认留空 = 不注入，保持上游默认；要提速就设 AIHUB_TRAE_EFFORT=low。
+const traeEffortEnv = "AIHUB_TRAE_EFFORT"
+
+// traeEffortFile 放在数据根下的档位文件（与 zcode_api_key.txt 同一套约定）：
+// 桌面快捷方式启动时环境变量不好带，写文件更省事；每个请求现读，改完不用重启。
+const traeEffortFile = "trae_effort.txt"
+
+// traeEffortLevels 允许的档位（上游实测接受 low；medium/high 保留给以后试）。
+var traeEffortLevels = map[string]bool{"low": true, "medium": true, "high": true}
+
+func traeDefaultEffort() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(traeEffortEnv)))
+	if v == "" && hubRoot != "" {
+		if b, err := os.ReadFile(filepath.Join(hubRoot, traeEffortFile)); err == nil {
+			v = strings.ToLower(strings.TrimSpace(string(b)))
+		}
+	}
+	if !traeEffortLevels[v] {
+		return ""
+	}
+	return v
+}
+
+// traeApplyDefaultEffort 在客户端没显式给档位时补一个默认值，返回实际注入的值。
+func traeApplyDefaultEffort(raw map[string]any) string {
+	eff := traeDefaultEffort()
+	if eff == "" {
+		return ""
+	}
+	if _, ok := raw["reasoning_effort"]; ok {
+		return ""
+	}
+	raw["reasoning_effort"] = eff
+	return eff
+}
+
+func traeIdleTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv(traeIdleEnv))
+	if v == "" {
+		return traeIdleDefault
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return traeIdleDefault
+	}
+	return time.Duration(n) * time.Second
+}
 
 // TraeProxy 本地反代实例。零值不可用，须 NewTraeProxy。
 type TraeProxy struct {
@@ -393,18 +464,33 @@ func (p *TraeProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	clientStream, _ := raw["stream"].(bool)
 	requested, _ := raw["model"].(string)
 
+	injectedEffort := traeApplyDefaultEffort(raw)
 	body := traePrepareBody(raw, requested)
 	payload, _ := json.Marshal(body)
 	rid := randHex(4)
 	modelName, _ := body["model"].(string)
 	if p.log != nil {
-		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d | payload=%dKB%s", rid, modelName, clientStream, len(msgs), len(payload)/1024, lastUserSuffix(msgs))
+		effNote := ""
+		if injectedEffort != "" {
+			effNote = " | effort=" + injectedEffort
+		}
+		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d | payload=%dKB%s%s", rid, modelName, clientStream, len(msgs), len(payload)/1024, effNote, lastUserSuffix(msgs))
 	}
 
-	resp, err := p.chatUpstream(payload, rid)
+	// 请求 ctx 一路传到上游：客户端断开（dsh 里 Esc / 关页面）时立刻中止上游，
+	// 2026-10-27 实测过一次「dsh 71s 就 abort、hub 还把上游跑到 141s」的浪费。
+	// 看门狗也会用这个 cancel 主动中止卡死的上游。
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	resp, err := p.chatUpstream(ctx, payload, rid)
 	if err != nil {
 		if p.log != nil {
 			p.log.Log("[%s] ✗ 网络错误 | %v", rid, err)
+		}
+		if ctx.Err() != nil {
+			// 客户端已断开导致的取消，不必回错误体（也写不出去）
+			return
 		}
 		traeWriteError(w, clientStream, http.StatusBadGateway, err.Error())
 		return
@@ -423,17 +509,17 @@ func (p *TraeProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	t0 := time.Now()
 	if clientStream {
-		p.streamToClient(w, resp.Body, modelName, rid, t0)
+		p.streamToClient(ctx, cancel, w, resp.Body, modelName, rid, t0)
 		return
 	}
-	p.aggregateToClient(w, resp.Body, modelName, rid, t0)
+	p.aggregateToClient(ctx, w, resp.Body, modelName, rid, t0)
 }
 
 // chatUpstream 发起对话请求；401 时重读桌面端凭据再试一次（桌面端会自动刷新
 // JWT），仍失败则尝试 refreshToken 兑换。
-func (p *TraeProxy) chatUpstream(payload []byte, rid string) (*http.Response, error) {
+func (p *TraeProxy) chatUpstream(ctx context.Context, payload []byte, rid string) (*http.Response, error) {
 	info, dev := p.snapshot()
-	resp, err := p.doChat(info, dev, payload)
+	resp, err := p.doChat(ctx, info, dev, payload)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		return resp, err
 	}
@@ -444,7 +530,7 @@ func (p *TraeProxy) chatUpstream(payload []byte, rid string) (*http.Response, er
 	}
 	if fresh, dev2, err := traeReadAuth(); err == nil && fresh.Token != info.Token {
 		p.setAuth(fresh, dev2)
-		if resp, err = p.doChat(fresh, dev2, payload); err == nil && resp.StatusCode != http.StatusUnauthorized {
+		if resp, err = p.doChat(ctx, fresh, dev2, payload); err == nil && resp.StatusCode != http.StatusUnauthorized {
 			return resp, nil
 		}
 		if err == nil {
@@ -455,7 +541,7 @@ func (p *TraeProxy) chatUpstream(payload []byte, rid string) (*http.Response, er
 	// 重读没拿到新 token：用 refreshToken 兑换（双 ClientID 逐个试，只更新内存）
 	if refreshed := p.exchangeToken(info); refreshed != nil {
 		p.setAuth(refreshed, dev)
-		if resp, err = p.doChat(refreshed, dev, payload); err == nil {
+		if resp, err = p.doChat(ctx, refreshed, dev, payload); err == nil {
 			return resp, nil
 		}
 		if err == nil {
@@ -466,8 +552,8 @@ func (p *TraeProxy) chatUpstream(payload []byte, rid string) (*http.Response, er
 	return nil, fmt.Errorf("token 已失效（401），请打开 Trae 桌面端刷新登录")
 }
 
-func (p *TraeProxy) doChat(info *traeAuthInfo, dev traeDeviceInfo, payload []byte) (*http.Response, error) {
-	req, err := http.NewRequest("POST", traeAgentHost+traeEpChat, bytes.NewReader(payload))
+func (p *TraeProxy) doChat(ctx context.Context, info *traeAuthInfo, dev traeDeviceInfo, payload []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", traeAgentHost+traeEpChat, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +720,7 @@ func traeCleanToolCall(call map[string]any) {
 	}
 }
 
-func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model, rid string, t0 time.Time) {
+func (p *TraeProxy) streamToClient(ctx context.Context, cancel context.CancelFunc, w http.ResponseWriter, body io.Reader, model, rid string, t0 time.Time) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -644,8 +730,10 @@ func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model,
 	id := fmt.Sprintf("chatcmpl-%s", randHex(8))
 	var pendingUsage map[string]any
 	thinkFrames := 0
+	contentBytes := 0
+	firstFrameAt := -1.0 // 首帧耗时：区分「hub 慢」还是「上游慢」的唯一实测指标
 	sawDone := false
-	writeChunk := func(delta map[string]any, finish string) {
+	writeChunk := func(delta map[string]any, finish string) error {
 		choice := map[string]any{"index": 0, "delta": delta}
 		if finish != "" {
 			choice["finish_reason"] = finish
@@ -659,32 +747,75 @@ func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model,
 			pendingUsage = nil
 		}
 		b, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", b)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return err
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
+		return nil
 	}
 	roleSent := false
-	ensureRole := func() {
+	ensureRole := func() error {
 		if !roleSent {
 			roleSent = true
-			writeChunk(map[string]any{"role": "assistant", "content": ""}, "")
+			return writeChunk(map[string]any{"role": "assistant", "content": ""}, "")
+		}
+		return nil
+	}
+	// clientGone：写失败说明客户端走了。必须停下来——继续读上游每一帧都在烧 trae 额度。
+	clientGone := func() {
+		if p.log != nil {
+			p.log.Log("[%s] ⚠ 客户端已断开，中止上游读取 | 首帧=%.1fs", rid, firstFrameAt)
 		}
 	}
+
+	// 空闲看门狗：连续 traeIdleTimeout() 没有任何帧 → cancel 请求 ctx，让传输层
+	// 掐断上游 body。2026-10-27 用户报「等一分钟没消息」；有真卡死时至少要给出错误，
+	// 而不是让客户端无限等。
+	lastAt := atomic.Int64{}
+	lastAt.Store(time.Now().UnixNano())
+	timedOut := atomic.Bool{}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		idle := traeIdleTimeout()
+		tk := time.NewTicker(time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				if time.Since(time.Unix(0, lastAt.Load())) >= idle {
+					timedOut.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
 	st := &traeSSEState{}
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
+		lastAt.Store(time.Now().UnixNano())
 		ev := traeScanLine(st, strings.TrimRight(sc.Text(), "\r\n"))
 		if ev == nil {
 			continue
+		}
+		if firstFrameAt < 0 {
+			firstFrameAt = time.Since(t0).Seconds()
 		}
 		switch ev.Event {
 		case "output":
 			delta := map[string]any{}
 			if ev.Response != "" {
 				delta["content"] = ev.Response
+				contentBytes += len(ev.Response)
 			}
 			if ev.Reasoning != "" {
 				delta["reasoning_content"] = ev.Reasoning
@@ -700,8 +831,14 @@ func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model,
 				}
 			}
 			if len(delta) > 0 {
-				ensureRole()
-				writeChunk(delta, "")
+				if err := ensureRole(); err != nil {
+					clientGone()
+					return
+				}
+				if err := writeChunk(delta, ""); err != nil {
+					clientGone()
+					return
+				}
 			}
 		case "token_usage":
 			pendingUsage = ev.Usage
@@ -710,10 +847,16 @@ func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model,
 			// 后面已经没有 chunk 了，这条 usage 就永远丢掉（用量统计少记）。
 			// 已经发过 finish 时，单独补一个 usage-only chunk。
 			if sawDone {
-				writeChunk(map[string]any{}, "")
+				if err := writeChunk(map[string]any{}, ""); err != nil {
+					clientGone()
+					return
+				}
 			}
 		case "done":
-			writeChunk(map[string]any{}, ev.FinishReason) // writeChunk 会带上暂存的 usage
+			if err := writeChunk(map[string]any{}, ev.FinishReason); err != nil { // writeChunk 会带上暂存的 usage
+				clientGone()
+				return
+			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			if flusher != nil {
 				flusher.Flush()
@@ -737,20 +880,44 @@ func (p *TraeProxy) streamToClient(w http.ResponseWriter, body io.Reader, model,
 			sawDone = true
 		}
 	}
+	// 收尾优先级：上游空闲超时 > 客户端断开/取消 > 正常断流兜底。
+	if timedOut.Load() {
+		msg := fmt.Sprintf("Trae 上游 %d 秒没有任何数据，hub 已中止本次请求（不是客户端问题）", int(traeIdleTimeout().Seconds()))
+		if p.log != nil {
+			p.log.Log("[%s] ✗ %s | 首帧=%.1fs", rid, msg, firstFrameAt)
+		}
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": msg, "type": "upstream_timeout"}})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		// 客户端断开 / 上层取消：对端已经不读了，别再算兜底 [DONE]
+		if p.log != nil {
+			p.log.Log("[%s] ⚠ 请求已取消（客户端断开），上游读取中止 | 首帧=%.1fs", rid, firstFrameAt)
+		}
+		return
+	}
 	if !sawDone {
 		// 上游断流兜底：保证一定有 [DONE]
-		writeChunk(map[string]any{}, "stop")
+		if err := writeChunk(map[string]any{}, "stop"); err != nil {
+			clientGone()
+			return
+		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
 	}
 	if p.log != nil {
-		p.log.Log("[%s] ◀ RESPONSE | %.1fs | stream | think=%d帧", rid, time.Since(t0).Seconds(), thinkFrames)
+		p.log.Log("[%s] ◀ RESPONSE | %.1fs | stream | 首帧=%.1fs | think=%d帧 | content=%d字节",
+			rid, time.Since(t0).Seconds(), firstFrameAt, thinkFrames, contentBytes)
 	}
 }
 
-func (p *TraeProxy) aggregateToClient(w http.ResponseWriter, body io.Reader, model, rid string, t0 time.Time) {
+func (p *TraeProxy) aggregateToClient(ctx context.Context, w http.ResponseWriter, body io.Reader, model, rid string, t0 time.Time) {
 	var content, reasoning strings.Builder
 	toolCalls := map[int]map[string]any{}
 	var toolOrder []int
@@ -785,6 +952,10 @@ func (p *TraeProxy) aggregateToClient(w http.ResponseWriter, body io.Reader, mod
 	}
 	if p.log != nil {
 		p.log.Log("[%s] ◀ RESPONSE | %.1fs | finish=%s | think=%d段", rid, time.Since(t0).Seconds(), finish, len(reasoning.String()))
+	}
+	if ctx.Err() != nil {
+		// 客户端已断开：结果没人要了，也不用回错误体（写不出去）
+		return
 	}
 	if upErr != "" {
 		writeJSON(w, http.StatusBadGateway, map[string]any{

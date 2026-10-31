@@ -7,6 +7,7 @@ import (
 )
 
 func TestZZCbAlive(t *testing.T) {
+	requireLive(t)
 	dir := domCredDirs()["CodeBuddy凭证"]
 	p := NewDomProxyDir(dir)
 	cm := NewCredentialManager(p.AuthFilePath(), p.Backend, p.DefaultDomain, p.UserAgent)

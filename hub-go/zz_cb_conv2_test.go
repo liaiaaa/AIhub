@@ -18,6 +18,7 @@ func getz(p *Proxy, h map[string]string, ep string) string {
 }
 
 func TestZZCbConv2(t *testing.T) {
+	requireLive(t)
 	dir := domCredDirs()["CodeBuddy凭证"]
 	p := NewDomProxyDir(dir)
 	cm := NewCredentialManager(p.AuthFilePath(), p.Backend, p.DefaultDomain, p.UserAgent)

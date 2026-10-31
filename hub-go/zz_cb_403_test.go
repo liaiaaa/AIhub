@@ -10,6 +10,7 @@ import (
 )
 
 func TestZZCb403(t *testing.T) {
+	requireLive(t)
 	for _, cred := range []string{"CodeBuddy凭证", "国内workbuddy凭证"} {
 		dir := domCredDirs()[cred]
 		p := NewDomProxyDir(dir)

@@ -8,20 +8,16 @@ package main
 // 这里用源码比对，避免再靠人肉同步两张清单。
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
 )
 
 func TestServiceQuotaFlagsMatchCreditKeys(t *testing.T) {
-	src, err := os.ReadFile("webui.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	block := regexp.MustCompile(`(?s)const SERVICES = \[.*?\];`).FindString(string(src))
+	src := consoleSource(t)
+	block := regexp.MustCompile(`(?s)const SERVICES = \[.*?\];`).FindString(src)
 	if block == "" {
-		t.Fatal("没在 webui.go 里找到 SERVICES 定义")
+		t.Fatal("没在控制台页面里找到 SERVICES 定义（assets/console.html）")
 	}
 	var jsQuota []string
 	for _, line := range strings.Split(block, "\n") {

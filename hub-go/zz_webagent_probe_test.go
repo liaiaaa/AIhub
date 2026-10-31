@@ -8,6 +8,7 @@ import (
 )
 
 func TestZZWebAgentProbe(t *testing.T) {
+	requireLive(t)
 	for _, credName := range []string{"国内workbuddy凭证"} {
 		dir := domCredDirs()[credName]
 		p := NewDomProxyDir(dir)

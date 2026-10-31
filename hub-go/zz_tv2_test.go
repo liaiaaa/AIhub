@@ -7,6 +7,7 @@ import (
 )
 
 func TestZZTv2(t *testing.T) {
+	requireLive(t)
 	for _, cred := range []string{"国内workbuddy凭证", "CodeBuddy凭证"} {
 		dir := domCredDirs()[cred]
 		p := NewDomProxyDir(dir)

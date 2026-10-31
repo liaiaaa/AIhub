@@ -9,6 +9,7 @@ import (
 )
 
 func TestZZAfterWebChat(t *testing.T) {
+	requireLive(t)
 	for _, credName := range []string{"国内workbuddy凭证", "CodeBuddy凭证"} {
 		dir := domCredDirs()[credName]
 		p := NewDomProxyDir(dir)

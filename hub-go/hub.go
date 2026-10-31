@@ -89,14 +89,32 @@ func (h *Hub) loadState() {
 }
 
 func (h *Hub) saveStateLocked() {
-	b, _ := json.Marshal(map[string]any{
-		"intl_cred": h.intlCred,
-		"dom_cred":  h.domCred,
-		"checkin":   h.checkin,
+	b, err := json.Marshal(map[string]any{
+		"intl_cred":  h.intlCred,
+		"dom_cred":   h.domCred,
+		"checkin":    h.checkin,
 		"ctx_window": h.ctxWindow,
 		"last_lines": h.lastLines,
 	})
-	os.WriteFile(dataPath("state.json"), b, 0644)
+	if err != nil {
+		logHub("state.json 序列化失败：%v", err)
+		return
+	}
+	// tmp + rename（2026-10-31）：原来直接 os.WriteFile 且丢弃 err，
+	// 写到一半掉电/被强杀就留半截 JSON，而 loadState 是静默忽略的 ——
+	// 表现为「上次记住的线路、上下文窗口全没了」且日志里查不到任何原因。
+	// 现在写失败会记日志，替换用 rename 保证 state.json 要么是旧的完整内容，
+	// 要么是新的完整内容，不会出现半截。
+	path := dataPath("state.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		logHub("state.json 写入临时文件失败：%v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		logHub("state.json 替换失败：%v", err)
+		_ = os.Remove(tmp)
+	}
 }
 
 // ---------- 线路运行记忆（2026-10-19） ----------

@@ -68,7 +68,9 @@ func aggSelectableLine(line string) bool {
 	return false
 }
 
-var aggLinePort = map[string]int{"dom": 8787, "intl": 8799, "qoder": 8797, "trae": 8795, "zcode": 8796, "oc": OpencodePort}
+// aggLinePort 参与聚合的线路 → 端口，来自 lineSpecs（lines.go）。
+// 原来是手抄的字面量表，端口一变就得记得同步两条地方。
+var aggLinePort = aggregatedLinePorts()
 
 // aggCCSKeys 兼容 Hub Switch 时代的模型名前缀：ccs-<key>/<model> 与
 // ccs-claude-<key>--<model>（2026-10-13 方案 C：hub-go 吞并网关后，

@@ -120,7 +120,8 @@ func (h *Hub) saveStateLocked() {
 // ---------- 线路运行记忆（2026-10-19） ----------
 
 // knownLineNames 可被记住/自动恢复的线路名（与 API 的 /api/<name>/start 对应）。
-var knownLineNames = []string{"dom", "intl", "qoder", "trae", "zcode", "mimo", "oc"}
+// 清单来自 lineSpecs（lines.go），不再手抄一份。
+var knownLineNames = lineKeys()
 
 // sanitizeLineNames 过滤未知线路名、去重、保持稳定顺序。
 // 目的：state.json 是用户可手改的，不能因为里面写了个乱七八糟的名字

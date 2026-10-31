@@ -30,17 +30,18 @@ func stopPort(port int) bool {
 }
 
 // sweepPorts 启动时连续清扫，默认全部停止。
+// 端口清单来自 lineSpecs（见 lines.go），不再逐个列常量——
+// 加一条线路只改那张表，这里自动覆盖。
 func sweepPorts() {
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		a := stopPort(DomPort)
-		b := stopPort(IntlPort)
-		c := stopPort(MimoPort)
-		d := stopPort(QoderPort)
-		e := stopPort(TraePort)
-		f := stopPort(ZcodePort)
-		g := stopPort(OpencodePort)
-		if a && b && c && d && e && f && g {
+		allFree := true
+		for _, port := range allLinePorts() {
+			if !stopPort(port) {
+				allFree = false
+			}
+		}
+		if allFree {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)

@@ -61,21 +61,36 @@ var staticModelMeta = map[string]map[string]modelMeta{
 	},
 	"trae": {
 		// 2026-11-01 补：数值不是猜的，来自 Trae CN 桌面端自己缓存的模型目录 ——
-		// ~/.config/Trae CN/User/globalStorage/state.vscdb 里
-		// AI.agent.model.model_list_map → solo_agent 段写得很明确：
-		//   context_window_tokens = {dev:200000, max:1000000}
-		//   prompt_max_tokens     = 936000
-		//   max_tokens            = 64000
-		// 且 936000+64000=1000000 自证：max_tokens 是输出上限，prompt_max_tokens 是输入上限。
-		// aihub 走的正是 /api/agent/v3/llm_utils_chat 这条 SOLO agent 线路，所以取
-		// 上下文 1M、输出 64K。思考档位（Efforts）上游未公开，留空 ——
-		// default_thinking.go 里也写明「Trae 保持原样，不注入档位」。
+		// ~/.config/Trae CN/User/globalStorage/state.vscdb
+		// → AI.agent.model.model_list_map → solo_agent 段，每个模型自带：
+		//   context_window_tokens = {dev:…, max:…}   ← 取 max
+		//   prompt_max_tokens                        ← 输入上限
+		//   max_tokens                               ← 输出上限（与输入相加=上下文，自证语义）
+		// aihub 走的正是 /api/agent/v3/llm_utils_chat 这条 SOLO agent 线路，所以直接用这些值。
+		// 思考档位（Efforts）上游未公开，全部留空 —— default_thinking.go 也不给 Trae 注入档位。
+		// 老模型（glm-5.2/glm-5/DeepSeek-V4-Flash 等）不在当前目录里，没有可靠数值，
+		// 按「宁缺不编」不登记：查不到就不报，客户端表单留空比填错强。
+		//
 		// 为什么要这张表：缺了它 /v1/models 就不带 contextWindow / max_output_tokens，
 		// DSH 之类的客户端模型表单里「最大输出 token」只能手填（2026-11-01 用户问的）。
-		"deepseek-v4.1-flash": {ContextWindow: 1000000, MaxInput: 64000},
-		"DeepSeek-V4-Flash":   {ContextWindow: 1000000, MaxInput: 64000},
-		"glm-5.3":             {ContextWindow: 1000000, MaxInput: 64000},
-		"kimi-k3":             {ContextWindow: 1000000, MaxInput: 64000},
+		"Doubao-Seed-2.1-Turbo":    {ContextWindow: 256000, MaxInput: 32000},
+		"Doubao-Seed-2.1-Pro":      {ContextWindow: 1000000, MaxInput: 64000},
+		"Doubao-Seed-Evolving":     {ContextWindow: 1000000, MaxInput: 64000},
+		"Doubao-Seed-Code":         {ContextWindow: 256000, MaxInput: 32000},
+		"glm-5.3-flash":            {ContextWindow: 1000000, MaxInput: 64000},
+		"glm-5.3-flashx":           {ContextWindow: 1000000, MaxInput: 64000},
+		"glm-5.3":                  {ContextWindow: 1000000, MaxInput: 64000},
+		"deepseek-v4.1-flash":      {ContextWindow: 1000000, MaxInput: 64000},
+		"DeepSeek-V4-Pro-Official": {ContextWindow: 1000000, MaxInput: 64000},
+		"kimi-k3.1-pro":            {ContextWindow: 1000000, MaxInput: 64000},
+		"kimi-k3":                  {ContextWindow: 1000000, MaxInput: 64000},
+		"mimo-v2.6-flash":          {ContextWindow: 981504, MaxInput: 64000},
+		"mimo-v2.6-pro":            {ContextWindow: 981504, MaxInput: 64000},
+		"minimax-m3.1-flash":       {ContextWindow: 1000000, MaxInput: 64000},
+		"minimax-m3":               {ContextWindow: 1000000, MaxInput: 64000},
+		"step-5-preview":           {ContextWindow: 1000000, MaxInput: 64000},
+		"qwen3.8-flash":            {ContextWindow: 1000000, MaxInput: 64000},
+		"qwen3.8-max":              {ContextWindow: 1000000, MaxInput: 64000},
 	},
 }
 

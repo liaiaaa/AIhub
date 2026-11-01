@@ -36,9 +36,63 @@ func TestTraeModelMeta(t *testing.T) {
 			t.Errorf("trae/%s 不该有 Efforts，实际 %v", model, m.Efforts)
 		}
 	}
-	// 没登记的模型仍应查不到（宁缺不编）
-	if _, ok := h.modelMeta("trae", "不存在的模型"); ok {
-		t.Error("未登记的 trae 模型不该返回元数据")
+	// 逐模型真值（Trae 目录里各模型上限并不一样，别拿一个值套全部）
+	for _, c := range []struct {
+		model string
+		ctx   int
+		out   int
+	}{
+		{"Doubao-Seed-2.1-Turbo", 256000, 32000}, // 小窗口模型
+		{"Doubao-Seed-Code", 256000, 32000},
+		{"mimo-v2.6-flash", 981504, 64000}, // 非整 1M
+		{"glm-5.3-flashx", 1000000, 64000},
+		{"qwen3.8-max", 1000000, 64000},
+		{"step-5-preview", 1000000, 64000},
+	} {
+		m, ok := h.modelMeta("trae", c.model)
+		if !ok {
+			t.Errorf("trae/%s 查不到元数据", c.model)
+			continue
+		}
+		if m.ContextWindow != c.ctx || m.MaxInput != c.out {
+			t.Errorf("trae/%s = %d/%d，期望 %d/%d", c.model, m.ContextWindow, m.MaxInput, c.ctx, c.out)
+		}
+	}
+	// 没登记的模型仍应查不到（宁缺不编）：老模型不在当前目录里，就不该编数字
+	for _, model := range []string{"不存在的模型", "glm-5.2", "DeepSeek-V4-Flash"} {
+		if _, ok := h.modelMeta("trae", model); ok {
+			t.Errorf("未登记元数据的 trae 模型不该返回（%s）", model)
+		}
+	}
+}
+
+// TestTraeModelsListMatchesUpstream 钉住「清单与上游目录 + 实测结论一致」。
+func TestTraeModelsListMatchesUpstream(t *testing.T) {
+	has := map[string]bool{}
+	for _, m := range TraeModels {
+		if has[m] {
+			t.Errorf("TraeModels 里有重复项：%s", m)
+		}
+		has[m] = true
+	}
+	if len(TraeModels) != 28 {
+		t.Errorf("TraeModels 应为 28 个，实际 %d", len(TraeModels))
+	}
+	// 上游目录里有、旧清单缺的那批，必须补进来
+	for _, want := range []string{
+		"glm-5.3-flash", "glm-5.3-flashx", "qwen3.8-max", "qwen3.8-flash",
+		"mimo-v2.6-flash", "mimo-v2.6-pro", "step-5-preview", "minimax-m3.1-flash",
+		"Doubao-Seed-Evolving", "Doubao-Seed-Code", "kimi-k3.1-pro", "DeepSeek-V4-Pro-Official",
+	} {
+		if !has[want] {
+			t.Errorf("TraeModels 缺少上游可用模型：%s", want)
+		}
+	}
+	// 实测上游报错的必须剔除
+	for _, bad := range []string{"custom_model_gemini", "custom_model_deepseek_reasoner"} {
+		if has[bad] {
+			t.Errorf("TraeModels 不该包含实测报错的模型：%s", bad)
+		}
 	}
 }
 

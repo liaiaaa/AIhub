@@ -138,15 +138,43 @@ type TraeProxy struct {
 	portS *http.Server
 }
 
-// TraeModels 国内版可用模型（0.1.52 实测 config_name；动态目录后续可加）。
+// TraeModels 国内版可用模型。
+//
+// 2026-11-01 重建：原来这份清单是「0.1.52 实测 config_name」，已过时
+// （缺 glm-5.3-flash / qwen3.8-* / mimo-v2.6-* / step-5-preview / Doubao-Seed-Evolving
+// 等，还留着上游已经没有的项）。现在以 Trae CN 桌面端自己缓存的模型目录为准：
+//
+//	~/.config/Trae CN/User/globalStorage/state.vscdb
+//	→ AI.agent.model.model_list_map → solo_agent 段（19 个，含 1 个自定义）
+//
+// 并且每个都**实打实打了一次请求**验证（1 次非流式 + 失败的再补 1 次流式）。
+//
+// 分组说明：
+//
+//	① 目录内 · 非流式可用（17）：正常走 chat/completions。
+//	② 目录内 · 仅流式可用（3）：Doubao-Seed-Code / kimi-k3.1-pro / qwen3.8-flash ——
+//	   非流式上游回 code=4001「param is invalid」或 code=1005，流式正常出帧。
+//	   客户端要是发 stream=false 就会看到 502，这里保留是因为流式能用。
+//	③ 目录里已下线但上游仍服务（9）：老客户端还在用，实测全部 200，保留兼容。
+//	④ 自定义 gpt-5（1）：实测可用。
+//
+// 已剔除：custom_model_gemini（4023）、custom_model_deepseek_reasoner（3003 all models failed）、
+// custom_openai_compatible//mimo-v2.5-pro（上游自定义配置，不属于内置模型，slug 带 `//` 会难看）。
 var TraeModels = []string{
-	"glm-5.2", "glm-5", "glm-5-turbo", "glm-5.3",
-	"qwen-3.7-plus",
-	"Doubao-Seed-2.0-Code", "Doubao-Seed-2.1-Turbo", "Doubao-Seed-2.1-Pro",
-	"DeepSeek-V4-Pro", "DeepSeek-V4-Flash", "deepseek-v4.1-flash",
-	"kimi-k2.6", "kimi-k2.7-code", "kimi-k3",
-	"minimax-m3",
-	"custom_model_gpt-5", "custom_model_gemini", "custom_model_deepseek_reasoner",
+	// ① 目录内 · 非流式可用
+	"Doubao-Seed-2.1-Turbo", "Doubao-Seed-2.1-Pro", "Doubao-Seed-Evolving",
+	"glm-5.3-flash", "glm-5.3-flashx", "glm-5.3",
+	"deepseek-v4.1-flash", "DeepSeek-V4-Pro-Official",
+	"kimi-k3", "mimo-v2.6-flash", "mimo-v2.6-pro",
+	"minimax-m3.1-flash", "minimax-m3", "step-5-preview", "qwen3.8-max",
+	// ② 目录内 · 仅流式可用（非流式会 502，见上）
+	"Doubao-Seed-Code", "kimi-k3.1-pro", "qwen3.8-flash",
+	// ③ 目录已下线、上游仍服务（兼容老客户端）
+	"glm-5.2", "glm-5", "glm-5-turbo", "qwen-3.7-plus",
+	"Doubao-Seed-2.0-Code", "DeepSeek-V4-Pro", "DeepSeek-V4-Flash",
+	"kimi-k2.6", "kimi-k2.7-code",
+	// ④ 自定义
+	"custom_model_gpt-5",
 }
 
 func NewTraeProxy() *TraeProxy {

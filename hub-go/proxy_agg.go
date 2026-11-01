@@ -842,6 +842,11 @@ func (h *Hub) aggOpenAIModels() map[string]any {
 		if m, ok := h.modelMeta(am.Line, am.Backend); ok {
 			if m.ContextWindow > 0 {
 				entry["contextWindow"] = m.ContextWindow
+				// 同一个值的两种写法：camelCase 是早期给自定义客户端看的，
+				// snake_case 是 DSH 的 deepseek provider 解析时认的名字
+				// （dsh-llm-deepseek 里 capacity(entry.context_window)）。
+				// 只写 camelCase 时上下文窗口填不进客户端表单（2026-11-01 用户报）。
+				entry["context_window"] = m.ContextWindow
 				entry["max_input_tokens"] = m.ContextWindow
 			}
 			if m.MaxInput > 0 {

@@ -59,6 +59,24 @@ var staticModelMeta = map[string]map[string]modelMeta{
 		"gemini-3.8-flash":    {ContextWindow: 1048576, MaxInput: 65536, Efforts: []string{"low", "medium", "high", "max"}},
 		"gemini-3.5-flash":    {ContextWindow: 1048576, MaxInput: 65536, Efforts: []string{"low", "medium", "high", "max"}},
 	},
+	"trae": {
+		// 2026-11-01 补：数值不是猜的，来自 Trae CN 桌面端自己缓存的模型目录 ——
+		// ~/.config/Trae CN/User/globalStorage/state.vscdb 里
+		// AI.agent.model.model_list_map → solo_agent 段写得很明确：
+		//   context_window_tokens = {dev:200000, max:1000000}
+		//   prompt_max_tokens     = 936000
+		//   max_tokens            = 64000
+		// 且 936000+64000=1000000 自证：max_tokens 是输出上限，prompt_max_tokens 是输入上限。
+		// aihub 走的正是 /api/agent/v3/llm_utils_chat 这条 SOLO agent 线路，所以取
+		// 上下文 1M、输出 64K。思考档位（Efforts）上游未公开，留空 ——
+		// default_thinking.go 里也写明「Trae 保持原样，不注入档位」。
+		// 为什么要这张表：缺了它 /v1/models 就不带 contextWindow / max_output_tokens，
+		// DSH 之类的客户端模型表单里「最大输出 token」只能手填（2026-11-01 用户问的）。
+		"deepseek-v4.1-flash": {ContextWindow: 1000000, MaxInput: 64000},
+		"DeepSeek-V4-Flash":   {ContextWindow: 1000000, MaxInput: 64000},
+		"glm-5.3":             {ContextWindow: 1000000, MaxInput: 64000},
+		"kimi-k3":             {ContextWindow: 1000000, MaxInput: 64000},
+	},
 }
 
 // parseCtxWindow "1m"/"200k"/"1048576" → tokens；解析失败返回 0。

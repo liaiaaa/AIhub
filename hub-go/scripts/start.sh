@@ -24,7 +24,9 @@ echo "控制台： http://127.0.0.1:8801/（-port 可改）"
 #   AIHUB_NO_CHANNEL_RETRY=1  强制关闭上述重试（优先级更高）
 #   AIHUB_KEEP_DUMPS=1        保留全部失败样本（默认只留最近 3 份）
 #   AIHUB_TRAE_IDLE_SECS=N    Trae 流式空闲看门狗阈值
-#   AIHUB_TRAE_EFFORT=low     Trae 思考档位覆盖（默认不注入，保持上游默认）
+#   AIHUB_TRAE_EFFORT=light   Trae 思考档位覆盖：light|high|extra_high
+#                             不设 = 自动取该模型支持的最高档（与 dom/intl 口径一致）
+#                             旧写法 low/medium 仍兼容（分别归一到 light/high）
 ENVS=()
 for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy \
 	AIHUB_ROOT WORKBUDDY_AUTH_DIR TRAE_USER_DATA_DIR QODER_APP_DATA \

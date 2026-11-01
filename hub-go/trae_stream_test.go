@@ -149,55 +149,91 @@ func TestTraeStreamNormalUnaffected(t *testing.T) {
 	}
 }
 
-// AIHUB_TRAE_EFFORT / trae_effort.txt：客户端没给档位时补默认值。
+// trae 的思考档位：客户端 > 手动档位(env/文件) > 该模型最高档。
+//
+// 2026-11-01 改口径：官方档位名是 light / high / extra_high（来自 Trae 客户端缓存的
+// reasoning_effort_config.options），与 dom/intl/qoder/zcode 的「默认拉满」对齐 ——
+// 客户端不指定时注入该模型支持的最高档。
 func TestTraeApplyDefaultEffort(t *testing.T) {
 	oldRoot := hubRoot
 	hubRoot = t.TempDir()
 	t.Cleanup(func() { hubRoot = oldRoot })
+	effortFile := filepath.Join(hubRoot, traeEffortFile)
 
 	t.Setenv(traeEffortEnv, "")
-	raw := map[string]any{"model": "kimi-k3"}
-	if got := traeApplyDefaultEffort(raw); got != "" {
-		t.Fatalf("不设环境变量、没有文件时不应注入，实际 %q", got)
-	}
-	if _, ok := raw["reasoning_effort"]; ok {
-		t.Fatal("不应写 reasoning_effort")
+
+	// ① 什么都不设：自动取该模型最高档
+	for _, c := range []struct{ model, want string }{
+		{"kimi-k3", "extra_high"},
+		{"deepseek-v4.1-flash", "extra_high"}, // 官方默认是 high，我们要更高一档
+		{"glm-5.3", "extra_high"},
+		{"Doubao-Seed-2.1-Turbo", "high"}, // 只有两档
+		{"step-5-preview", "high"},
+	} {
+		raw := map[string]any{"model": c.model}
+		if got := traeApplyDefaultEffort(raw, c.model); got != c.want {
+			t.Errorf("%s 默认档位应为 %q，实际 %q", c.model, c.want, got)
+		}
+		if raw["reasoning_effort"] != c.want {
+			t.Errorf("%s 注入后字段值不对：%v", c.model, raw["reasoning_effort"])
+		}
 	}
 
-	// 数据根放文件 → 生效（桌面快捷方式启动时带不了环境变量，这条是主用法）
-	if err := os.WriteFile(filepath.Join(hubRoot, traeEffortFile), []byte("LOW\n"), 0o644); err != nil {
+	// ② 不支持思考的模型：绝不注入
+	for _, m := range []string{"mimo-v2.6-flash", "mimo-v2.6-pro", "minimax-m3", "Doubao-Seed-Evolving"} {
+		raw := map[string]any{"model": m}
+		if got := traeApplyDefaultEffort(raw, m); got != "" {
+			t.Errorf("%s 官方 support_thinking=false，不该注入，实际 %q", m, got)
+		}
+		if _, ok := raw["reasoning_effort"]; ok {
+			t.Errorf("%s 不该写 reasoning_effort", m)
+		}
+	}
+
+	// ③ 上游目录里已经没有的老模型：不知道它认哪些档位名 → 不猜
+	raw := map[string]any{"model": "glm-5.2"}
+	if got := traeApplyDefaultEffort(raw, "glm-5.2"); got != "" {
+		t.Errorf("未知老模型不该自动注入，实际 %q", got)
+	}
+
+	// ④ 数据根放文件：生效，且旧词 low 要归一化成 light
+	if err := os.WriteFile(effortFile, []byte("LOW\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	raw = map[string]any{"model": "kimi-k3"}
-	if got := traeApplyDefaultEffort(raw); got != "low" {
-		t.Fatalf("文件写 low 应注入 low，实际 %q", got)
-	}
-	if raw["reasoning_effort"] != "low" {
-		t.Fatalf("注入后字段值不对：%v", raw["reasoning_effort"])
+	if got := traeApplyDefaultEffort(raw, "kimi-k3"); got != "light" {
+		t.Errorf("文件写 LOW 应归一化成 light，实际 %q", got)
 	}
 
-	// 环境变量优先于文件
+	// ⑤ 环境变量优先于文件
 	t.Setenv(traeEffortEnv, "high")
-	if got := traeDefaultEffort(); got != "high" {
-		t.Fatalf("环境变量应覆盖文件，实际 %q", got)
+	if got := traeManualEffort(); got != "high" {
+		t.Errorf("环境变量应覆盖文件，实际 %q", got)
 	}
 
-	// 非法值忽略（不能让上游因为错拼字段值 400）
-	if err := os.WriteFile(filepath.Join(hubRoot, traeEffortFile), []byte("ultra\n"), 0o644); err != nil {
+	// ⑥ 非法值忽略
+	if err := os.WriteFile(effortFile, []byte("ultra\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(traeEffortEnv, "")
-	if got := traeDefaultEffort(); got != "" {
-		t.Fatalf("非法档位应忽略，实际 %q", got)
+	if got := traeManualEffort(); got != "" {
+		t.Errorf("非法档位应忽略，实际 %q", got)
 	}
 
-	// 客户端显式给了档位：尊重客户端，不覆盖
-	t.Setenv(traeEffortEnv, "low")
-	raw2 := map[string]any{"reasoning_effort": "high"}
-	if got := traeApplyDefaultEffort(raw2); got != "" {
-		t.Fatalf("客户端已给档位时不应注入，实际 %q", got)
+	// ⑦ 手动档位该模型不支持 → 不硬塞
+	t.Setenv(traeEffortEnv, "extra_high")
+	raw = map[string]any{"model": "Doubao-Seed-2.1-Turbo"} // 只有 light/high
+	if got := traeApplyDefaultEffort(raw, "Doubao-Seed-2.1-Turbo"); got != "" {
+		t.Errorf("该模型没有 extra_high 档，不该注入，实际 %q", got)
 	}
-	if raw2["reasoning_effort"] != "high" {
-		t.Fatalf("客户端档位被改写了：%v", raw2["reasoning_effort"])
+
+	// ⑧ 客户端显式给了档位：尊重客户端，一律不覆盖（哪怕是非法值也不改）
+	t.Setenv(traeEffortEnv, "light")
+	raw2 := map[string]any{"reasoning_effort": "extra_high"}
+	if got := traeApplyDefaultEffort(raw2, "deepseek-v4.1-flash"); got != "" {
+		t.Errorf("客户端已给档位时不应注入，实际 %q", got)
+	}
+	if raw2["reasoning_effort"] != "extra_high" {
+		t.Errorf("客户端档位被改写了：%v", raw2["reasoning_effort"])
 	}
 }

@@ -70,44 +70,108 @@ const (
 	traeIdleDefault = 120 * time.Second
 )
 
-// traeEffortEnv 客户端没带 reasoning_effort 时给 trae 注入的默认思考档位。
+// traeEffortEnv 手动指定 trae 的思考档位；**不设 = 自动取该模型支持的最高档**。
 //
-// 2026-10-27 实测（同一份 127KB 载荷、100 个工具、各两次）：
+// 上游档位名不是 low/medium/high，而是 light / high / extra_high —— 依据是 Trae CN
+// 桌面端缓存的模型目录：~/.config/Trae CN/User/globalStorage/state.vscdb
+// → AI.agent.model.model_list_map → solo_agent 段里每个模型的
+// reasoning_effort_config.options / default_level。
+// 2026-10-27 的旧实验用 low 也能看到差异，那是上游把未知值宽松吞了；现在按官方名走。
 //
-//	默认：14.4s / 20.2s；reasoning_effort=low：9.1s / 4.4s。
-//
-// kimi-k3 的思考帧从 1079 降到 65，几乎全花在 thinking 上，所以低档位明显更快。
-// 默认留空 = 不注入，保持上游默认；要提速就设 AIHUB_TRAE_EFFORT=low。
+// 兼容旧写法：low → light、medium → high（早期文档与 start.sh 用的是这两个词）。
 const traeEffortEnv = "AIHUB_TRAE_EFFORT"
 
 // traeEffortFile 放在数据根下的档位文件（与 zcode_api_key.txt 同一套约定）：
 // 桌面快捷方式启动时环境变量不好带，写文件更省事；每个请求现读，改完不用重启。
+// 内容为空 / 文件删掉 = 回到「自动最高档」。
 const traeEffortFile = "trae_effort.txt"
 
-// traeEffortLevels 允许的档位（上游实测接受 low；medium/high 保留给以后试）。
-var traeEffortLevels = map[string]bool{"low": true, "medium": true, "high": true}
+// traeModelEfforts 每个模型支持的思考档位（从低到高，官方 reasoning_effort_config.options 原样）。
+//
+//	不支持思考的模型显式登记为 nil —— 免得以后被当成「未知模型」而注入档位。
+//	没登记 = 上游目录里已经没有的老模型，我们不知道它认哪几个名字，宁可不注入。
+var traeModelEfforts = map[string][]string{
+	"Doubao-Seed-2.1-Turbo":    {"light", "high"},
+	"Doubao-Seed-2.1-Pro":      {"light", "high"},
+	"Doubao-Seed-Code":         {"light", "high"},
+	"step-5-preview":           {"light", "high"},
+	"glm-5.3-flash":            {"light", "high", "extra_high"},
+	"glm-5.3-flashx":           {"light", "high", "extra_high"},
+	"glm-5.3":                  {"light", "high", "extra_high"},
+	"deepseek-v4.1-flash":      {"light", "high", "extra_high"},
+	"DeepSeek-V4-Pro-Official": {"light", "high", "extra_high"},
+	"kimi-k3.1-pro":            {"light", "high", "extra_high"},
+	"kimi-k3":                  {"light", "high", "extra_high"},
+	"minimax-m3.1-flash":       {"light", "high", "extra_high"},
+	"qwen3.8-flash":            {"light", "high", "extra_high"},
+	"qwen3.8-max":              {"light", "high", "extra_high"},
+	// 以下模型官方 support_thinking=false，注入档位没有意义
+	"Doubao-Seed-Evolving": nil,
+	"mimo-v2.6-flash":      nil,
+	"mimo-v2.6-pro":        nil,
+	"minimax-m3":           nil,
+}
 
-func traeDefaultEffort() string {
+// traeEffortAlias 旧词 → 官方档位名（兼容早期文档与 start.sh 的写法）。
+var traeEffortAlias = map[string]string{"low": "light", "medium": "high"}
+
+// traeHighestEffort 该模型支持的最高档；不支持思考或未知模型返回空。
+func traeHighestEffort(model string) string {
+	opts, known := traeModelEfforts[model]
+	if !known || len(opts) == 0 {
+		return ""
+	}
+	return opts[len(opts)-1]
+}
+
+// traeManualEffort 读手动档位（环境变量 > 数据根文件），别名归一化；非法值返回空。
+func traeManualEffort() string {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(traeEffortEnv)))
 	if v == "" && hubRoot != "" {
 		if b, err := os.ReadFile(filepath.Join(hubRoot, traeEffortFile)); err == nil {
 			v = strings.ToLower(strings.TrimSpace(string(b)))
 		}
 	}
-	if !traeEffortLevels[v] {
-		return ""
+	if alias, ok := traeEffortAlias[v]; ok {
+		v = alias
 	}
-	return v
+	switch v {
+	case "light", "high", "extra_high":
+		return v
+	}
+	return ""
 }
 
-// traeApplyDefaultEffort 在客户端没显式给档位时补一个默认值，返回实际注入的值。
-func traeApplyDefaultEffort(raw map[string]any) string {
-	eff := traeDefaultEffort()
-	if eff == "" {
-		return ""
-	}
+// traeApplyDefaultEffort 客户端没显式给档位时补一个，返回实际注入的档位（空 = 不注入）。
+//
+// 优先级：客户端 reasoning_effort > 手动档位（env/文件）> 该模型最高档。
+// 模型不支持思考（traeModelEfforts 里登记为 nil）→ 一律不注入。
+// 未知模型（上游目录里已没有的老模型）→ 不猜，不注入。
+func traeApplyDefaultEffort(raw map[string]any, model string) string {
 	if _, ok := raw["reasoning_effort"]; ok {
-		return ""
+		return "" // 客户端说了算
+	}
+	opts, known := traeModelEfforts[model]
+	if known && len(opts) == 0 {
+		return "" // 该模型不支持思考
+	}
+	eff := traeManualEffort()
+	if eff == "" {
+		if !known {
+			return "" // 老模型：不知道它认哪几个档位名
+		}
+		eff = opts[len(opts)-1] // 默认拉满，与 dom/intl/qoder/zcode 口径一致
+	} else if known {
+		allowed := false
+		for _, o := range opts {
+			if o == eff {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "" // 该模型没有这一档，别硬塞
+		}
 	}
 	raw["reasoning_effort"] = eff
 	return eff
@@ -467,7 +531,7 @@ func (p *TraeProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	clientStream, _ := raw["stream"].(bool)
 	requested, _ := raw["model"].(string)
 
-	injectedEffort := traeApplyDefaultEffort(raw)
+	injectedEffort := traeApplyDefaultEffort(raw, requested)
 	body := traePrepareBody(raw, requested)
 	payload, _ := json.Marshal(body)
 	rid := randHex(4)

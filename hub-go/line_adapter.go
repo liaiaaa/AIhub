@@ -167,6 +167,41 @@ func (a traeAdapter) Models() []string {
 	return out
 }
 
+// teleagentAdapter TeleAgent（TeleAI）：OpenAI 兼容，但要 super agent 签名头。
+type teleagentAdapter struct{ h *Hub }
+
+func (a teleagentAdapter) Key() string { return "teleagent" }
+
+func (a teleagentAdapter) Running() bool {
+	p := a.h.teleagentForAgg()
+	return p != nil && p.Running()
+}
+
+func (a teleagentAdapter) Start() (bool, string) { return a.h.startTeleagent() }
+func (a teleagentAdapter) Stop() (bool, string)  { return a.h.stopTeleagent() }
+
+func (a teleagentAdapter) Chat(w http.ResponseWriter, r *http.Request) {
+	if p := a.h.teleagentForAgg(); p != nil {
+		p.handleChat(w, r)
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"error": map[string]any{"message": "TeleAgent 线路未初始化", "type": "line_unavailable"},
+	})
+}
+
+func (a teleagentAdapter) NativeResponses() http.HandlerFunc { return nil }
+
+func (a teleagentAdapter) Models() []string {
+	out := make([]string, 0, len(teleagentModels))
+	for _, m := range teleagentModels {
+		if !m.Disabled {
+			out = append(out, m.ID)
+		}
+	}
+	return out
+}
+
 // zcodeAdapter Zcode：启动需要 apiKey（由 /api/zcode/start 的请求体带进来），
 // 所以它的 Start 在注册表里返回「请用专用入口」，真正的启动走 apiZcodeStart。
 type zcodeAdapter struct{ h *Hub }
@@ -269,13 +304,14 @@ func (a mimoAdapter) Models() []string                  { return nil }
 
 // lineAdapters 线路注册表：新增线路在这里加一行构造器。
 var lineAdapters = map[string]func(*Hub) lineAdapter{
-	"dom":   func(h *Hub) lineAdapter { return proxyLineAdapter{h: h, key: "dom"} },
-	"intl":  func(h *Hub) lineAdapter { return proxyLineAdapter{h: h, key: "intl"} },
-	"qoder": func(h *Hub) lineAdapter { return qoderAdapter{h: h} },
-	"trae":  func(h *Hub) lineAdapter { return traeAdapter{h: h} },
-	"zcode": func(h *Hub) lineAdapter { return zcodeAdapter{h: h} },
-	"mimo":  func(h *Hub) lineAdapter { return mimoAdapter{h: h} },
-	"oc":    func(h *Hub) lineAdapter { return ocAdapter{h: h} },
+	"dom":       func(h *Hub) lineAdapter { return proxyLineAdapter{h: h, key: "dom"} },
+	"intl":      func(h *Hub) lineAdapter { return proxyLineAdapter{h: h, key: "intl"} },
+	"qoder":     func(h *Hub) lineAdapter { return qoderAdapter{h: h} },
+	"trae":      func(h *Hub) lineAdapter { return traeAdapter{h: h} },
+	"teleagent": func(h *Hub) lineAdapter { return teleagentAdapter{h: h} },
+	"zcode":     func(h *Hub) lineAdapter { return zcodeAdapter{h: h} },
+	"mimo":      func(h *Hub) lineAdapter { return mimoAdapter{h: h} },
+	"oc":        func(h *Hub) lineAdapter { return ocAdapter{h: h} },
 }
 
 // adapterFor 取某条线路的适配器；未注册返回 false。

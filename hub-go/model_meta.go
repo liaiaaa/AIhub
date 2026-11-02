@@ -59,6 +59,13 @@ var staticModelMeta = map[string]map[string]modelMeta{
 		"gemini-3.8-flash":    {ContextWindow: 1048576, MaxInput: 65536, Efforts: []string{"low", "medium", "high", "max"}},
 		"gemini-3.5-flash":    {ContextWindow: 1048576, MaxInput: 65536, Efforts: []string{"low", "medium", "high", "max"}},
 	},
+	"teleagent": {
+		"chat-pro":      {ContextWindow: 400000, MaxInput: 65536},
+		"chat-lite":     {ContextWindow: 100000, MaxInput: 16384},
+		"chat-nano":     {ContextWindow: 100000, MaxInput: 16384},
+		"chat-flash":    {},
+		"chat-flagship": {},
+	},
 	"trae": {
 		// 2026-11-01 补：数值不是猜的，来自 Trae CN 桌面端自己缓存的模型目录 ——
 		// ~/.config/Trae CN/User/globalStorage/state.vscdb

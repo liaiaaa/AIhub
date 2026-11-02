@@ -38,6 +38,7 @@ var lineSpecs = []lineSpec{
 	{Key: "intl", Display: "国际 WorkBuddy AI", Port: IntlPort, LogFile: "converter-intl.log", Aggregated: true},
 	{Key: "qoder", Display: "Qoder CN（阿里）", Port: QoderPort, LogFile: "converter-qoder.log", Aggregated: true},
 	{Key: "trae", Display: "Trae CN（字节）", Port: TraePort, LogFile: "converter-trae.log", Aggregated: true},
+	{Key: "teleagent", Display: "TeleAgent（TeleAI）", Port: TeleAgentPort, LogFile: "converter-teleagent.log", Aggregated: true, Risk: "逆向"},
 	{Key: "zcode", Display: "Zcode（Z.ai）", Port: ZcodePort, LogFile: "converter-zcode.log", Aggregated: true},
 	{Key: "mimo", Display: "MiMo（小米）", Port: MimoPort, LogFile: "converter-mimo.log"},
 	{Key: "oc", Display: "OpenCode 免费档", Port: OpencodePort, LogFile: "converter-opencode.log", Aggregated: true},

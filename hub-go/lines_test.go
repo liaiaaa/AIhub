@@ -23,6 +23,8 @@ func TestLineSpecsPortsUnchanged(t *testing.T) {
 		"zcode": 8796,
 		"mimo":  8798,
 		"oc":    8800,
+		// 2026-11-02 新增 TeleAgent（TeleAI）线路
+		"teleagent": 8794,
 	}
 	got := make(map[string]int, len(lineSpecs))
 	for _, s := range lineSpecs {
@@ -40,7 +42,7 @@ func TestLineSpecsPortsUnchanged(t *testing.T) {
 
 // TestLineKeysOrderUnchanged 线路顺序与 knownLineNames 收敛前一致。
 func TestLineKeysOrderUnchanged(t *testing.T) {
-	want := []string{"dom", "intl", "qoder", "trae", "zcode", "mimo", "oc"}
+	want := []string{"dom", "intl", "qoder", "trae", "teleagent", "zcode", "mimo", "oc"}
 	got := lineKeys()
 	if len(got) != len(want) {
 		t.Fatalf("线路名条数 = %d，期望 %d", len(got), len(want))
@@ -58,7 +60,7 @@ func TestLineKeysOrderUnchanged(t *testing.T) {
 // TestAggregatedLinePortsUnchanged 参与聚合的线路集合与端口，与收敛前 aggLinePort 一致
 // （注意：mimo 不参与聚合，收敛前后都不能出现在这里）。
 func TestAggregatedLinePortsUnchanged(t *testing.T) {
-	want := map[string]int{"dom": 8787, "intl": 8799, "qoder": 8797, "trae": 8795, "zcode": 8796, "oc": 8800}
+	want := map[string]int{"dom": 8787, "intl": 8799, "qoder": 8797, "trae": 8795, "teleagent": 8794, "zcode": 8796, "oc": 8800}
 	got := aggregatedLinePorts()
 	if len(got) != len(want) {
 		t.Fatalf("聚合线路条数 = %d，期望 %d（mimo 不应参与聚合）", len(got), len(want))

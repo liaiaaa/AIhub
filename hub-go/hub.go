@@ -24,7 +24,8 @@ type Hub struct {
 	qoder     *QoderProxy
 	zcode     *ZcodeProxy
 	trae      *TraeProxy
-	oc        *OpencodeProxy // OpenCode 免费档（2026-10-15，只挂免费模型）
+	teleagent *TeleAgentProxy // TeleAgent（TeleAI，2026-11-02）
+	oc        *OpencodeProxy  // OpenCode 免费档（2026-10-15，只挂免费模型）
 	intlCred  string
 	domCred   string // 国内凭证（目录名）；空 = 传统解析（2026-10-13 国内多凭证）
 	checkin   checkinRecord
@@ -552,6 +553,49 @@ func (h *Hub) stopTrae() (bool, string) {
 	return false, "Trae 停止失败"
 }
 
+// startTeleagent 起 TeleAgent 线路（2026-11-02）。
+// 凭据来自 Electron safeStorage（teleagent_vault.go）+ device-meta.json。
+func (h *Hub) startTeleagent() (bool, string) {
+	h.mu.Lock()
+	if h.teleagent != nil && h.teleagent.Running() {
+		h.mu.Unlock()
+		return true, "已在运行"
+	}
+	h.mu.Unlock()
+
+	p := NewTeleAgentProxy(TeleAgentPort)
+	ok, msg := p.Start()
+	if !ok {
+		return false, msg
+	}
+	h.mu.Lock()
+	if h.teleagent != nil && h.teleagent.Running() {
+		h.mu.Unlock()
+		p.Stop()
+		return true, "已在运行"
+	}
+	h.teleagent = p
+	h.mu.Unlock()
+	h.rememberLine("teleagent")
+	return true, msg
+}
+
+func (h *Hub) stopTeleagent() (bool, string) {
+	h.mu.Lock()
+	p := h.teleagent
+	h.teleagent = nil
+	h.mu.Unlock()
+	if p == nil {
+		h.forgetLine("teleagent")
+		return true, "TeleAgent 已停止"
+	}
+	if ok, _ := p.Stop(); ok {
+		h.forgetLine("teleagent")
+		return true, "TeleAgent 已停止"
+	}
+	return false, "TeleAgent 停止失败"
+}
+
 // startOpencode 起 OpenCode 免费档线路（2026-10-15）。
 // 无需本机凭据：走的是上游公开的匿名 "public" 凭据。
 func (h *Hub) startOpencode() (bool, string) {
@@ -732,21 +776,21 @@ func (h *Hub) statusMap() map[string]any {
 	}
 	sort.Strings(creds) // 固定顺序，避免下拉/单选框每次刷新都跳动
 	return map[string]any{
-		"dom":        dom,
-		"intl":       intl,
-		"mimo":       mimo,
-		"qoder":      qoder,
-		"zcode":      zcode,
-		"trae":       trae,
-		"oc":         oc,
-		"intl_cred":  cred,
-		"creds":      creds,
-		"dom_cred":   domCred,
-		"dom_creds":  domCredNames(),
+		"dom":          dom,
+		"intl":         intl,
+		"mimo":         mimo,
+		"qoder":        qoder,
+		"zcode":        zcode,
+		"trae":         trae,
+		"oc":           oc,
+		"intl_cred":    cred,
+		"creds":        creds,
+		"dom_cred":     domCred,
+		"dom_creds":    domCredNames(),
 		"default_cred": defaultIntlCred,
-		"checkin":    h.checkinSnapshot(),
-		"agg":        aggStatusEntry(),
-		"ctx_window": h.contextWindow(),
+		"checkin":      h.checkinSnapshot(),
+		"agg":          aggStatusEntry(),
+		"ctx_window":   h.contextWindow(),
 	}
 }
 

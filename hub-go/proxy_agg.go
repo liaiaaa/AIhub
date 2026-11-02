@@ -55,14 +55,14 @@ var (
 // aggLinePort 各线路本地端口（拉取在线模型目录用，与 webui SERVICES 一致）。
 // "agg" 不是真实线路，是「被聚合口拒掉的请求」的统计归属（如未知模型 400），
 // 没有它用量表会显示成空名字（见 usage_stats.go 的 line_cn）。
-var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "zcode": "Zcode", "oc": "OpenCode免费", "official": "官方", "agg": "聚合口(未受理)"}
+var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "teleagent": "TeleAgent", "zcode": "Zcode", "oc": "OpenCode免费", "official": "官方", "agg": "聚合口(未受理)"}
 
 // aggSelectableLine 判断是不是「可挂模型的真实线路」。
 // 不能拿 aggLineCN 当校验表——它含 "agg" 这个纯统计用的键，
 // 用它校验会让 /api/agg/add?line=agg 被误认为合法线路。
 func aggSelectableLine(line string) bool {
 	switch line {
-	case "dom", "intl", "qoder", "trae", "zcode", "oc":
+	case "dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc":
 		return true
 	}
 	return false
@@ -425,6 +425,12 @@ func (h *Hub) traeForAgg() *TraeProxy {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.trae
+}
+
+func (h *Hub) teleagentForAgg() *TeleAgentProxy {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.teleagent
 }
 
 func (h *Hub) zcodeForAgg() *ZcodeProxy {

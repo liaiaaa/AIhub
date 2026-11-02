@@ -712,6 +712,7 @@ func (h *Hub) statusMap() map[string]any {
 	domCred := h.domCred
 	traeP := h.trae
 	ocP := h.oc
+	teleagentP := h.teleagent
 	h.mu.Unlock()
 
 	dom := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
@@ -769,6 +770,15 @@ func (h *Hub) statusMap() map[string]any {
 		oc["models"] = len(opencodeFreeModels)
 	}
 
+	// TeleAgent（TeleAI，2026-11-02）：模型数与线路详情由本地常量给出。
+	teleagent := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
+	if teleagentP != nil && teleagentP.Running() {
+		teleagent["up"] = true
+		teleagent["ok"] = true
+		teleagent["detail"] = fmt.Sprintf("TeleAI 云端 · %d 个模型 · 桌面端凭据自动解密", len(teleagentModels)-1)
+		teleagent["models"] = len(teleagentModels) - 1
+	}
+
 	dirs := credDirs()
 	creds := make([]string, 0, len(dirs))
 	for k := range dirs {
@@ -783,6 +793,7 @@ func (h *Hub) statusMap() map[string]any {
 		"zcode":        zcode,
 		"trae":         trae,
 		"oc":           oc,
+		"teleagent":    teleagent,
 		"intl_cred":    cred,
 		"creds":        creds,
 		"dom_cred":     domCred,

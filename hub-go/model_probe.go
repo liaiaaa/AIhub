@@ -24,12 +24,12 @@ import (
 )
 
 type modelProbeItem struct {
-	ID       string         `json:"id"`
-	Display  string         `json:"display,omitempty"` // 官方显示名（qoder 内部 key 的翻译）
-	Ratio    string         `json:"ratio,omitempty"`   // "免费" / "0.06x"；空 = 无公开倍率数据
-	Meta     map[string]any `json:"meta,omitempty"`    // 上下文/输入上限/思考档位
-	Free     bool           `json:"free"`
-	New      bool           `json:"new"`
+	ID      string         `json:"id"`
+	Display string         `json:"display,omitempty"` // 官方显示名（qoder 内部 key 的翻译）
+	Ratio   string         `json:"ratio,omitempty"`   // "免费" / "0.06x"；空 = 无公开倍率数据
+	Meta    map[string]any `json:"meta,omitempty"`    // 上下文/输入上限/思考档位
+	Free    bool           `json:"free"`
+	New     bool           `json:"new"`
 }
 
 type modelProbeLine struct {
@@ -317,7 +317,7 @@ func probeLine(h *Hub, key string) modelProbeLine {
 	return line
 }
 
-var modelProbeLines = []string{"dom", "intl", "qoder", "trae", "zcode", "oc"}
+var modelProbeLines = []string{"dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc"}
 
 // probeAllModels 并发探测全部线路。
 func probeAllModels(h *Hub) []modelProbeLine {

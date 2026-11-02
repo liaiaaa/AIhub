@@ -667,6 +667,7 @@
             <option value="dom">国内 WorkBuddy</option>
             <option value="qoder">Qoder</option>
             <option value="trae">Trae</option>
+            <option value="teleagent">TeleAgent</option>
             <option value="zcode">Zcode</option>
             <option value="oc">OpenCode 免费档</option>
           </select>
@@ -1714,8 +1715,8 @@ async function aggLoadLineModels() {
 // 模型标识的显示美化：slug 里的线路代号换成中文（协议值不变，title 里保留完整名）。
 // 目录/白名单返回 intl.deepseek-v4.1-flash 形态，网关记账还有 ccs-dom/xxx 形态，两种都映射。
 const SLUG_CN = {
-  'intl.': '国际·', 'dom.': '国内·', 'qoder.': 'Qoder·', 'trae.': 'Trae·', 'zcode.': 'Zcode·', 'mimo.': 'MiMo·', 'oc.': 'OpenCode免费·',
-  'ccs-intl/': '国际·', 'ccs-dom/': '国内·', 'ccs-qoder/': 'Qoder·', 'ccs-trae/': 'Trae·', 'ccs-zcode/': 'Zcode·', 'ccs-mimo/': 'MiMo·', 'ccs-oc/': 'OpenCode免费·',
+  'intl.': '国际·', 'dom.': '国内·', 'qoder.': 'Qoder·', 'trae.': 'Trae·', 'zcode.': 'Zcode·', 'mimo.': 'MiMo·', 'oc.': 'OpenCode免费·', 'teleagent.': 'TeleAgent·',
+  'ccs-intl/': '国际·', 'ccs-dom/': '国内·', 'ccs-qoder/': 'Qoder·', 'ccs-trae/': 'Trae·', 'ccs-zcode/': 'Zcode·', 'ccs-mimo/': 'MiMo·', 'ccs-oc/': 'OpenCode免费·', 'ccs-teleagent/': 'TeleAgent·',
 };
 function slugCN(slug) {
   const s = String(slug || '');

@@ -364,12 +364,65 @@ type qoderUsageQuota struct {
 	Total     float64 `json:"total"`
 }
 
+// qoderDedicatedPackage 专用积分包（活动赠送，例如「Qwen 专属积分」）。
+// 2026-11-02 实测原始返回（该账号同时有 3 个池）：
+//
+//	userQuota        remaining=1316 total=2000   ← 订阅额度
+//	addOnQuota       remaining=1100 total=2900   ← 加油包
+//	dedicatedResourcePackages[0] remaining=2000 total=2000
+//	    name=act-20260901-170 status=QUOTA_DETAIL_STATUS_ACTIVE
+//	    displayLabels[title].valueI18n["zh-CN"]="Qwen 专属积分"
+//
+// 原来只累加 userQuota + addOnQuota = 2416，用户报「赠送的 2000 没统计」就是这个池。
+type qoderDedicatedPackage struct {
+	Name          string  `json:"name"`
+	Remaining     float64 `json:"remaining"`
+	Total         float64 `json:"total"`
+	Used          float64 `json:"used"`
+	Unit          string  `json:"unit"`
+	Status        string  `json:"status"`
+	ExpiresAt     int64   `json:"expiresAt"`
+	Description   string  `json:"description"`
+	DisplayLabels []struct {
+		Dimension string            `json:"dimension"`
+		Value     string            `json:"value"`
+		ValueI18n map[string]string `json:"valueI18n"`
+	} `json:"displayLabels"`
+}
+
+// active 只有 ACTIVE 状态的包才算额度（过期/耗尽的不计）。
+func (p qoderDedicatedPackage) active() bool {
+	if p.Status != "" && p.Status != "QUOTA_DETAIL_STATUS_ACTIVE" {
+		return false
+	}
+	return p.Remaining > 0 || p.Total > 0
+}
+
+// title 取展示名：优先中文 i18n 的 title 维度，退 name -> description。
+func (p qoderDedicatedPackage) title() string {
+	for _, l := range p.DisplayLabels {
+		if l.Dimension == "title" {
+			if zh := l.ValueI18n["zh-CN"]; zh != "" {
+				return zh
+			}
+			if l.Value != "" {
+				return l.Value
+			}
+		}
+	}
+	if p.Name != "" {
+		return p.Name
+	}
+	return "活动积分"
+}
+
 // qoderUsagePayload /sash/api/v2/me/usage 的 qoderUsage 信封体（裸形态同构）。
 type qoderUsagePayload struct {
-	UserQuota       qoderUsageQuota  `json:"userQuota"`
-	AddOnQuota      *qoderUsageQuota `json:"addOnQuota"`
-	IsQuotaExceeded bool             `json:"isQuotaExceeded"`
-	ExpiresAt       int64            `json:"expiresAt"`
+	UserQuota                 qoderUsageQuota         `json:"userQuota"`
+	AddOnQuota                *qoderUsageQuota        `json:"addOnQuota"`
+	DedicatedResourcePackages []qoderDedicatedPackage `json:"dedicatedResourcePackages"`
+	IsQuotaExceeded           bool                    `json:"isQuotaExceeded"`
+	ExpiresAt                 int64                   `json:"expiresAt"`
 }
 
 func qoderCredits() *creditInfo {
@@ -403,16 +456,42 @@ func qoderCredits() *creditInfo {
 	if usage == nil {
 		return &creditInfo{OK: false, Text: "Qoder 响应里没有额度数据"}
 	}
+	return qoderCreditsFromUsage(usage)
+}
+
+// qoderCreditsFromUsage 把 /me/usage 的额度对象转成控制台显示文案（抽出来便于单测）。
+func qoderCreditsFromUsage(usage *qoderUsagePayload) *creditInfo {
 	remain := usage.UserQuota.Remaining
 	total := usage.UserQuota.Total
 	if usage.AddOnQuota != nil {
 		remain += usage.AddOnQuota.Remaining
 		total += usage.AddOnQuota.Total
 	}
+	baseRemain := remain
+
+	// 活动赠送的专用积分包（如「Qwen 专属积分」）：计进总额，但**单列说明**——
+	// 它们只对特定模型生效且有到期时间，混进主余额会让人以为随时可用。
+	var pkgParts []string
+	for _, pkg := range usage.DedicatedResourcePackages {
+		if !pkg.active() {
+			continue
+		}
+		remain += pkg.Remaining
+		total += pkg.Total
+		part := fmt.Sprintf("%s %s", pkg.title(), fmtCN(pkg.Remaining))
+		if pkg.ExpiresAt > 0 {
+			part += "（" + time.UnixMilli(pkg.ExpiresAt).Format("01-02") + " 到期）"
+		}
+		pkgParts = append(pkgParts, part)
+	}
 	if usage.ExpiresAt > 0 && time.Now().UnixMilli() > usage.ExpiresAt {
 		return &creditInfo{OK: true, Text: "额度已过期（剩 " + fmtCN(remain) + "）", FetchedAt: time.Now().Format("15:04")}
 	}
-	return &creditInfo{OK: true, Text: "余额 " + fmtCN(remain) + " / " + fmtCN(total) + " Credits", FetchedAt: time.Now().Format("15:04")}
+	text := fmt.Sprintf("余额 %s / %s Credits", fmtCN(remain), fmtCN(total))
+	if len(pkgParts) > 0 {
+		text += fmt.Sprintf("（主额度 %s，另含 %s）", fmtCN(baseRemain), strings.Join(pkgParts, "、"))
+	}
+	return &creditInfo{OK: true, Text: text, FetchedAt: time.Now().Format("15:04")}
 }
 
 // ---------- Trae ----------

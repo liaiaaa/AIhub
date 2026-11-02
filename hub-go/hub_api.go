@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -22,6 +23,7 @@ import (
 //   - :15721 TCP 探测（通不通）；
 //   - ~/.cc-switch/live-state.json 的 apps.codex（mode/attached/stack 成员）；
 //   - ~/.codex/cc-switch-model-catalog.json（聚合发布的模型目录，best-effort）。
+//
 // 后两者不在 hub-go 管辖内，读不到就只报端口状态，不报错。
 // apiGateway 统一网关状态。
 //
@@ -304,6 +306,28 @@ func (h *Hub) apiCtxWindow(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) apiIntlCheckin(w http.ResponseWriter, r *http.Request) {
 	ok, msg := runIntlCheckin(h)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
+}
+
+// apiCreditsHistory 近 N 天各账号余额序列 + 每日消耗/到账（2026-11-02 用户要求）。
+//
+// 上游没有消费明细接口（Qoder 的 /me/usage/records 等 8 个候选路径实测全 404），
+// 所以消耗只能由「每日余额差 + 总额度变化」反推：
+//
+//	Granted  = max(0, total - prevTotal)        充值/赠送
+//	Consumed = Granted - (remain - prevRemain)  真正花掉的
+//
+// 数据来自 credit_history.json（每个账号每天一条，同日覆盖），只读、幂等。
+func (h *Hub) apiCreditsHistory(w http.ResponseWriter, r *http.Request) {
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 30 {
+			days = n
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days":     days,
+		"accounts": creditHistorySeries(days),
+	})
 }
 
 // apiCredits 各平台剩余额度（5 分钟缓存，?force=1 作废缓存后台补拉）。

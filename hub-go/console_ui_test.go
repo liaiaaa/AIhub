@@ -120,3 +120,21 @@ func TestConsolePageAnchor(t *testing.T) {
 		}
 	}
 }
+
+// TestConsoleCreditUseCard 积分消耗卡片（2026-11-02）：必须调 /api/credits/history
+// 并把「今日消耗 / 近 7 天消耗 / 到账」三列渲染出来，避免以后退化成只显示余额。
+func TestConsoleCreditUseCard(t *testing.T) {
+	src := consoleSource(t)
+	for _, want := range []string{
+		`id="credit-use-card"`,
+		`id="credit-use"`,
+		"/api/credits/history?days=7",
+		"今日消耗",
+		"近 7 天消耗",
+		"近 7 天到账",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("控制台缺少 %q（积分消耗卡片）", want)
+		}
+	}
+}

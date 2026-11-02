@@ -726,6 +726,11 @@
         <button class="text" onclick="exportUsageCSV()">导出 CSV</button>
         <button class="text" onclick="loadUsage()">刷新</button>
       </div>
+      <div class="card" id="credit-use-card">
+        <div class="card-h"><span class="t">积分消耗（近 7 天）</span>
+          <span class="tag">由每日余额差反推 · 上游没有消费明细接口</span></div>
+        <div id="credit-use"><div class="gw-desc">加载中…</div></div>
+      </div>
       <div id="usage-body"><div class="gw-desc" id="usage-empty">加载中…</div></div>
     </div>
 
@@ -1839,6 +1844,47 @@ function setUsageDays(d) {
   });
   loadUsage();
 }
+// 积分消耗（2026-11-02）：上游无消费明细接口，只能拿每日余额快照反推：
+//   Granted = max(0, total 增加量)       充值/赠送
+//   Consumed = Granted - (remain 减少量) 真正花掉的
+// 后端 /api/credits/history 已算好，前端只负责排表。
+async function loadCreditUse() {
+  const box = document.getElementById('credit-use');
+  if (!box || document.getElementById('page-usage').hidden) return;
+  try {
+    const r = await fetch('/api/credits/history?days=7', { signal: AbortSignal.timeout(12000) });
+    const d = await r.json();
+    renderCreditUse(d.accounts || []);
+  } catch (e) {
+    box.innerHTML = '<div class="gw-desc">加载失败：' + e + '</div>';
+  }
+}
+function fmtCredits(v) {
+  if (!v) return '—';
+  return (Math.round(v * 100) / 100).toLocaleString();
+}
+function renderCreditUse(accounts) {
+  const box = document.getElementById('credit-use');
+  if (!box) return;
+  if (!accounts.length) {
+    box.innerHTML = '<div class="gw-desc">还没有余额快照。控制台每 5 分钟抓一次额度，攒够两天就能算出消耗。</div>';
+    return;
+  }
+  let h = '<table class="agg-table"><thead><tr>' +
+    '<th style="width:190px">账号</th><th>今日消耗</th><th>近 7 天消耗</th>' +
+    '<th>近 7 天到账</th><th>当前余额</th></tr></thead><tbody>';
+  accounts.forEach(function (a) {
+    const used = a.today_used > 0 ? '<b style="color:var(--warn,#b45309)">' + fmtCredits(a.today_used) + '</b>' : '—';
+    const granted = a.period_granted > 0 ? '<span style="color:var(--ok,#0f766e)">+' + fmtCredits(a.period_granted) + '</span>' : '—';
+    h += '<tr><td>' + (a.name || a.uid) + '</td>' +
+         '<td>' + used + '</td>' +
+         '<td>' + fmtCredits(a.period_used) + '</td>' +
+         '<td>' + granted + '</td>' +
+         '<td>' + fmtCredits(a.latest ? a.latest.remain : 0) + ' / ' + fmtCredits(a.latest ? a.latest.total : 0) + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  box.innerHTML = h;
+}
 async function loadUsage() {
   if (document.getElementById('page-usage').hidden) return;
   try {
@@ -1853,6 +1899,7 @@ async function loadUsage() {
       } catch (e) { usagePrev = null; }
     }
     renderUsage();
+    loadCreditUse();
   } catch (e) {
     document.getElementById('usage-body').innerHTML = '<div class="gw-desc">加载失败：' + e + '</div>';
   }

@@ -115,6 +115,7 @@ func main() {
 	mux.HandleFunc("/api/ratios", hub.apiRatios)
 	mux.HandleFunc("/api/clients/restore", hub.apiClientsRestore)
 	mux.HandleFunc("/api/credits", hub.apiCredits)
+	mux.HandleFunc("/api/credits/history", hub.apiCreditsHistory)
 	mux.HandleFunc("/api/usage", hub.apiUsage)
 	mux.HandleFunc("/api/gateway", hub.apiGateway)
 	mux.HandleFunc("/api/stop_all", hub.apiStopAll)

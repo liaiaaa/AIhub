@@ -418,6 +418,7 @@ func (p qoderDedicatedPackage) title() string {
 
 // qoderUsagePayload /sash/api/v2/me/usage 的 qoderUsage 信封体（裸形态同构）。
 type qoderUsagePayload struct {
+	UserID                    string                  `json:"userId"`
 	UserQuota                 qoderUsageQuota         `json:"userQuota"`
 	AddOnQuota                *qoderUsageQuota        `json:"addOnQuota"`
 	DedicatedResourcePackages []qoderDedicatedPackage `json:"dedicatedResourcePackages"`
@@ -440,6 +441,9 @@ func qoderCredits() *creditInfo {
 	if err != nil || status != http.StatusOK {
 		return &creditInfo{OK: false, Text: fmt.Sprintf("Qoder 额度查询失败（HTTP %d）", status)}
 	}
+	// 余额快照记账（2026-11-02 用户要求「加个积分消耗统计」）：
+	// 上游没有消费明细接口（/me/usage/records 等 8 个候选路径实测全 404），
+	// 所以只能靠每日余额差反推消耗，先把快照存下来。
 	// 两种形态：displayMode 信封 {"qoderUsage":{...}}（桌面端同款）与裸顶层
 	var envelope struct {
 		QoderUsage *qoderUsagePayload `json:"qoderUsage"`
@@ -456,7 +460,40 @@ func qoderCredits() *creditInfo {
 	if usage == nil {
 		return &creditInfo{OK: false, Text: "Qoder 响应里没有额度数据"}
 	}
-	return qoderCreditsFromUsage(usage)
+	info := qoderCreditsFromUsage(usage)
+	if remain, total, ok := qoderCreditsTotals(usage); ok {
+		uid := usage.UserID
+		if uid == "" {
+			uid = "qoder"
+		}
+		creditHistoryRecord(uid, "Qoder CN", remain, total)
+		info.Diff = creditHistoryDiffText(uid)
+	}
+	return info
+}
+
+// qoderCreditsTotals 三个池的剩余/总额（与 qoderCreditsFromUsage 同一口径）。
+func qoderCreditsTotals(usage *qoderUsagePayload) (remain, total float64, ok bool) {
+	if usage == nil {
+		return 0, 0, false
+	}
+	remain = usage.UserQuota.Remaining
+	total = usage.UserQuota.Total
+	if usage.AddOnQuota != nil {
+		remain += usage.AddOnQuota.Remaining
+		total += usage.AddOnQuota.Total
+	}
+	for _, pkg := range usage.DedicatedResourcePackages {
+		if !pkg.active() {
+			continue
+		}
+		remain += pkg.Remaining
+		total += pkg.Total
+	}
+	if total <= 0 {
+		return 0, 0, false
+	}
+	return remain, total, true
 }
 
 // qoderCreditsFromUsage 把 /me/usage 的额度对象转成控制台显示文案（抽出来便于单测）。
@@ -552,7 +589,14 @@ func traeCredits() *creditInfo {
 	if total == 0 {
 		return &creditInfo{OK: true, Text: "暂无额度包", FetchedAt: time.Now().Format("15:04")}
 	}
-	return &creditInfo{OK: true, Text: "余额 " + fmtCN(remain) + " / " + fmtCN(total) + " 积分", FetchedAt: time.Now().Format("15:04")}
+	// 记入每日快照：Trae 没有账号 uid 可用，用固定键（单账号场景）。
+	creditHistoryRecord("trae", "Trae CN", remain, total)
+	return &creditInfo{
+		OK:        true,
+		Text:      "余额 " + fmtCN(remain) + " / " + fmtCN(total) + " 积分",
+		FetchedAt: time.Now().Format("15:04"),
+		Diff:      creditHistoryDiffText("trae"),
+	}
 }
 
 // ---------- 展示工具 ----------

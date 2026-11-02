@@ -33,8 +33,8 @@ type creditSnapshot struct {
 
 // creditHistoryEntry 一个账号的历史：日期 → 快照。
 type creditHistoryEntry struct {
-	Name string                     `json:"name,omitempty"` // 最近一次见到的昵称，便于辨认
-	Days map[string]creditSnapshot  `json:"days"`
+	Name string                    `json:"name,omitempty"` // 最近一次见到的昵称，便于辨认
+	Days map[string]creditSnapshot `json:"days"`
 }
 
 var creditHistoryState = struct {
@@ -195,4 +195,121 @@ func creditHistoryDiffText(uid string) string {
 		d = -d
 	}
 	return "较 " + day[5:] + " " + sign + fmtCN(d)
+}
+
+// creditDayView 一天的余额与「消耗 / 到账」拆解。
+//
+// 只靠余额差值分不清「花掉了」和「充值了」，所以用总额度一起看：
+//
+//	Granted  = max(0, total - prevTotal)      ← 总额涨了 = 充值/赠送
+//	Consumed = Granted - (remain - prevRemain) ← 余额减少超过到账的部分就是花掉的
+//
+// 首次出现的日期没有基线，两项都记 0（只做展示起点）。
+type creditDayView struct {
+	Date     string  `json:"date"`
+	Remain   float64 `json:"remain"`
+	Total    float64 `json:"total"`
+	Consumed float64 `json:"consumed"`
+	Granted  float64 `json:"granted"`
+}
+
+// creditAccountSeries 一个账号的序列。
+type creditAccountSeries struct {
+	UID           string          `json:"uid"`
+	Name          string          `json:"name"`
+	Latest        creditSnapshot  `json:"latest"`
+	TodayUsed     float64         `json:"today_used"`
+	PeriodUsed    float64         `json:"period_used"`
+	PeriodGranted float64         `json:"period_granted"`
+	Days          []creditDayView `json:"days"`
+}
+
+// creditHistorySeries 取全部账号最近 days 天的余额序列（按日期升序）。
+func creditHistorySeries(days int) []creditAccountSeries {
+	if days <= 0 {
+		days = 7
+	}
+	if days > creditHistoryDays {
+		days = creditHistoryDays
+	}
+	creditHistoryState.mu.Lock()
+	loadCreditHistoryLocked()
+	uids := make([]string, 0, len(creditHistoryState.entries))
+	for uid := range creditHistoryState.entries {
+		uids = append(uids, uid)
+	}
+	// 快照一份，避免持有锁期间做排序/计算
+	type acct struct {
+		name string
+		days map[string]creditSnapshot
+	}
+	tmp := make(map[string]acct, len(uids))
+	for _, uid := range uids {
+		e := creditHistoryState.entries[uid]
+		if e == nil {
+			continue
+		}
+		cp := make(map[string]creditSnapshot, len(e.Days))
+		for d, v := range e.Days {
+			cp[d] = v
+		}
+		tmp[uid] = acct{name: e.Name, days: cp}
+	}
+	creditHistoryState.mu.Unlock()
+
+	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	today := time.Now().Format("2006-01-02")
+	out := make([]creditAccountSeries, 0, len(tmp))
+	for uid, a := range tmp {
+		dates := make([]string, 0, len(a.days))
+		for d := range a.days {
+			if d >= cutoff {
+				dates = append(dates, d)
+			}
+		}
+		if len(dates) == 0 {
+			continue
+		}
+		// 升序（日期是 YYYY-MM-DD，字符串序即时间序）
+		for i := 1; i < len(dates); i++ {
+			for j := i; j > 0 && dates[j] < dates[j-1]; j-- {
+				dates[j], dates[j-1] = dates[j-1], dates[j]
+			}
+		}
+		item := creditAccountSeries{UID: uid, Name: a.name}
+		var prev *creditSnapshot
+		for _, d := range dates {
+			cur := a.days[d]
+			view := creditDayView{Date: d, Remain: cur.Remain, Total: cur.Total}
+			if prev != nil {
+				granted := cur.Total - prev.Total
+				if granted < 0 {
+					granted = 0
+				}
+				used := granted - (cur.Remain - prev.Remain)
+				if used < 0 {
+					used = 0
+				}
+				view.Granted = granted
+				view.Consumed = used
+				item.PeriodGranted += granted
+				item.PeriodUsed += used
+				if d == today {
+					item.TodayUsed = used
+				}
+			}
+			snapshot := cur
+			prev = &snapshot
+			item.Days = append(item.Days, view)
+		}
+		item.Latest = a.days[dates[len(dates)-1]]
+		out = append(out, item)
+	}
+	// 消耗多的排前面
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].PeriodUsed > out[j-1].PeriodUsed; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
 }

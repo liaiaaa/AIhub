@@ -569,9 +569,35 @@ func (p *QoderProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		degrade = true
 		env["stream"] = false
 	}
-	payload, _ := json.Marshal(env)
-
 	rid := randHex(4)
+
+	// 字节闸（2026-11-02，起因见 image_shrink.go 顶部注释）：
+	// Codex 那类客户端按 token 算上下文，图片几乎不占 token 却极占字节，
+	// 于是 token 预算还宽松、请求体早已 30MB+ 撞上游 413。这里按字节兜两道：
+	//   ① 先把大图降采样（截图 4MB → 约 100~300KB）；
+	//   ② 仍超上限就把**最老的**图换成 1x1 占位图（最近的视觉上下文保留）。
+	if n, before, after := shrinkDataURLImagesIn(env); n > 0 && p.log != nil {
+		p.log.Log("[%s] ▤ 图片降采样 %d 张：%.1fMB → %.1fMB", rid, n,
+			float64(before)/(1<<20), float64(after)/(1<<20))
+	}
+	payload, _ := json.Marshal(env)
+	if limit := payloadLimitBytes(); len(payload) > limit {
+		var slots []imgSlot
+		collectImageSlots(env, &slots)
+		imgTotal := 0
+		for _, sl := range slots {
+			imgTotal += len(sl.cur)
+		}
+		need := len(payload) - limit
+		if n := trimOldDataURLImagesIn(env, imgTotal-need); n > 0 {
+			before := len(payload)
+			payload, _ = json.Marshal(env)
+			if p.log != nil {
+				p.log.Log("[%s] ✂ 请求体超 %.0fMB 上限，裁掉最老 %d 张图片 | %dKB → %dKB",
+					rid, float64(limit)/(1<<20), n, before/1024, len(payload)/1024)
+			}
+		}
+	}
 	modelName := modelKey
 	if p.log != nil {
 		p.log.Log("[%s] ▶ REQUEST %s | stream=%v | msgs=%d | payload=%dKB%s", rid, modelName, clientStream, len(msgs),

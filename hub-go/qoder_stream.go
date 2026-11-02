@@ -1008,6 +1008,22 @@ func (p *QoderProxy) streamToClient(w http.ResponseWriter, r *http.Request, payl
 			writeErrEvent(http.StatusTooManyRequests, (&qoderQueueError{Info: qi}).Error())
 			return false
 		}
+		// 确定性 4xx（413 请求体过大 / 400 / 422 / 404）：降级重试只会把**同样的
+		// payload** 再传一遍，流量翻倍且必然同样失败（2026-11-02 实测：一次 30.8MB
+		// 的 413 会连带触发一次非流式回退，等于白传 61MB）。直接吐错误。
+		if !headersSent && qoderDeterministic4xx(resp.StatusCode) {
+			msg := truncate(string(b), 500)
+			if resp.StatusCode == http.StatusRequestEntityTooLarge {
+				msg = fmt.Sprintf("上游拒收：请求体 %d 字节（约 %.1fMB）超过其上限 —— 通常是历史里的图片/附件太多，压缩上下文或减少截图后重试。原响应：%s",
+					len(payload), float64(len(payload))/(1<<20), truncate(string(b), 300))
+			}
+			if p.log != nil {
+				p.log.Log("[%s] ✗ HTTP %d 属确定性失败，不做降级重试（省一次 %.1fMB 上传）",
+					rid, resp.StatusCode, float64(len(payload))/(1<<20))
+			}
+			writeErrEvent(resp.StatusCode, msg)
+			return false
+		}
 		// 上游非 200 且尚未写 SSE 头：先不向客户端吐错误，交给调用方降级重试
 		if !headersSent {
 			return true
@@ -1403,4 +1419,15 @@ func (p *QoderProxy) degradedStreamToClient(w http.ResponseWriter, r *http.Reque
 	if p.log != nil {
 		p.log.Log("[%s] ◀ RESPONSE | %.1fs | degrade-stream | finish=%s | think=%d段", rid, elapsed.Seconds(), finish, len(col.reasoning))
 	}
+}
+
+// qoderDeterministic4xx 该状态码重试必然同样失败（同一 payload 再传一遍没用）。
+// 401/403 走「换凭据」路径、429 走排队，都不在这里。
+func qoderDeterministic4xx(code int) bool {
+	switch code {
+	case http.StatusRequestEntityTooLarge, http.StatusBadRequest,
+		http.StatusUnprocessableEntity, http.StatusNotFound:
+		return true
+	}
+	return false
 }

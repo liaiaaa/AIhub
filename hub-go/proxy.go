@@ -32,19 +32,26 @@ var passthroughKeys = []string{
 }
 
 type FileLogger struct {
-	mu sync.Mutex
-	f  *os.File
+	mu   sync.Mutex
+	f    *os.File
+	path string
+	size int64 // 当前文件已写字节数，用于达到阈值时触发轮转
 }
 
 func NewFileLogger(path string) *FileLogger {
 	if path == "" {
 		return nil
 	}
+	rotateIfOversize(path) // 上次运行留下的超大文件，先滚一份
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil
 	}
-	return &FileLogger{f: f}
+	var size int64
+	if fi, statErr := f.Stat(); statErr == nil {
+		size = fi.Size()
+	}
+	return &FileLogger{f: f, path: path, size: size}
 }
 
 func (l *FileLogger) Log(format string, args ...any) {
@@ -55,6 +62,26 @@ func (l *FileLogger) Log(format string, args ...any) {
 	defer l.mu.Unlock()
 	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 	l.f.WriteString(line)
+	l.size += int64(len(line))
+	if l.size >= logMaxBytesHook() {
+		l.rotateLocked()
+	}
+}
+
+// rotateLocked 把当前文件滚走并重新打开（调用方需持锁）。
+func (l *FileLogger) rotateLocked() {
+	if l.path == "" {
+		return
+	}
+	_ = l.f.Close()
+	rotateLogFile(l.path)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		l.f = nil
+		return
+	}
+	l.f = f
+	l.size = 0
 }
 
 // AuthProvider 抽象「怎么拿到后端请求头」。
@@ -572,11 +599,11 @@ func officialCLICodeBuddyUA() string {
 // X-Session-ID，所以这里也不补（CredentialManager 本来就没发）。
 func officialChatHeaders(h map[string]string) map[string]string {
 	now := time.Now()
-	convID := randUUIDv7(now)          // 会话 id：带连字符
-	turnID := uuidv7Hex(now)           // 轮次 id：去连字符
-	msgID := uuidv7Hex(now)            // 消息 id：与 X-Request-ID 同值
-	traceID := uuidv7Hex(now)          // 链路 trace id
-	spanID := randHex(8)               // 16 位十六进制 span
+	convID := randUUIDv7(now) // 会话 id：带连字符
+	turnID := uuidv7Hex(now)  // 轮次 id：去连字符
+	msgID := uuidv7Hex(now)   // 消息 id：与 X-Request-ID 同值
+	traceID := uuidv7Hex(now) // 链路 trace id
+	spanID := randHex(8)      // 16 位十六进制 span
 
 	out := make(map[string]string, len(h)+22)
 	for k, v := range h {
@@ -756,7 +783,6 @@ func (p *Proxy) aggregateToClient(w http.ResponseWriter, r *http.Request, auth A
 	logger.Log("[%s] ◀ RESPONSE | %.1fs | finish=%s | tokens=%s", rid, elapsed.Seconds(), col.finish, tokens)
 	writeJSON(w, http.StatusOK, col.build())
 }
-
 
 // domDumpKeep dom 线路失败样本（渠道拦截载荷）保留份数。
 // 只留最近几份够对比定位；数据根要在开源后随仓库/文档可见，明文对话历史

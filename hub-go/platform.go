@@ -50,7 +50,9 @@ func sweepPorts() {
 
 func logHub(format string, args ...any) {
 	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
-	if f, err := os.OpenFile(dataPath("hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+	hubLogPath := dataPath("hub.log")
+	rotateIfOversize(hubLogPath) // hub.log 同样是追加写，不检查会一直涨
+	if f, err := os.OpenFile(hubLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 		f.WriteString(line)
 		f.Close()
 	}

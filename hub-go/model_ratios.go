@@ -11,10 +11,10 @@ package main
 
 import (
 	"encoding/json"
-	"sync"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var modelRatios = map[string]map[string]float64{
@@ -23,6 +23,13 @@ var modelRatios = map[string]map[string]float64{
 	// DeepSeek-V4-Pro 0.51x、GLM-5.3 0.79x、GLM-5.3-Flash 0.06x（订阅优先）、
 	// GLM-5.2 0.79x（夜间折扣）、Kimi-K3 1.62x、MiniMax-M3 0.25x。
 	// intl 的 Hy4 preview 0.29x / DeepSeek-V4.1-Flash 0.11x 一并录入。
+	// TeleAgent（2026-11-02）：倍率取自应用 model-catalog.json 的 creditMultiplier；
+	// 轻量/轻速在目录里没有倍率字段，宁缺不编。
+	"teleagent": {
+		"chat-pro":      0.6,
+		"chat-flagship": 1.0,
+		"chat-flash":    0.2,
+	},
 	"dom": {
 		// 2026-10-15 依 倍率/workbuddy国内.md 补齐（此前只有部分模型）。
 		// 注意：国内表里 Hy4 preview High 0.29x、Hy3 High 有「0.00x 限时免费 /
@@ -43,7 +50,7 @@ var modelRatios = map[string]map[string]float64{
 		"hy3-preview-agent": 0.05,
 		"hy3-preview":       0.05,
 		"hy4-preview":       0.29, // 国内表：Hy4 preview High 0.29x
-		"step-5-preview":    0,   // 桌面端显示「独家限免 0.00x」
+		"step-5-preview":    0,    // 桌面端显示「独家限免 0.00x」
 	},
 	"intl": {
 		// 2026-10-15 依 倍率/workbuddy国际.md 全量录入（20 个模型）。
@@ -57,26 +64,26 @@ var modelRatios = map[string]map[string]float64{
 		"deepseek-v4-pro":     0.51,
 		"space-bunny-max":     0.08,
 		// GPT / Grok / Gemini 系列（国际端目录，比官方订阅便宜）
-		"gpt-6-astra":   6.67,
-		"gpt-6.1-sol":   1.33,
-		"gpt-6-sol":     1.33,
-		"gpt-6-luna":    0.07,
-		"gpt-5.6-sol":   3.47,
-		"gpt-5.6-terra": 1.39,
-		"gpt-5.6-luna":  0.14,
-		"gpt-5.5":       3.31,
-		"gpt-5.4":       1.65,
-		"grok-4.7":      1.9,
-		"gemini-3.8-flash": 0.95,
-		"gemini-3.5-flash": 0.99,
-		"glm-5.3":       0.79,
-		"glm-5.3-flash": 0.06,
-		"glm-5.2":       0.79,
-		"glm-5.1":       0.79,
-		"kimi-k3":       1.62,
-		"kimi-k2.6":     0.52,
+		"gpt-6-astra":       6.67,
+		"gpt-6.1-sol":       1.33,
+		"gpt-6-sol":         1.33,
+		"gpt-6-luna":        0.07,
+		"gpt-5.6-sol":       3.47,
+		"gpt-5.6-terra":     1.39,
+		"gpt-5.6-luna":      0.14,
+		"gpt-5.5":           3.31,
+		"gpt-5.4":           1.65,
+		"grok-4.7":          1.9,
+		"gemini-3.8-flash":  0.95,
+		"gemini-3.5-flash":  0.99,
+		"glm-5.3":           0.79,
+		"glm-5.3-flash":     0.06,
+		"glm-5.2":           0.79,
+		"glm-5.1":           0.79,
+		"kimi-k3":           1.62,
+		"kimi-k2.6":         0.52,
 		"kimi-k2.8-preview": 0.77,
-		"minimax-m3":    0.25,
+		"minimax-m3":        0.25,
 	},
 	// 2026-10-15 依 倍率/Qoder.md 录入（此前 qoder 走官方目录 price_factor，
 	// 但官方目录缺「快速/Fast」等条目的倍率，静态表兜底）。
@@ -110,6 +117,7 @@ var modelRatios = map[string]map[string]float64{
 //   - 聚合口 /v1/models、/v1/models?client_version=（Codex 拉目录）
 //   - /api/gateway
 //   - codexCatalogRefresh（启线路时后台刷新）
+//
 // 与此同时 /api/ratios POST 会整张替换。此前完全没有同步，实测 `go test -race`
 // 直接报 loadUserRatios 的读（:111）与写（:114）数据竞争；进一步并发进入
 // json.Unmarshal 原地写 + userRatios[line] 读就是 Go 运行时的

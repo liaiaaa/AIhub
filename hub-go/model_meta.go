@@ -63,8 +63,8 @@ var staticModelMeta = map[string]map[string]modelMeta{
 		"chat-pro":      {ContextWindow: 400000, MaxInput: 65536},
 		"chat-lite":     {ContextWindow: 100000, MaxInput: 16384},
 		"chat-nano":     {ContextWindow: 100000, MaxInput: 16384},
-		"chat-flash":    {},
-		"chat-flagship": {},
+		"chat-flash":    {ContextWindow: 400000, MaxInput: 65536},
+		"chat-flagship": {ContextWindow: 400000, MaxInput: 65536},
 	},
 	"trae": {
 		// 2026-11-01 补：数值不是猜的，来自 Trae CN 桌面端自己缓存的模型目录 ——

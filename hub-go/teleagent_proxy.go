@@ -66,11 +66,15 @@ var teleagentModels = []struct {
 	MaxOut   int
 	Disabled bool
 }{
-	{ID: "chat-pro", Display: "智能 Pro", Context: 400000, MaxOut: 65536},
-	{ID: "chat-flash", Display: "极速 Flash"},
-	{ID: "chat-flagship", Display: "旗舰 Flagship"},
-	{ID: "chat-lite", Display: "轻量 Lite", Context: 100000, MaxOut: 16384},
-	{ID: "chat-nano", Display: "轻速 Nano", Context: 100000, MaxOut: 16384},
+	// 名字/上限取自应用自己的 model-catalog.json（前台只展示前三个）；
+	// 注意 TeleAgent.jsonc 的 provider.limits 写的是 1,000,000/65,536，
+	// 与目录的 400,000 不一致 —— 这里取较小的 400,000（宁少填，免得客户端超发）。
+	{ID: "chat-pro", Display: "智能", Context: 400000, MaxOut: 65536},
+	{ID: "chat-flagship", Display: "旗舰", Context: 400000, MaxOut: 65536},
+	{ID: "chat-flash", Display: "极速", Context: 400000, MaxOut: 65536},
+	// 轻量/轻速：配置里有、前台不展示，但实测可调用（2026-11-02 用 chat-lite/chat-nano 各打一次均 200）
+	{ID: "chat-lite", Display: "轻量", Context: 100000, MaxOut: 16384},
+	{ID: "chat-nano", Display: "轻速", Context: 100000, MaxOut: 16384},
 	// 应用自己把它放在 blacklist 里，不对外暴露
 	{ID: "tele-safety-answer", Display: "安全审核", Disabled: true},
 }

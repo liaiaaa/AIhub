@@ -346,6 +346,17 @@ func teleagentDeviceMeta() (deviceID, installID string, err error) {
 	return m.DeviceID, m.InstallID, nil
 }
 
+// teleagentClientType 上游「用量面板 → 调用端」这一列的取值来源（2026-11-02 用户反馈）。
+//
+// 桌面端自己发请求时这一列显示「桌面端」；我们反代的请求原来不带这个头，面板里就是空的，
+// 容易被看成「不是客户端发的」。默认按桌面色值发 desktop，env 可覆盖（若上游改了枚举）。
+func teleagentClientType() string {
+	if v := strings.TrimSpace(os.Getenv("AIHUB_TELEAGENT_CLIENT_TYPE")); v != "" {
+		return v
+	}
+	return "desktop"
+}
+
 // teleagentAppVersion 上游要的客户端版本号（env 可覆盖，应用升级后可能要对齐）。
 func teleagentAppVersion() string {
 	if v := strings.TrimSpace(os.Getenv("AIHUB_TELEAGENT_APP_VERSION")); v != "" {

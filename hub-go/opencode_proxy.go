@@ -251,8 +251,9 @@ func (p *OpencodeProxy) Stop() bool {
 	p.portS, p.ln = nil, nil
 	p.mu.Unlock()
 	closeLineServer(srv, ln)
-	_ = waitPortFree(p.Port, lineShutdownGrace)
-	return false
+	// 2026-11-02 修：原来此处硬编码 return false，导致控制台「停止」第一次必然提示
+	// 「OpenCode 停止失败」（端口其实已经释放）。与其它线路统一：以端口是否释放为准。
+	return waitPortFree(p.Port, lineShutdownGrace)
 }
 
 func (p *OpencodeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +365,7 @@ func (p *OpencodeProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]any{
 				"message": "模型 " + model + " 在 opencode 上游只支持 responses 协议，请走 /v1/responses",
-				"type": "invalid_request_error", "code": "protocol_unsupported"}})
+				"type":    "invalid_request_error", "code": "protocol_unsupported"}})
 		return
 	}
 	if cli == nil {
@@ -586,7 +587,7 @@ func opencodePipeStream(w http.ResponseWriter, body io.Reader) map[string]any {
 		// 只有带 usage 的 data 行才值得解一次 JSON。
 		if strings.HasPrefix(line, "data:") && strings.Contains(line, "usage") {
 			var probe struct {
-				Usage map[string]any `json:"usage"`
+				Usage    map[string]any `json:"usage"`
 				Response struct {
 					Usage map[string]any `json:"usage"`
 				} `json:"response"`
@@ -849,7 +850,7 @@ func (p *OpencodeProxy) handleResponses(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]any{
 				"message": "模型 " + model + " 在 opencode 上游只支持 chat 协议，请走 /v1/chat/completions",
-				"type": "invalid_request_error", "code": "protocol_unsupported"}})
+				"type":    "invalid_request_error", "code": "protocol_unsupported"}})
 		return
 	}
 	if cli == nil {

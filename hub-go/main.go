@@ -88,11 +88,14 @@ func main() {
 	mux.HandleFunc("/api/limits", hub.apiLimits)
 	mux.HandleFunc("/api/logs/tail", hub.apiLogsTail)
 	mux.HandleFunc("/api/logs/sizes", hub.apiLogsSizes)
-	// 线路启停路由按 lines.go 的 lineSpecs 生成（A2）。
-	// 加一条线路只需改 lines.go 元数据 + hub_api.go 的 lineToggles，不用再动路由表。
+	// 线路启停路由按 lines.go 的 lineSpecs + line_adapter.go 的注册表生成（A2 第二步）。
+	// 加一条线路只需：lineSpecs 加一行元数据 + 实现 lineAdapter + 注册表加一行构造器。
 	for _, spec := range lineSpecs {
-		if _, ok := lineToggles[spec.Key]; !ok {
-			continue // 没有通用启停实现（zcode 的 start 要 apiKey），下面单独注册
+		if _, ok := lineAdapters[spec.Key]; !ok {
+			continue // 元数据有、还没实现适配器的线路，先不挂路由
+		}
+		if spec.Key == "zcode" {
+			continue // zcode 的 start 要 apiKey，走下面的专用 handler
 		}
 		mux.HandleFunc("/api/"+spec.Key+"/start", hub.apiLineStart(spec.Key))
 		mux.HandleFunc("/api/"+spec.Key+"/stop", hub.apiLineStop(spec.Key))

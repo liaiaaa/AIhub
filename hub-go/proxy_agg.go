@@ -441,25 +441,11 @@ func (h *Hub) ocForAgg() *OpencodeProxy {
 }
 
 func (h *Hub) lineRunning(line string) bool {
-	switch line {
-	case "dom", "intl":
-		if p := h.proxyForLine(line); p != nil {
-			return p.Running()
-		}
-	case "qoder":
-		if p := h.qoderForAgg(); p != nil {
-			return p.Running()
-		}
-	case "trae":
-		if p := h.traeForAgg(); p != nil {
-			return p.Running()
-		}
-	case "oc":
-		if p := h.ocForAgg(); p != nil {
-			return p.Running()
-		}
+	ad, ok := h.adapterFor(line)
+	if !ok {
+		return false
 	}
-	return false
+	return ad.Running()
 }
 
 // resolveAggModel 统一网关的模型名解析（2026-10-13 方案 C 升级）。
@@ -725,46 +711,6 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 	t0 := time.Now()
 	defer func() { recordTap(tap, am, kind, time.Since(t0).Milliseconds()) }()
 	switch am.Line {
-	case "dom", "intl":
-		p := h.proxyForLine(am.Line)
-		if p == nil || !p.Running() {
-			aggLineOff(w, am)
-			return
-		}
-		if kind == "responses" {
-			aggCall(w, r, "/v1/responses", nb, p.handleResponses)
-		} else {
-			aggCall(w, r, "/v1/chat/completions", nb, p.handleChat)
-		}
-	case "qoder":
-		p := h.qoderForAgg()
-		if p == nil || !p.Running() {
-			aggLineOff(w, am)
-			return
-		}
-		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
-	case "trae":
-		p := h.traeForAgg()
-		if p == nil || !p.Running() {
-			aggLineOff(w, am)
-			return
-		}
-		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
-	case "zcode":
-		p := h.zcodeForAgg()
-		if p == nil || !p.Running() {
-			aggLineOff(w, am)
-			return
-		}
-		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
-	case "oc":
-		// OpenCode 免费档（2026-10-15）：上游只有 chat/completions，走 chat-only 转换。
-		p := h.ocForAgg()
-		if p == nil || !p.Running() {
-			aggLineOff(w, am)
-			return
-		}
-		aggToChatOnly(w, r, kind, nb, am, p.handleChat, rid, t0)
 	case "official":
 		// 官方 ChatGPT 透传（2026-10-13 共存方案）：只支持 Codex 的 responses 形态。
 		if kind != "responses" {
@@ -775,9 +721,30 @@ func (h *Hub) aggDispatch(w http.ResponseWriter, r *http.Request, kind string) {
 		}
 		h.officialPassthrough(w, r, nb)
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]any{"message": "未知线路：" + am.Line, "type": "invalid_request_error"},
-		})
+		// 2026-11-02 A2 第二步：线路转发改为按注册表（line_adapter.go）走 ——
+		// 新增线路只要实现 lineAdapter，这里不用再加 case。
+		ad, ok := h.adapterFor(am.Line)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": map[string]any{"message": "未知线路：" + am.Line, "type": "invalid_request_error"},
+			})
+			return
+		}
+		if !ad.Running() {
+			aggLineOff(w, am)
+			return
+		}
+		// 有原生 responses 的线路（目前 dom/intl）走直通，其余线路把
+		// /v1/responses 翻译成 chat/completions 再转发。
+		if native := ad.NativeResponses(); native != nil {
+			if kind == "responses" {
+				aggCall(w, r, "/v1/responses", nb, native)
+			} else {
+				aggCall(w, r, "/v1/chat/completions", nb, ad.Chat)
+			}
+			return
+		}
+		aggToChatOnly(w, r, kind, nb, am, ad.Chat, rid, t0)
 	}
 }
 

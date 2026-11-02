@@ -255,6 +255,8 @@ func (h *Hub) startLineByName(name string) (bool, string) {
 		return h.startMimo()
 	case "oc":
 		return h.startOpencode()
+	case "teleagent":
+		return h.startTeleagent()
 	}
 	return false, "未知线路：" + name
 }

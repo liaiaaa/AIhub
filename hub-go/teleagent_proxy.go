@@ -66,12 +66,12 @@ var teleagentModels = []struct {
 	MaxOut   int
 	Disabled bool
 }{
-	// 名字/上限取自应用自己的 model-catalog.json（前台只展示前三个）；
-	// 注意 TeleAgent.jsonc 的 provider.limits 写的是 1,000,000/65,536，
-	// 与目录的 400,000 不一致 —— 这里取较小的 400,000（宁少填，免得客户端超发）。
-	{ID: "chat-pro", Display: "智能", Context: 400000, MaxOut: 65536},
-	{ID: "chat-flagship", Display: "旗舰", Context: 400000, MaxOut: 65536},
-	{ID: "chat-flash", Display: "极速", Context: 400000, MaxOut: 65536},
+	// 名字取自应用自己的 model-catalog.json（前台只展示前三个）。
+	// 上限：model-catalog.json 写 400,000，而 TeleAgent.jsonc 的 provider.limits 写
+	// 1,000,000 —— 2026-11-02 用户确认「模型是支持 1M 上下文的」，按 1M 宣告。
+	{ID: "chat-pro", Display: "智能", Context: 1000000, MaxOut: 65536},
+	{ID: "chat-flagship", Display: "旗舰", Context: 1000000, MaxOut: 65536},
+	{ID: "chat-flash", Display: "极速", Context: 1000000, MaxOut: 65536},
 	// 轻量/轻速：配置里有、前台不展示，但实测可调用（2026-11-02 用 chat-lite/chat-nano 各打一次均 200）
 	{ID: "chat-lite", Display: "轻量", Context: 100000, MaxOut: 16384},
 	{ID: "chat-nano", Display: "轻速", Context: 100000, MaxOut: 16384},
@@ -238,6 +238,18 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 上游非 2xx：把响应体记进线路日志，并把可读错误回给客户端。
+	// 2026-11-02 用户报「显示几个思考后出现的报错」——先保证下次有据可查。
+	if resp.StatusCode >= 400 {
+		body4err, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		p.log.Log("[%s] ✗ HTTP %d | %s | %s", rid, resp.StatusCode, backend, strings.TrimSpace(string(body4err)))
+		writeJSON(w, resp.StatusCode, map[string]any{"error": map[string]any{
+			"message": fmt.Sprintf("TeleAgent 上游 HTTP %d：%s", resp.StatusCode, strings.TrimSpace(string(body4err))),
+			"type":    "upstream_error",
+		}})
+		return
+	}
+
 	ct := resp.Header.Get("Content-Type")
 	if ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -245,10 +257,14 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
+	written := 0
+	var readErr error
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			written += n
 			if _, werr := w.Write(buf[:n]); werr != nil {
+				readErr = fmt.Errorf("写客户端失败：%w", werr)
 				break
 			}
 			if flusher != nil {
@@ -256,8 +272,14 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
 			break
 		}
+	}
+	if readErr != nil {
+		p.log.Log("[%s] ⚠ 流中断（已写 %dB）：%v", rid, written, readErr)
 	}
 	p.log.Log("[%s] ◀ %d | %s | %.2fs | %dKB", rid, resp.StatusCode, backend,
 		time.Since(t0).Seconds(), len(body)/1024)

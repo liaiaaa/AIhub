@@ -39,6 +39,8 @@ archive/
 # 2026-11-02 日志轮转产物（converter-qoder.log.1 这类，20MB 级，绝不入库）
 *.log.[0-9]*
 state.json
+# 2026-11-03 线路显隐（用户偏好，属于数据根，不入库）
+lines.json
 # 每日积分快照（含账号 uid 与余额，运行时状态）
 credit_history.json
 # 限流台账（含账号 uid 与限流时刻，运行时状态）

@@ -263,6 +263,7 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(body, &payload) == nil {
 		payload["model"] = backend
 		teleagentNormalizeEffort(payload)
+		teleagentNormalizeMessages(payload)
 		if b, err := json.Marshal(payload); err == nil {
 			body = b
 		}
@@ -567,4 +568,53 @@ func imageURLShape(u string) string {
 		u = u[:80] + "…"
 	}
 	return "image_url{" + u + "}"
+}
+
+// teleagentNormalizeMessages 清洗上游不认的消息形态。
+//
+// 2026-11-03 实测（DSH 走 TeleAgent 时踩到）：
+//   - role "developer" → 上游 400 「角色信息不正确」。OpenAI 新把 system 叫 developer，
+//     TeleAgent 只认 system/user/assistant/tool，这里统一降级成 system。
+//   - image_url.url 不是 data:/http(s): 开头（例如附件 URI、相对路径、空串）→ 上游整条
+//     请求 400 「content.type 参数非法」。这种 part 上游要不了，直接丢掉并留痕。
+func teleagentNormalizeMessages(payload map[string]any) {
+	msgs, _ := payload["messages"].([]any)
+	dropped := 0
+	rolesFixed := 0
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := m["role"].(string); role == "developer" {
+			m["role"] = "system"
+			rolesFixed++
+		}
+		parts, ok := m["content"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			t, _ := pm["type"].(string)
+			if t == "image_url" {
+				iu, _ := pm["image_url"].(map[string]any)
+				u, _ := iu["url"].(string)
+				if !(strings.HasPrefix(u, "data:") || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")) {
+					dropped++ // 上游用不了的图片引用
+					continue
+				}
+			}
+			kept = append(kept, p)
+		}
+		if len(kept) == 0 {
+			// 整条消息都被丢掉时补一句占位，避免上游抱怨空 content
+			kept = append(kept, map[string]any{"type": "text", "text": "[图片无法转交给该模型]"})
+		}
+		m["content"] = kept
+	}
+	if rolesFixed > 0 || dropped > 0 {
+		logHub("teleagent 消息清洗：role developer→system %d 条，丢弃无法转交的图片 %d 个", rolesFixed, dropped)
+	}
 }

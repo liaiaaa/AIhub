@@ -142,6 +142,71 @@ func traeManualEffort() string {
 	return ""
 }
 
+// traeNormalizeClientEffort 把客户端发来的档位名收敛成 trae 认的原生名，返回实际生效值。
+//
+// 2026-11-03 修的静默降档：客户端（Codex/DSH）拿到的是**规范档位**
+// （minimal/low/medium/high/max），而 trae 上游只认 light/high/extra_high。
+// 原来客户端给什么就原样透传，于是发 `max` 时上游不认、悄悄按默认跑。
+// 现在：规范名 → 原生名映射，再钳到该模型真实支持的档位；不支持思考的模型直接删掉。
+func traeNormalizeClientEffort(raw map[string]any, model string) string {
+	v, ok := raw["reasoning_effort"]
+	if !ok {
+		return ""
+	}
+	want := lowerTrim(mapStr(v))
+	if want == "" {
+		delete(raw, "reasoning_effort")
+		return ""
+	}
+	opts, known := traeModelEfforts[model]
+	if known && len(opts) == 0 {
+		delete(raw, "reasoning_effort") // 该模型不支持思考
+		return ""
+	}
+	native := want
+	if _, isNative := traeNativeToCanonical[native]; !isNative {
+		if w, ok := canonicalToWireEffort("trae", native); ok {
+			native = w
+		} else {
+			native = ""
+		}
+	}
+	if known && len(opts) > 0 {
+		if native == "" || !stringInSlice(opts, native) {
+			levels := canonicalizeEfforts("trae", opts)
+			c := clampEffort(levels, wireToCanonicalEffort("trae", native))
+			if w, ok := canonicalToWireEffort("trae", c); ok {
+				native = w
+			} else {
+				native = opts[len(opts)-1]
+			}
+		}
+	}
+	if native == "" {
+		delete(raw, "reasoning_effort")
+		return ""
+	}
+	raw["reasoning_effort"] = native
+	return native
+}
+
+// mapStr 取字符串值（客户端可能给 string，也可能给数字之类，非字符串就返回空）。
+func mapStr(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func stringInSlice(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // traeApplyDefaultEffort 客户端没显式给档位时补一个，返回实际注入的档位（空 = 不注入）。
 //
 // 优先级：客户端 reasoning_effort > 手动档位（env/文件）> 该模型最高档。
@@ -531,6 +596,8 @@ func (p *TraeProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	clientStream, _ := raw["stream"].(bool)
 	requested, _ := raw["model"].(string)
 
+	// 客户端给了档位就先把名字收敛成 trae 认的（规范名 → light/high/extra_high）
+	traeNormalizeClientEffort(raw, requested)
 	injectedEffort := traeApplyDefaultEffort(raw, requested)
 	body := traePrepareBody(raw, requested)
 	payload, _ := json.Marshal(body)

@@ -20,7 +20,10 @@ package main
 //   - zcode    ：zcode_models.go + 远端刷新目录的 Efforts
 //   - trae     ：traeModelEfforts（trae_proxy.go，桌面端 vscdb 抄来，light/high/extra_high）
 //   - oc       ：opencodeFreeModels[].Efforts（只有部分模型有）
-//   - mimo / teleagent：上游无档位配置 → effortsOf 返回 false，不宣告
+//   - teleagent：上游网关认 reasoning_effort ∈ {low,high,max}（2026-11-03 实测：
+//                 传 minimal 返回 400「该模型始终思考，不支持关闭思考；请使用 low、high 或 max」，
+//                 传 low/high/max 均 200 且思考深度明显不同）
+//   - mimo：本机拿不到 MiMo 登录数据，未能实测 → effortsOf 返回 false，暂不宣告
 
 import "sort"
 
@@ -48,6 +51,15 @@ var (
 		"xhigh":   "extra_high",
 		"max":     "extra_high",
 	}
+	// teleagent 认 low/high/max；「不思考」不被接受（400），所以 minimal 折到 low
+	teleagentCanonicalToNative = map[string]string{
+		"minimal": "low",
+		"low":     "low",
+		"medium":  "high",
+		"high":    "high",
+		"xhigh":   "max",
+		"max":     "max",
+	}
 	// zcode 只认 low/high/max
 	zcodeCanonicalToNative = map[string]string{
 		"minimal": "low",
@@ -74,6 +86,9 @@ func canonicalEffortRank(s string) int {
 func (h *Hub) effortsOf(line, model string) (lineEfforts, bool) {
 	var native []string
 	switch line {
+	case "teleagent":
+		// 实测支持的三档（上游不认「关闭思考」，所以没有 minimal）
+		return lineEfforts{Levels: []string{"low", "high", "max"}, Default: "max"}, true
 	case "trae":
 		// trae 的档位不在 staticModelMeta 里，另有真值表（含 nil=不支持思考）。
 		native = traeModelEfforts[model]
@@ -149,6 +164,11 @@ func canonicalToWireEffort(line, want string) (string, bool) {
 		// 客户端直接发原生名（light/high/extra_high）也放行
 		if _, ok := traeNativeToCanonical[w]; ok {
 			return w, true
+		}
+		return "", false
+	case "teleagent":
+		if v, ok := teleagentCanonicalToNative[w]; ok {
+			return v, true
 		}
 		return "", false
 	case "zcode":

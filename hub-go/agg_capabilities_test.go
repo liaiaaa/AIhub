@@ -24,23 +24,26 @@ func TestAggModelsCarryCapabilityFields(t *testing.T) {
 	withAggList(t, []aggModel{
 		{Slug: "intl.deepseek-v4.1-flash", Line: "intl", Backend: "deepseek-v4.1-flash", Display: "DeepSeek"},
 		{Slug: "teleagent.chat-pro", Line: "teleagent", Backend: "chat-pro", Display: "chat-pro"},
+		{Slug: "mimo.MiMo-V2-Flash", Line: "mimo", Backend: "MiMo-V2-Flash", Display: "MiMo"},
 	})
 	h := &Hub{}
 	out := h.aggOpenAIModels()
 	data, _ := out["data"].([]map[string]any)
-	if len(data) != 2 {
-		t.Fatalf("期望 2 条，实际 %d", len(data))
+	if len(data) != 3 {
+		t.Fatalf("期望 3 条，实际 %d", len(data))
 	}
-	var intl, ta map[string]any
+	var intl, ta, mimo map[string]any
 	for _, e := range data {
 		switch e["id"] {
 		case "intl.deepseek-v4.1-flash":
 			intl = e
 		case "teleagent.chat-pro":
 			ta = e
+		case "mimo.MiMo-V2-Flash":
+			mimo = e
 		}
 	}
-	if intl == nil || ta == nil {
+	if intl == nil || ta == nil || mimo == nil {
 		t.Fatal("条目缺失")
 	}
 	// intl：有档位、可发图、声明 tools
@@ -61,12 +64,19 @@ func TestAggModelsCarryCapabilityFields(t *testing.T) {
 	if sp, _ := intl["supported_parameters"].([]string); len(sp) != 1 || sp[0] != "tools" {
 		t.Errorf("intl 应声明 tools，实际 %v", intl["supported_parameters"])
 	}
-	// teleagent：不宣告档位
-	if ta["reasoning"] != false {
-		t.Errorf("teleagent 不应宣告 reasoning：%v", ta["reasoning"])
+	// teleagent：2026-11-03 实测支持 low/high/max → 应宣告档位
+	if ta["reasoning"] != true {
+		t.Errorf("teleagent 实测支持档位，应 reasoning=true：%v", ta["reasoning"])
 	}
-	if _, ok := ta["supported_reasoning_levels"]; ok {
-		t.Error("teleagent 不应有 supported_reasoning_levels")
+	if lv, _ := ta["reasoning_levels"].([]string); len(lv) != 3 {
+		t.Errorf("teleagent 应为 3 档，实际 %v", ta["reasoning_levels"])
+	}
+	// mimo：拿不到登录数据、未实测 → 不宣告
+	if mimo["reasoning"] != false {
+		t.Errorf("mimo 未验证前不应宣告 reasoning：%v", mimo["reasoning"])
+	}
+	if _, ok := mimo["supported_reasoning_levels"]; ok {
+		t.Error("mimo 不应有 supported_reasoning_levels")
 	}
 }
 

@@ -96,10 +96,28 @@ func TestEffortsOfTraeModel(t *testing.T) {
 	}
 }
 
-func TestEffortsOfLinesWithoutThinking(t *testing.T) {
+func TestEffortsOfTeleagent(t *testing.T) {
 	h := &Hub{}
-	// teleagent / mimo 上游无档位配置
-	if _, ok := h.effortsOf("teleagent", "chat-pro"); ok {
-		t.Error("teleagent 不应宣告档位")
+	le, ok := h.effortsOf("teleagent", "chat-pro")
+	if !ok {
+		t.Fatal("teleagent 实测支持 low/high/max，应宣告档位")
+	}
+	if len(le.Levels) != 3 || le.Levels[0] != "low" || le.Levels[2] != "max" {
+		t.Errorf("teleagent 档位 = %v，期望 [low high max]", le.Levels)
+	}
+	if le.Default != "max" {
+		t.Errorf("teleagent 默认档应为 max（实测不传时思考最深），实际 %q", le.Default)
+	}
+	// 上游拒绝「不思考」，所以 minimal 必须折到 low，不能原样发过去
+	if w, ok := canonicalToWireEffort("teleagent", "minimal"); !ok || w != "low" {
+		t.Errorf("teleagent minimal 应折到 low，实际 (%q,%v)", w, ok)
+	}
+}
+
+func TestEffortsOfMimoNotAnnounced(t *testing.T) {
+	h := &Hub{}
+	// mimo 本机没登录数据，未能实测 → 不宣告
+	if _, ok := h.effortsOf("mimo", "MiMo-V2-Flash"); ok {
+		t.Error("mimo 未验证前不应宣告档位")
 	}
 }

@@ -195,6 +195,34 @@ func (p *TeleAgentProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleChat 转发一次 chat/completions。
+// teleagentNormalizeEffort 把客户端档位折成上游认的三个值（low/high/max）。
+//
+// 2026-11-03 实测：上游网关只接受 low/high/max；传 minimal 会 **400**
+// 「该模型始终思考，不支持关闭思考；请使用 low、high 或 max」。
+// 而客户端（Codex/DSH）看的是规范档位（minimal/medium/xhigh…），所以必须在这里折：
+//
+//	minimal → low（上游不允许关思考，只能取最轻）
+//	medium  → high
+//	xhigh   → max
+//
+// 已经合法的值原样保留；没有该字段就不动。
+func teleagentNormalizeEffort(m map[string]any) map[string]any {
+	v, ok := m["reasoning_effort"]
+	if !ok {
+		return m
+	}
+	want := lowerTrim(mapStr(v))
+	if wire, ok := canonicalToWireEffort("teleagent", want); ok {
+		m["reasoning_effort"] = wire
+	} else if want == "" {
+		delete(m, "reasoning_effort")
+	} else {
+		// 认不出的值：删掉，交给上游默认（比发一个必然 400 的值好）
+		delete(m, "reasoning_effort")
+	}
+	return m
+}
+
 func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	rid := randHex(4)
@@ -209,13 +237,14 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &probe)
 	backend := strings.TrimPrefix(probe.Model, "teleagent.")
-	if backend != probe.Model {
-		var m map[string]any
-		if json.Unmarshal(body, &m) == nil {
-			m["model"] = backend
-			if b, err := json.Marshal(m); err == nil {
-				body = b
-			}
+	// 统一处理请求体：去掉线路前缀、归一化思考档位（两件事都只在 JSON 能解析时做）。
+	// 解析失败就原样转发 —— 上游自己会给出更准确的错误。
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) == nil {
+		payload["model"] = backend
+		teleagentNormalizeEffort(payload)
+		if b, err := json.Marshal(payload); err == nil {
+			body = b
 		}
 	}
 

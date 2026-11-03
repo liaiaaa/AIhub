@@ -1319,11 +1319,12 @@ async function loadLines(force) {
     LINEV = next;
     renderLinesAdmin();
     if (changed) {
-      // 磁贴是一次性建好、之后只更新内容的（ensureLineTiles 有 children.length 短路），
-      // 所以显隐变化时必须清空重建，否则隐藏的线路会一直留在页面上。
-      const grid = document.getElementById('lines-grid');
-      if (grid) grid.innerHTML = '';
-      ensureLineTiles();
+      // 逐条对齐磁贴：隐藏的直接移除、恢复的按需插入。
+      // 不整块重建 —— ensureLineTiles 会连带 loadCredStatus（要打两个接口），
+      // 那是「点了没反应」的元凶（2026-11-03 用户反馈显隐太慢）。
+      Object.keys(next).forEach(function (k) {
+        applyLineTileDom(k, !next[k].hidden);
+      });
     }
     if (changed || force) refresh();
   } catch (e) { /* 拿不到就按「全部可见」渲染，不影响主功能 */ }
@@ -1334,7 +1335,7 @@ function openLinesAdmin() {
   if (!mask) return;
   mask.hidden = false;
   renderLinesAdmin();
-  loadLines(true);
+  loadLines(false);
 }
 function closeLinesAdmin() {
   const mask = document.getElementById('lines-mask');
@@ -1361,16 +1362,48 @@ function renderLinesAdmin() {
   }).join('');
 }
 
+// 显隐：先改界面（乐观更新），再发请求；失败回滚。
+// 2026-11-03 用户反馈「显示和隐藏速度太慢」——原来要先等 POST、再等 /api/lines、
+// 再整块重建磁贴（重建会打两次凭证接口），所以点了要一两秒才有反应。
 async function setLineVisible(key, visible) {
+  const cur = LINEV[key];
+  if (cur && cur.hidden === !visible) return;   // 已经是目标状态
+  if (cur) cur.hidden = !visible;
+  else LINEV[key] = { key: key, hidden: !visible };
+  applyLineTileDom(key, visible);
+  renderLinesAdmin();
+
   try {
     const r = await fetch('/api/lines/' + (visible ? 'show' : 'hide'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: key }), signal: AbortSignal.timeout(20000)
     });
     const d = await r.json();
-    toast(d.msg || (d.ok ? '已更新' : '操作失败'));
-    await loadLines(true);
-  } catch (e) { toast('操作失败：' + e); }
+    if (!d.ok) throw new Error(d.msg || '操作失败');
+    toast(d.msg || '已更新');
+    refresh();                                  // 只刷状态，不动磁贴
+  } catch (e) {
+    if (LINEV[key]) LINEV[key].hidden = !visible;   // 回滚
+    applyLineTileDom(key, !visible);
+    renderLinesAdmin();
+    toast('操作失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+// applyLineTileDom 单条磁贴的增删（不碰其他线路、不重拉凭证）。
+function applyLineTileDom(key, visible) {
+  const grid = document.getElementById('lines-grid');
+  if (!grid) return;
+  const cur = document.getElementById('stile-' + key);
+  if (!visible) { if (cur) cur.remove(); return; }
+  if (cur) return;
+  const svc = SERVICES.find(function (s) { return s.key === key; });
+  if (!svc) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = svcTile(svc);
+  const tile = wrap.firstElementChild;
+  if (tile) grid.appendChild(tile);
+  updateLineTiles();      // 用现有 state 把新磁贴的状态/额度填上（纯 DOM）
 }
 
 function renderLineList() {

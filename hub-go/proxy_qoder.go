@@ -99,6 +99,7 @@ type QoderAuth struct {
 	creds        qoderCreds
 	machineID    string
 	machineToken string
+	machineType  string // runtime-info 的 machineType（桌面端随请求上报）
 	rsaPK        *rsa.PublicKey
 }
 
@@ -146,7 +147,7 @@ func (a *QoderAuth) Reload() error {
 	if b, err := os.ReadFile(filepath.Join(base, "auth.machine-id")); err == nil {
 		mid = strings.TrimSpace(string(b))
 	}
-	mt := qoderMachineToken()
+	mt, mtype := qoderMachineInfo()
 	if mt == "" {
 		// 2026-10-21：兜底不再是硬编码的真实 token（会随仓库公开），
 		// 改为环境变量注入。两样都没有就留空，由调用方报错。
@@ -157,6 +158,7 @@ func (a *QoderAuth) Reload() error {
 	a.creds = creds
 	a.machineID = mid
 	a.machineToken = mt
+	a.machineType = mtype
 	a.mu.Unlock()
 	return nil
 }
@@ -182,26 +184,49 @@ func qoderAppDataDir() string {
 	return filepath.Join(home, "AppData", "Roaming", appDirName)
 }
 
-// qoderMachineToken 现跑 runtime-info.exe 取新鲜 machineToken。
-// 找不到或超时（8s）返回空串，由调用方回退。
-func qoderMachineToken() string {
+// qoderMachineInfo 现跑 runtime-info 取设备身份（machineToken + machineType）。
+//
+// 桌面端自己就是这么取的：`~/.qoder-cn/.bin/runtime-info-linux-x64-*` 输出
+// {"machineToken":"…","machineType":"…","machineCode":"…","vmInfo":{…}}。
+// 2026-11-03 用户要求「做好隐藏」：原来只发 token 不发 type，与真客户端不一致。
+// 找不到或超时（8s）返回空串，由调用方回退到环境变量 / 留空。
+func qoderMachineInfo() (token, mtype string) {
 	exe := qoderRuntimeInfoExe()
 	if exe == "" {
-		return os.Getenv("QODER_MACHINE_TOKEN")
+		return os.Getenv("QODER_MACHINE_TOKEN"), os.Getenv("QODER_MACHINE_TYPE")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	out, err := execCmdContext(ctx, exe).Output()
 	if err != nil {
-		return os.Getenv("QODER_MACHINE_TOKEN")
+		return os.Getenv("QODER_MACHINE_TOKEN"), os.Getenv("QODER_MACHINE_TYPE")
 	}
 	var info struct {
 		MachineToken string `json:"machineToken"`
+		MachineType  string `json:"machineType"`
 	}
-	if json.Unmarshal(out, &info) != nil || info.MachineToken == "" {
-		return os.Getenv("QODER_MACHINE_TOKEN")
+	if json.Unmarshal(out, &info) != nil {
+		return os.Getenv("QODER_MACHINE_TOKEN"), os.Getenv("QODER_MACHINE_TYPE")
 	}
-	return info.MachineToken
+	if info.MachineToken == "" {
+		info.MachineToken = os.Getenv("QODER_MACHINE_TOKEN")
+	}
+	if info.MachineType == "" {
+		info.MachineType = os.Getenv("QODER_MACHINE_TYPE")
+	}
+	return info.MachineToken, info.MachineType
+}
+
+// editUUIDString 把 16 字节排成 8-4-4-4-12 的 UUID 文本。
+// Qoder 桌面端的 requestId 就是这种形态（magpie 0.2.41：the signed request id is
+// a dashed UUID），而我们原来发的是裸 hex —— 一眼就能看出不是官方客户端。
+func editUUIDString(b []byte) string {
+	if len(b) < 16 {
+		var pad [16]byte
+		copy(pad[:], b)
+		b = pad[:]
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func qoderRuntimeInfoExe() string {
@@ -248,7 +273,7 @@ func qoderPkcs7Pad(data []byte, blockSize int) []byte {
 // Sign 为指定 URL + body 生成 COSY 签名请求头（每个请求都要现算）。
 func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 	a.mu.RLock()
-	creds, machineID, machineToken := a.creds, a.machineID, a.machineToken
+	creds, machineID, machineToken, machineType := a.creds, a.machineID, a.machineToken, a.machineType
 	a.mu.RUnlock()
 
 	// 1. 16 字节会话密钥（8 字节随机数的 hex ASCII）
@@ -294,13 +319,13 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 		binary.BigEndian.PutUint64(ridBytes[:8], uint64(time.Now().UnixNano()))
 		binary.BigEndian.PutUint64(ridBytes[8:], uint64(qoderRidSeq.Add(1)))
 	}
-	requestID := hex.EncodeToString(ridBytes)
+	requestID := editUUIDString(ridBytes) // 桌面端是带连字符的 UUID（magpie 0.2.41 同款）
 	id := currentQoderIdentity()
 	payloadBytes, _ := json.Marshal(map[string]string{
 		"version":     "v1",
 		"requestId":   requestID,
 		"info":        infoB64,
-		"cosyVersion": "1.0.0",
+		"cosyVersion": id.CosyVersion,
 		"ideVersion":  id.Version,
 	})
 	payloadB64 := base64.StdEncoding.EncodeToString(payloadBytes)
@@ -360,6 +385,15 @@ func (a *QoderAuth) Sign(urlStr, body string) (map[string]string, error) {
 		if h, err := os.Hostname(); err == nil && h != "" {
 			headers["Cosy-MachineHostname"] = h
 		}
+	}
+	if machineType != "" {
+		// 桌面端会把 runtime-info 拿到的 machineType 一并发上（magpie 0.2.41 记录）。
+		headers["Cosy-MachineType"] = machineType
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		// 桌面端 app 也发主机名；只有 cli 预设才「按需」发是不够的，
+		// 官网/风控把「有没有主机名」当成客户端身份的一部分。
+		headers["Cosy-MachineHostname"] = host
 	}
 	if machineID != "" {
 		headers["Cosy-MachineId"] = machineID

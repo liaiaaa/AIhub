@@ -80,7 +80,7 @@ var qoderIdentityPresets = map[string]qoderIdentity{
 		UserAgent:     "Qoder",
 		Accept:        "text/event-stream, application/json",
 		AcceptEnc:     "identity",
-		CosyVersion:   "1.0.0",
+		CosyVersion:   qoderWorkerVersion(),
 		SendMachineOS: true,
 		SendHostname:  false,
 	},
@@ -217,4 +217,17 @@ func qoderSanitizeEnabled() bool {
 		return false
 	}
 	return true
+}
+
+// qoderWorkerVersion 是 Cosy-Version 的取值：桌面端的 **worker runtime** 版本，
+// 不是 IDE 版本（magpie 0.2.23 记录：Cosy-Version claims the desktop app's worker
+// runtime, 1.1.69, beside its desktop client type and machine identity）。
+//
+// 我们原来发 1.0.0（桌面端缺省占位值），与真客户端版本不一致 —— 这类不一致正是
+// 「官网把来源显示成空白」的常见原因。可用 QODER_WORKER_VERSION 覆盖。
+func qoderWorkerVersion() string {
+	if v := strings.TrimSpace(os.Getenv("QODER_WORKER_VERSION")); v != "" {
+		return v
+	}
+	return "1.1.69"
 }

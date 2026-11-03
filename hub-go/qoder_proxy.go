@@ -50,11 +50,12 @@ const (
 )
 
 type QoderProxy struct {
-	Port     int
-	inferURL string // 上游推理接口（测试可注入 httptest 服务）
-	auth     *QoderAuth
-	log      *FileLogger
-	client   *http.Client
+	Port        int
+	machineType string // runtime-info 的 machineType（桌面端会随请求上报）
+	inferURL    string // 上游推理接口（测试可注入 httptest 服务）
+	auth        *QoderAuth
+	log         *FileLogger
+	client      *http.Client
 
 	// 模型目录：catalog 为权威清单，aliases 为「别名 → 真实 key」映射。
 	// 由 qoder_models.go 提供，启动后异步刷新。catalogMu 保护二者。
@@ -68,7 +69,7 @@ type QoderProxy struct {
 	inflightMu sync.Mutex
 	inflight   int
 	lastReqMu  sync.Mutex
-	lastReq   time.Time
+	lastReq    time.Time
 
 	// 会话租约：同一段对话在 TTL 内复用 session_id/request_set_id/business.id
 	sessionMu    sync.Mutex

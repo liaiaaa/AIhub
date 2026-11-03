@@ -116,7 +116,7 @@ func TestQoderSignIdentityHeaders(t *testing.T) {
 		"Cosy-ClientType":       "10",
 		"X-IDE-Platform":        "app",
 		"X-Version":             id.Version,
-		"Cosy-Version":          "1.0.0",
+		"Cosy-Version":          qoderWorkerVersion(), // 2026-11-03：改成 worker runtime 版本
 		"Cosy-Business-Product": "app",
 		"User-Agent":            "Qoder",
 		"Accept":                "text/event-stream, application/json",
@@ -130,8 +130,17 @@ func TestQoderSignIdentityHeaders(t *testing.T) {
 	if !strings.Contains(headers["Cosy-MachineOS"], "_") {
 		t.Errorf("Cosy-MachineOS 形态不对：%q", headers["Cosy-MachineOS"])
 	}
-	if headers["Cosy-MachineHostname"] != "" {
-		t.Error("app 预设不应发 Cosy-MachineHostname")
+	// 2026-11-03 改：桌面端 app 也发主机名（magpie 0.2.41 记录），不再只给 cli
+	if headers["Cosy-MachineHostname"] == "" {
+		t.Error("app 预设应发 Cosy-MachineHostname")
+	}
+	// MachineToken 与 MachineType 成对出现（测试环境 home 被重定向时两者都空）
+	if headers["Cosy-MachineToken"] != "" && headers["Cosy-MachineType"] == "" {
+		t.Error("有 MachineToken 就该有 MachineType")
+	}
+	// 请求号必须是带连字符的 UUID（桌面端形态）
+	if rid := headers["X-Request-Id"]; len(rid) != 36 || strings.Count(rid, "-") != 4 {
+		t.Errorf("X-Request-Id 应为 UUID，实际 %q", rid)
 	}
 	if !strings.HasPrefix(headers["Authorization"], "Bearer COSY.") {
 		t.Error("COSY 签名链被破坏了")

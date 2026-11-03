@@ -266,13 +266,14 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		payload["model"] = backend
 		teleagentNormalizeEffort(payload)
 		teleagentNormalizeMessages(payload)
-		// 纯文本模型（chat-flagship / chat-nano）本来就不吃图：直接先把图转成文字，
-		// 不用先撞一次上游 400（桌面端也是这么做的，见 teleagent_vision.go）。
-		if teleagentVisionEnabled() && !modelSupportsImage("teleagent", backend) && hasImageParts(payload) {
+		// 图片一律先转文字 —— 与桌面端行为一致（见 teleagent_vision.go），同时也避开
+		// 「原生吃图但极慢」的路径：2026-11-03 实测同一张 2092×918 截图，
+		// teleagent.chat-lite 1.4s、teleagent.chat-pro 79.4s；用户就是等不及 79s 才终止任务的。
+		if teleagentVisionEnabled() && hasImageParts(payload) {
 			if n, ok := replaceImagesWithDescriptions(payload, func(format string, args ...any) {
 				p.log.Log("[%s] "+format, append([]any{rid}, args...)...)
 			}); ok && n > 0 {
-				p.log.Log("[%s] 纯文本模型 %s：%d 张图已转成文字", rid, backend, n)
+				p.log.Log("[%s] %s：%d 张图已转成文字", rid, backend, n)
 			}
 		}
 		if b, err := json.Marshal(payload); err == nil {

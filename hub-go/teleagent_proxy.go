@@ -292,9 +292,26 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 2026-11-02 用户报「显示几个思考后出现的报错」——先保证下次有据可查。
 	if resp.StatusCode >= 400 {
 		body4err, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		// 兜底（2026-11-03）：图片形态仍然被上游拒时，去掉图片再试一次 ——
+		// 宁可回一句「图片没转过去」，也不要整轮对话失败。
+		if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body4err), "content.type") && hasImageParts(payload) {
+			if b2, ok := stripImageParts(payload); ok {
+				p.log.Log("[%s] ⚠ 上游拒收图片 part，改为纯文本重试（%d 字节）", rid, len(b2))
+				if resp2, err2 := p.doUpstream(r, b2, rid); err2 == nil {
+					if resp2.StatusCode < 400 {
+						resp.Body.Close()
+						resp = resp2
+						body4err = nil
+						goto relay
+					}
+					resp2.Body.Close()
+				}
+			}
+		}
 		// 2026-11-03 用户报「chat-pro 发图 400 取值范围 ['text']」，但同参数手工探测却 200 ——
 		// 光记错误体查不出差别，所以把**请求结构**（消息数、角色、每个 content part 的 type）
 		// 一起记下来。只记类型与长度，不记正文。
+	relay:
 		p.log.Log("[%s] ✗ HTTP %d | %s | %s", rid, resp.StatusCode, backend, strings.TrimSpace(string(body4err)))
 		if payload != nil {
 			p.log.Log("[%s] 请求结构：%s", rid, teleagentPayloadShape(payload))
@@ -598,13 +615,27 @@ func teleagentNormalizeMessages(payload map[string]any) {
 		for _, p := range parts {
 			pm, _ := p.(map[string]any)
 			t, _ := pm["type"].(string)
-			if t == "image_url" {
-				iu, _ := pm["image_url"].(map[string]any)
-				u, _ := iu["url"].(string)
-				if !(strings.HasPrefix(u, "data:") || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")) {
+			if t == "image_url" || t == "input_image" {
+				// 2026-11-03 实测：DSH 发来的图片 part 有两种写法 ——
+				//   {"type":"image_url","image_url":{"url":"data:…"}}   ← 标准 OpenAI
+				//   {"type":"image_url","image_url":"data:…"}            ← 字符串直给
+				// 后一种上游直接 400「content.type 参数非法」，这里统一成对象形态。
+				var u string
+				switch v := pm["image_url"].(type) {
+				case string:
+					u = v
+				case map[string]any:
+					u, _ = v["url"].(string)
+				}
+				if t == "input_image" {
+					pm["type"] = "image_url"
+				}
+				if u == "" || !(strings.HasPrefix(u, "data:") || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")) {
 					dropped++ // 上游用不了的图片引用
 					continue
 				}
+				pm["image_url"] = map[string]any{"url": u}
+				pm["type"] = "image_url"
 			}
 			kept = append(kept, p)
 		}
@@ -617,4 +648,60 @@ func teleagentNormalizeMessages(payload map[string]any) {
 	if rolesFixed > 0 || dropped > 0 {
 		logHub("teleagent 消息清洗：role developer→system %d 条，丢弃无法转交的图片 %d 个", rolesFixed, dropped)
 	}
+}
+
+// hasImageParts 请求里是否含图片 part。
+func hasImageParts(payload map[string]any) bool {
+	if payload == nil {
+		return false
+	}
+	msgs, _ := payload["messages"].([]any)
+	for _, raw := range msgs {
+		m, _ := raw.(map[string]any)
+		parts, _ := m["content"].([]any)
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if t, _ := pm["type"].(string); t == "image_url" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stripImageParts 去掉所有图片 part，返回去掉后的请求体（没有图片可去时 ok=false）。
+func stripImageParts(payload map[string]any) ([]byte, bool) {
+	if payload == nil {
+		return nil, false
+	}
+	msgs, _ := payload["messages"].([]any)
+	changed := false
+	for _, raw := range msgs {
+		m, _ := raw.(map[string]any)
+		parts, ok := m["content"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if t, _ := pm["type"].(string); t == "image_url" {
+				changed = true
+				continue
+			}
+			kept = append(kept, p)
+		}
+		if len(kept) == 0 {
+			kept = append(kept, map[string]any{"type": "text", "text": "[图片未能转交给该模型]"})
+		}
+		m["content"] = kept
+	}
+	if !changed {
+		return nil, false
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
 }

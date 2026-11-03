@@ -29,6 +29,7 @@ import (
 )
 
 const (
+	visionPrompt    = "把这张图里的信息完整转成文字：有文字就逐字抄下来（保持原有顺序与表格结构），没有文字就客观描述画面内容。只输出结果本身，不要客套话。"
 	visionCacheMax  = 128 // 图片描述缓存条数上限
 	visionTimeout   = 90 * time.Second
 	visionMaxPixels = 4096
@@ -72,7 +73,16 @@ func describeImage(dataURL string) (string, error) {
 
 	var lastErr error
 	for _, model := range visionModelCandidates() {
-		text, err := askVisionModel(model, dataURL)
+		// 走 TeleAgent 上游直连（而不是绕回自己的聚合口）：
+		// 2026-11-03 事故 —— 视觉首选就是 teleagent.chat-lite，绕聚合口会把请求又送回本代理，
+		// 于是「转文字」里再触发一次「转文字」，层层嵌套，一次请求拖到 51 秒。
+		var text string
+		var err error
+		if strings.HasPrefix(model, "teleagent.") {
+			text, err = askTeleagentVisionDirect(strings.TrimPrefix(model, "teleagent."), dataURL)
+		} else {
+			text, err = askVisionModel(model, dataURL)
+		}
 		if err != nil {
 			lastErr = err
 			continue
@@ -99,7 +109,7 @@ func askVisionModel(model, dataURL string) (string, error) {
 		"messages": []any{map[string]any{
 			"role": "user",
 			"content": []any{
-				map[string]any{"type": "text", "text": "把这张图里的信息完整转成文字：有文字就逐字抄下来（保持原有顺序与表格结构），没有文字就客观描述画面内容。只输出结果本身，不要客套话。"},
+				map[string]any{"type": "text", "text": visionPrompt},
 				map[string]any{"type": "image_url", "image_url": map[string]any{"url": dataURL}},
 			}},
 		},
@@ -216,4 +226,68 @@ func replaceImagesWithDescriptions(payload map[string]any, logf func(string, ...
 		return 0, false
 	}
 	return replaced, true
+}
+
+// askTeleagentVisionDirect 直接打 TeleAgent 上游做识图，绕开本机聚合口。
+// 这样既避免「转文字 → 聚合口 → 本代理 → 又转文字」的递归，也省一跳。
+func askTeleagentVisionDirect(backend, dataURL string) (string, error) {
+	tok, err := teleagentToken()
+	if err != nil {
+		return "", err
+	}
+	dev, inst, err := teleagentDeviceMeta()
+	if err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":      backend,
+		"max_tokens": 800,
+		"messages": []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": visionPrompt},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": dataURL}},
+			}},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	const path = "/superCowork/sapi/api/v1/chat/completions" // 参与签名
+	url := teleagentUpstreamBase + "/chat/completions"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	hdrs, err := teleagentSignHeadersAt(tok, dev, inst, http.MethodPost, path, teleagentAppVersion(), body, "", "")
+	if err != nil {
+		return "", err
+	}
+	for k, v := range hdrs {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := directClient().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("识图响应无法解析：%w", err)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("识图没有返回内容")
+	}
+	text := strings.TrimSpace(out.Choices[0].Message.Content)
+	if text == "" {
+		return "", fmt.Errorf("识图返回空")
+	}
+	return text, nil
 }

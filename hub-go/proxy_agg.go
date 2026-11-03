@@ -287,6 +287,14 @@ func (h *Hub) startAggLine() (bool, string) {
 		logHub("agg /v1/models 目录请求 | OpenAI 形态 | %d 个模型", aggOpenAIModelCount(out))
 		writeJSON(w, http.StatusOK, out)
 	})
+	// Codex 的 model_catalog_url 形态（2026-11-03）：magpie 的做法是把目录放在
+	// 独立路径上 —— 因为 /v1/models 是 OpenAI 的标准列表，Codex 读不了它。
+	// 有了这个端点，别的机器上的 Codex 不用再拷 ~/.codex/aihub-model-catalog.json。
+	mux.HandleFunc("/v1/codex/models", func(w http.ResponseWriter, r *http.Request) {
+		out := h.aggCodexModels()
+		logHub("agg /v1/codex/models 目录请求 | %d 个模型", len(asSlice(out["models"])))
+		writeJSON(w, http.StatusOK, out)
+	})
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		h.aggDispatch(w, r, "responses")
 	})
@@ -767,7 +775,17 @@ func (h *Hub) aggCodexModels() map[string]any {
 		if r, ok := h.modelRatio(am.Line, am.Backend); ok {
 			display += " · " + ratioLabel(r)
 		}
-		entries = append(entries, codexModelEntry{slug: am.Slug, display: display})
+		e := codexModelEntry{slug: am.Slug, display: display}
+		// 2026-11-03：窗口/输出/档位按模型取值，不再让所有模型共用全局窗口。
+		if m, ok := h.modelMeta(am.Line, am.Backend); ok {
+			e.ctx = m.ContextWindow
+			e.maxOut = m.MaxInput
+		}
+		if le, ok := h.effortsOf(am.Line, am.Backend); ok {
+			e.levels = le.Levels
+			e.defaultLevel = le.Default
+		}
+		entries = append(entries, e)
 	}
 	return codexModelsResponseFrom(entries)
 }
@@ -811,6 +829,30 @@ func (h *Hub) aggOpenAIModels() map[string]any {
 			"created":  1700000000,
 			"owned_by": "aihub-agg",
 			"name":     aggOpenAIDisplayName(h, am),
+		}
+		// 2026-11-03：能力字段。客户端（Codex / DSH / 第三方）靠这些决定
+		// 是否显示「思考档位」菜单、能不能发图片、能不能带工具。
+		entry["type"] = "model"
+		entry["supported_parameters"] = []string{"tools"}
+		if lineSupportsImage(am.Line) {
+			entry["modalities"] = map[string]any{"input": []string{"text", "image"}, "output": []string{"text"}}
+		} else {
+			entry["modalities"] = map[string]any{"input": []string{"text"}, "output": []string{"text"}}
+		}
+		if le, ok := h.effortsOf(am.Line, am.Backend); ok {
+			levels := le.Levels
+			srl := make([]map[string]any, 0, len(levels))
+			for _, l := range levels {
+				srl = append(srl, map[string]any{"effort": l})
+			}
+			entry["reasoning"] = true
+			entry["supported_reasoning_levels"] = srl
+			entry["reasoning_levels"] = levels
+			if le.Default != "" {
+				entry["default_reasoning_effort"] = le.Default
+			}
+		} else {
+			entry["reasoning"] = false
 		}
 		if m, ok := h.modelMeta(am.Line, am.Backend); ok {
 			if m.ContextWindow > 0 {

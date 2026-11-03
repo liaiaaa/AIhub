@@ -45,6 +45,19 @@ var lineSpecs = []lineSpec{
 }
 
 // lineKeys 返回全部线路名，顺序与 lineSpecs 一致。
+// lineSupportsImage 线路是否接受图片输入（用于 /v1/models 的 modalities 宣告）。
+//
+// 只对「确定吃图」的线路宣告：dom/intl（WorkBuddy 视觉）、qoder（视觉模型）、
+// trae（SOLO 多模态）、teleagent（chat 系列）。mimo/zcode/oc 未验证 → 只宣告文本，
+// 免得客户端按「能发图」去发、上游 400。
+func lineSupportsImage(line string) bool {
+	switch line {
+	case "dom", "intl", "qoder", "trae", "teleagent":
+		return true
+	}
+	return false
+}
+
 func lineKeys() []string {
 	out := make([]string, 0, len(lineSpecs))
 	for _, s := range lineSpecs {

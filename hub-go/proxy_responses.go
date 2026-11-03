@@ -56,6 +56,11 @@ var codexModelMessages = map[string]any{
 type codexModelEntry struct {
 	slug    string
 	display string
+	// 2026-11-03：per-model 元数据。零值表示调用方不知道，回落全局宣告值。
+	ctx          int
+	maxOut       int
+	levels       []string // 规范思考档位（空=该模型不支持思考）
+	defaultLevel string
 }
 
 func codexModelsResponse(models []string) map[string]any {
@@ -67,20 +72,35 @@ func codexModelsResponse(models []string) map[string]any {
 }
 
 func codexModelsResponseFrom(entries []codexModelEntry) map[string]any {
-	cw := advertisedContextWindow.Load()
+	globalCtx := int(advertisedContextWindow.Load())
 	out := make([]any, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, map[string]any{
+	for i, e := range entries {
+		// 2026-11-03：窗口/输出/思考档位改成**按模型**取值。原来所有模型共用
+		// advertisedContextWindow（设置页那个全局宣告值），于是 Codex 选择器里
+		// 每个模型都显示同一个窗口、同一个默认档位，与实际能力对不上。
+		cw := e.ctx
+		if cw <= 0 {
+			cw = globalCtx // 不知道就回落全局宣告值（保持旧行为）
+		}
+		levels := codexReasoningLevels()
+		def := "medium"
+		if len(e.levels) > 0 {
+			levels = codexReasoningLevelsFrom(e.levels)
+			if e.defaultLevel != "" {
+				def = e.defaultLevel
+			}
+		}
+		entry := map[string]any{
 			"slug":                           e.slug,
 			"display_name":                   e.display,
 			"description":                    "hub-go 线路模型",
-			"default_reasoning_level":        "medium",
-			"supported_reasoning_levels":     codexReasoningLevels(),
+			"default_reasoning_level":        def,
+			"supported_reasoning_levels":     levels,
 			"shell_type":                     "shell_command",
 			"visibility":                     "list",
 			"minimal_client_version":         []int{0, 1, 0},
 			"supported_in_api":               true,
-			"priority":                       1,
+			"priority":                       i + 1, // 连续编号：选择器按分组顺序排列
 			"upgrade":                        nil,
 			"model_messages":                 codexModelMessages,
 			"support_verbosity":              false,
@@ -91,9 +111,32 @@ func codexModelsResponseFrom(entries []codexModelEntry) map[string]any {
 			"context_window":                 cw,
 			"max_context_window":             cw,
 			"experimental_supported_tools":   []any{},
-		})
+		}
+		if cw > 0 {
+			entry["auto_compact_token_limit"] = cw * 9 / 10
+		}
+		if e.maxOut > 0 {
+			entry["max_output_tokens"] = e.maxOut
+		}
+		out = append(out, entry)
 	}
 	return map[string]any{"models": out}
+}
+
+// codexReasoningLevelsFrom 把规范档位翻成 Codex 选择器要的形状（带中文说明）。
+func codexReasoningLevelsFrom(levels []string) []any {
+	desc := map[string]string{
+		"minimal": "最低", "low": "低", "medium": "中", "high": "高", "xhigh": "很高", "max": "最高",
+	}
+	out := make([]any, 0, len(levels))
+	for _, l := range levels {
+		d := desc[l]
+		if d == "" {
+			d = l
+		}
+		out = append(out, map[string]any{"effort": l, "description": d})
+	}
+	return out
 }
 
 // codexReasoningLevels 是选择器里的思考档位下拉（低/中/高/最高）。

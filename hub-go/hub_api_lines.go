@@ -23,6 +23,7 @@ func (h *Hub) apiLines(w http.ResponseWriter, r *http.Request) {
 			running = ad.Running()
 		}
 		lines = append(lines, map[string]any{
+			"identity":   identitySummary(s.Key),
 			"key":        s.Key,
 			"display":    s.Display,
 			"port":       s.Port,

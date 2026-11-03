@@ -1357,6 +1357,9 @@ function renderLinesAdmin() {
       '<b style="min-width:150px">' + (l.display || k) + '</b>' +
       '<span style="color:#888;font-size:12px">端口 ' + (l.port || '—') +
         (l.aggregated ? ' · 参与聚合' : '') + (l.risk ? ' · ' + l.risk : '') + '</span>' +
+      (l.identity ? '<span style="font-size:12px;color:' + (l.identity.desktop ? '#2e7d32' : '#999') +
+        '" title="' + (l.identity.ua || '') + '">' + l.identity.client +
+        (l.identity.desktop ? ' · 桌面端' : ' · CLI') + '</span>' : '') +
       '<span style="font-size:12px">' + st + '</span>' +
       '<span style="flex:1"></span>' + btn + '</div>';
   }).join('');

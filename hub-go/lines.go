@@ -45,7 +45,34 @@ var lineSpecs = []lineSpec{
 }
 
 // lineKeys 返回全部线路名，顺序与 lineSpecs 一致。
-// lineSupportsImage 线路是否接受图片输入（用于 /v1/models 的 modalities 宣告）。
+// modelSupportsImage 模型级图片能力（用于 /v1/models 的 modalities 与 DSH 清单）。
+//
+// 2026-11-03 用户实测教训：图片能力是**按模型**的，不是按线路的。当时只在线路层面
+// 宣告 teleagent 支持图片，结果 DSH 给 chat-flagship 发图 → 上游 400：
+//
+//	{"code":"1210","message":"messages.content.type 参数非法，取值范围 ['text']"}
+//
+// 逐模型探测（同一张 1x1 PNG，直接打 8794）：
+//
+//	chat-flash    → 「图片输入格式/解析错误」      = 收图，只是格式没对上
+//	chat-pro      → 「图片输入格式/解析错误」      = 收图
+//	chat-lite     → 「An exception occurred while loading IMAGE data…」= 收图
+//	chat-flagship → 「messages.content.type 参数非法，取值范围 ['text']」= 纯文本
+//	chat-nano     → 「telechat-29b is not a multimodal model」        = 纯文本
+func modelSupportsImage(line, model string) bool {
+	if !lineSupportsImage(line) {
+		return false
+	}
+	if line == "teleagent" {
+		switch model {
+		case "chat-flagship", "chat-nano":
+			return false // 实测纯文本（见上面的探测记录）
+		}
+	}
+	return true
+}
+
+// lineSupportsImage 线路层面是否可能接受图片（模型级细化见 modelSupportsImage）。
 //
 // 只对「确定吃图」的线路宣告：dom/intl（WorkBuddy 视觉）、qoder（视觉模型）、
 // trae（SOLO 多模态）、teleagent（chat 系列）。mimo/zcode/oc 未验证 → 只宣告文本，

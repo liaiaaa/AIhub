@@ -845,7 +845,7 @@ func (h *Hub) aggOpenAIModels() map[string]any {
 		// 是否显示「思考档位」菜单、能不能发图片、能不能带工具。
 		entry["type"] = "model"
 		entry["supported_parameters"] = []string{"tools"}
-		if lineSupportsImage(am.Line) {
+		if modelSupportsImage(am.Line, am.Backend) {
 			entry["modalities"] = map[string]any{"input": []string{"text", "image"}, "output": []string{"text"}}
 		} else {
 			entry["modalities"] = map[string]any{"input": []string{"text"}, "output": []string{"text"}}

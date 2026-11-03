@@ -88,7 +88,7 @@ func buildDshModels(h *Hub) []dshPiModel {
 				m.MaxTokens = m.ContextWindow
 			}
 		}
-		if lineSupportsImage(am.Line) {
+		if modelSupportsImage(am.Line, am.Backend) {
 			m.Input = []string{"text", "image"}
 		} else {
 			m.Input = []string{"text"}

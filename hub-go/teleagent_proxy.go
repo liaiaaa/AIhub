@@ -264,6 +264,15 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		payload["model"] = backend
 		teleagentNormalizeEffort(payload)
 		teleagentNormalizeMessages(payload)
+		// 纯文本模型（chat-flagship / chat-nano）本来就不吃图：直接先把图转成文字，
+		// 不用先撞一次上游 400（桌面端也是这么做的，见 teleagent_vision.go）。
+		if teleagentVisionEnabled() && !modelSupportsImage("teleagent", backend) && hasImageParts(payload) {
+			if n, ok := replaceImagesWithDescriptions(payload, func(format string, args ...any) {
+				p.log.Log("[%s] "+format, append([]any{rid}, args...)...)
+			}); ok && n > 0 {
+				p.log.Log("[%s] 纯文本模型 %s：%d 张图已转成文字", rid, backend, n)
+			}
+		}
 		if b, err := json.Marshal(payload); err == nil {
 			body = b
 		}
@@ -294,6 +303,29 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		body4err, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		// 兜底（2026-11-03）：图片形态仍然被上游拒时，去掉图片再试一次 ——
 		// 宁可回一句「图片没转过去」，也不要整轮对话失败。
+		// 2026-11-03：桌面端处理图片的方式是「先调视觉模型转成文字」，不是把图塞给对话模型
+		// （证据见 teleagent_vision.go 顶部注释）。这里照做：先把图转成文字描述，
+		// 再以纯文本重发；转换成功就开始一次「带描述」的新请求，失败才退到去图。
+		if hasImageParts(payload) && teleagentVisionEnabled() {
+			if n, ok := replaceImagesWithDescriptions(payload, func(format string, args ...any) {
+				p.log.Log("[%s] "+format, append([]any{rid}, args...)...)
+			}); ok && n > 0 {
+				if b2, err2 := json.Marshal(payload); err2 == nil {
+					if resp2, err3 := p.doUpstream(r, b2, rid); err3 == nil {
+						resp.Body.Close()
+						resp = resp2
+						body4err = nil
+						if resp.StatusCode < 400 {
+							p.log.Log("[%s] ◀ 图片已转成文字后重发成功（%d 张）", rid, n)
+							goto relay
+						}
+						b2err, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+						resp.Body.Close()
+						body4err = b2err
+					}
+				}
+			}
+		}
 		if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body4err), "content.type") && hasImageParts(payload) {
 			p.log.Log("[%s] ⚠ 图片请求被上游拒：%s | 拒收前结构：%s", rid,
 				strings.TrimSpace(string(body4err)), teleagentPayloadShape(payload))

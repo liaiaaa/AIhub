@@ -150,127 +150,6 @@ func yamlScalar(s string) string {
 	return `"` + s + `"`
 }
 
-// inAihubBlock 判断第 idx 行是否位于 providers.aihub 段内。
-func inAihubBlock(lines []string, idx int) bool {
-	for i := idx - 1; i >= 0; i-- {
-		switch strings.TrimSpace(lines[i]) {
-		case "aihub:":
-			for j := i - 1; j >= 0; j-- {
-				if strings.TrimSpace(lines[j]) == "providers:" {
-					return true
-				}
-			}
-			return false
-		case "providers:":
-			return false
-		}
-	}
-	return false
-}
-
-// parseAihubModelEntries 把现有 aihub 段里的模型条目**结构化**读出来。
-//
-// 为什么不再原样抓文本：2026-11-03 第一次同步时，原样追加让缩进错位，
-// 生成的 profile 直接变成非法 YAML（`bad indentation of a mapping entry`），
-// DSH 起不来。现在统一解析成字段再重渲染，输出必然同构、缩进一致。
-func parseAihubModelEntries(src string) []dshPiModel {
-	lines := strings.Split(src, "\n")
-	modelsIdx := -1
-	itemIndent := ""
-	for i, l := range lines {
-		if strings.TrimSpace(l) == "models:" && inAihubBlock(lines, i) {
-			modelsIdx = i
-			itemIndent = indentOf(l) + "  "
-			break
-		}
-	}
-	if modelsIdx < 0 {
-		return nil
-	}
-	var out []dshPiModel
-	var cur *dshPiModel
-	inInput := false
-	inEfforts := false
-	effortIndent := ""
-	flush := func() {
-		if cur != nil && cur.ID != "" {
-			out = append(out, *cur)
-		}
-		cur = nil
-	}
-	for i := modelsIdx + 1; i < len(lines); i++ {
-		raw := lines[i]
-		if strings.TrimSpace(raw) == "" {
-			continue
-		}
-		if indentOf(raw) < itemIndent {
-			break
-		}
-		if indentOf(raw) == itemIndent && strings.HasPrefix(strings.TrimSpace(raw), "- id:") {
-			flush()
-			id := strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "- id:")), `"`)
-			cur = &dshPiModel{ID: id}
-			inInput = false
-			inEfforts = false
-			continue
-		}
-		if cur == nil {
-			continue
-		}
-		t := strings.TrimSpace(raw)
-		switch {
-		case strings.HasPrefix(t, "name:"):
-			cur.Name = strings.Trim(strings.TrimSpace(strings.TrimPrefix(t, "name:")), `"`)
-			inInput = false
-		case strings.HasPrefix(t, "contextWindow:"):
-			cur.ContextWindow = atoiSafe(strings.TrimSpace(strings.TrimPrefix(t, "contextWindow:")))
-			inInput = false
-		case strings.HasPrefix(t, "maxTokens:"):
-			cur.MaxTokens = atoiSafe(strings.TrimSpace(strings.TrimPrefix(t, "maxTokens:")))
-			inInput = false
-		case t == "input:":
-			inInput = true
-			inEfforts = false
-		case t == "reasoningEfforts:":
-			inEfforts = true
-			inInput = false
-			effortIndent = indentOf(raw)
-		case inEfforts && strings.Contains(t, ":"):
-			if indentOf(raw) <= effortIndent {
-				inEfforts = false
-				continue
-			}
-			kv := strings.SplitN(t, ":", 2)
-			k := strings.TrimSpace(kv[0])
-			v := strings.Trim(strings.TrimSpace(kv[1]), `"`)
-			if k != "" && v != "" && v != "null" {
-				if cur.ReasoningEfforts == nil {
-					cur.ReasoningEfforts = map[string]string{}
-				}
-				cur.ReasoningEfforts[k] = v
-			}
-		case inInput && strings.HasPrefix(t, "- "):
-			cur.Input = append(cur.Input, strings.TrimSpace(strings.TrimPrefix(t, "- ")))
-		default:
-			inInput = false
-		}
-	}
-	flush()
-	return out
-}
-
-// atoiSafe 解析十进制整数，失败返回 0。
-func atoiSafe(s string) int {
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
-}
-
 // replaceAihubModelsBlock 在 profile 文本里定位 `providers:` → `aihub:` → `models:`
 // 这一段，用 generated 替换掉它的列表内容。返回替换后的全文。
 //
@@ -406,49 +285,6 @@ func takeOverDSH(h *Hub) (string, error) {
 	if len(models) == 0 {
 		return "", fmt.Errorf("aihub 聚合白名单是空的，没有可写的模型")
 	}
-	// 目录里没有、但用户配置里有的模型（早先手加的、或该线路暂时没进聚合白名单）：
-	// 结构化保留，绝不静默删除 —— 2026-11-03 第一次同步就因此丢了
-	// intl.deepseek-v4.1-flash，而 agent-default-model 正指着它。
-	inCatalog := map[string]bool{}
-	for _, m := range models {
-		inCatalog[m.ID] = true
-	}
-	kept := parseAihubModelEntries(string(src))
-	// 字段级兜底：目录这次给不出档位/窗口时，保留用户配置里已有的那份。
-	// （2026-11-03 实测：同步时 qoder 线路没在跑 → 目录里没有它的档位，
-	//   覆盖后 qoder.Qwen3.8-Flash 的 low/medium/xhigh 就没了。）
-	existing := map[string]dshPiModel{}
-	for _, m := range kept {
-		existing[m.ID] = m
-	}
-	for i := range models {
-		old, ok := existing[models[i].ID]
-		if !ok {
-			continue
-		}
-		if len(models[i].ReasoningEfforts) == 0 && len(old.ReasoningEfforts) > 0 {
-			models[i].ReasoningEfforts = old.ReasoningEfforts
-		}
-		if models[i].ContextWindow == 0 {
-			models[i].ContextWindow = old.ContextWindow
-		}
-		if models[i].MaxTokens == 0 {
-			models[i].MaxTokens = old.MaxTokens
-		}
-		if len(models[i].Input) == 0 {
-			models[i].Input = old.Input
-		}
-	}
-	var extras []dshPiModel
-	for _, m := range kept {
-		if inCatalog[m.ID] {
-			continue
-		}
-		extras = append(extras, m)
-	}
-	sort.Slice(extras, func(i, j int) bool { return extras[i].ID < extras[j].ID })
-	models = append(models, extras...)
-
 	body := strings.TrimSuffix(dshModelsYAML(models, "  "), "\n")
 	next, err := replaceAihubModelsBlock(string(src), body)
 	if err != nil {
@@ -478,8 +314,23 @@ func takeOverDSH(h *Hub) (string, error) {
 		_ = os.WriteFile(path, src, 0o600)
 		return "", fmt.Errorf("写完后 dsh 校验失败，已回滚原文件：%w", err)
 	}
-	return fmt.Sprintf("已接管 DSH（profile=%s）：写入 %d 个模型（含思考档位），原文件备份为 %s",
-		profile, len(models), filepath.Base(bak)), nil
+	msg := fmt.Sprintf("已接管 DSH（profile=%s）：写入 %d 个模型（含思考档位），原文件备份为 %s",
+		profile, len(models), filepath.Base(bak))
+	// 防一个坑：agent-default-model 指向的模型如果不在这次写的清单里，DSH 起来会没有
+	// 默认模型。不阻断（可能是用户故意删的），但必须提醒。
+	if def := dshDefaultModelRef(next); def != "" {
+		found := false
+		for _, m := range models {
+			if m.ID == def {
+				found = true
+				break
+			}
+		}
+		if !found {
+			msg += fmt.Sprintf("；⚠ 注意：默认模型 %q 不在本次清单里（删掉的模型正好是默认项？请在 DSH 里重新选一个）", def)
+		}
+	}
+	return msg, nil
 }
 
 // restoreDSHLatest 用最近的备份还原（接管出错时的退路）。
@@ -544,4 +395,22 @@ func validateDshProfile(profile string) error {
 		return fmt.Errorf("%v：%s", err, msg)
 	}
 	return nil
+}
+
+// dshDefaultModelRef 取出 agent-default-model 段里配置的模型名（取不到返回空）。
+func dshDefaultModelRef(src string) string {
+	lines := strings.Split(src, "\n")
+	inBlock := false
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "- id:") {
+			inBlock = strings.Contains(t, "agent-default-model")
+			continue
+		}
+		if inBlock && strings.HasPrefix(t, "model:") {
+			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(t, "model:")), `"`)
+		}
+		_ = i
+	}
+	return ""
 }

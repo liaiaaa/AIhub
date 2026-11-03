@@ -111,3 +111,116 @@ func excerpt(s, anchor string, lines int) string {
 	}
 	return strings.Join(part, "\n")
 }
+
+// 合并式同步：目录里没有的模型必须原样保留。
+// 真实事故（2026-11-03）：第一次同步把 intl.deepseek-v4.1-flash 删了，
+// 而 agent-default-model 正指向它。
+func TestDSHMergeKeepsExtraModels(t *testing.T) {
+	src := `- id: llm-pi-ai
+  config:
+    providers:
+      aihub:
+        displayName: AIHUB
+        models:
+          - id: "qoder.Kimi-K3"
+            name: "旧名字"
+            contextWindow: 200000
+          - id: "intl.deepseek-v4.1-flash"
+            name: "手加的国际模型"
+            contextWindow: 1000000
+      other:
+        models:
+          - id: keep.me
+- id: agent-default-model
+  config:
+    model: aihub/intl.deepseek-v4.1-flash
+`
+	models := []dshPiModel{{ID: "qoder.Kimi-K3", Name: "Kimi K3（新）", ContextWindow: 300000, MaxTokens: 64000}}
+	kept := parseAihubModelEntries(src)
+	body := strings.TrimSuffix(dshModelsYAML(models, "  "), "\n")
+	inCatalog := map[string]bool{}
+	for _, m := range models {
+		inCatalog[m.ID] = true
+	}
+	var extra []dshPiModel
+	for _, m := range kept {
+		if !inCatalog[m.ID] {
+			extra = append(extra, m)
+		}
+	}
+	if len(extra) > 0 {
+		body += "\n" + strings.TrimSuffix(dshModelsYAML(extra, "  "), "\n")
+	}
+	out, err := replaceAihubModelsBlock(src, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `- id: "intl.deepseek-v4.1-flash"`) {
+		t.Error("目录外的模型（手加的国际模型）被删了 —— 这正是要防的事故")
+	}
+	if !strings.Contains(out, `name: "Kimi K3（新）"`) {
+		t.Error("目录内的模型应更新为新数据")
+	}
+	if !strings.Contains(out, "model: aihub/intl.deepseek-v4.1-flash") {
+		t.Error("默认模型配置被动了")
+	}
+}
+
+func TestParseAihubModelEntriesIgnoresOtherProviders(t *testing.T) {
+	src := `  config:
+    providers:
+      aihub:
+        models:
+          - id: "a.one"
+            name: "A"
+      other:
+        models:
+          - id: "b.two"
+`
+	got := parseAihubModelEntries(src)
+	for _, m := range got {
+		if m.ID == "b.two" {
+			t.Error("不该把别的 provider 的模型当成 aihub 的")
+		}
+	}
+	if len(got) != 1 || got[0].ID != "a.one" {
+		t.Errorf("应只抓到 aihub 的 a.one，实际 %+v", got)
+	}
+}
+
+// 保留条目必须连同 reasoningEfforts 一起保留（否则同步一次就掉档位）。
+func TestParseAihubKeepsEfforts(t *testing.T) {
+	src := `  config:
+    providers:
+      aihub:
+        models:
+          - id: "intl.deepseek-v4.1-flash"
+            name: "国际"
+            contextWindow: 1000000
+            maxTokens: 128000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              minimal: "minimal"
+              low: "low"
+              max: "max"
+      other:
+        models:
+          - id: "x"
+`
+	got := parseAihubModelEntries(src)
+	if len(got) != 1 {
+		t.Fatalf("应解析出 1 条，实际 %d", len(got))
+	}
+	m := got[0]
+	if m.ContextWindow != 1000000 || m.MaxTokens != 128000 {
+		t.Errorf("窗口/输出没解析对：%+v", m)
+	}
+	if len(m.Input) != 2 {
+		t.Errorf("input 没解析对：%v", m.Input)
+	}
+	if len(m.ReasoningEfforts) != 3 || m.ReasoningEfforts["low"] != "low" {
+		t.Errorf("档位没解析对：%v", m.ReasoningEfforts)
+	}
+}

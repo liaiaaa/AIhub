@@ -297,6 +297,11 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body4err), "content.type") && hasImageParts(payload) {
 			p.log.Log("[%s] ⚠ 图片请求被上游拒：%s | 拒收前结构：%s", rid,
 				strings.TrimSpace(string(body4err)), teleagentPayloadShape(payload))
+			// 再记一份「图片 part 的字段清单」：键名 + url 形态，不含 base64 正文。
+			// 上游对 content 的校验比想象的细，只看 type 不够。
+			for i, sample := range teleagentPartsSample(payload, 3) {
+				p.log.Log("[%s] 图片 part#%d：%s", rid, i+1, sample)
+			}
 			if b2, ok := stripImageParts(payload); ok {
 				p.log.Log("[%s] ⚠ 上游拒收图片 part，改为纯文本重试（%d 字节）", rid, len(b2))
 				if resp2, err2 := p.doUpstream(r, b2, rid); err2 == nil {
@@ -710,4 +715,50 @@ func stripImageParts(payload map[string]any) ([]byte, bool) {
 		return nil, false
 	}
 	return b, true
+}
+
+// teleagentPartsSample 采样前 n 个图片 part，输出「键名 + 值的形态」，
+// 不含 base64 正文（只给长度）。用于定位上游为什么拒收。
+func teleagentPartsSample(payload map[string]any, n int) []string {
+	if payload == nil {
+		return nil
+	}
+	out := make([]string, 0, n)
+	msgs, _ := payload["messages"].([]any)
+	for _, raw := range msgs {
+		m, _ := raw.(map[string]any)
+		parts, _ := m["content"].([]any)
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if t, _ := pm["type"].(string); t != "image_url" {
+				continue
+			}
+			keys := make([]string, 0, len(pm))
+			for k := range pm {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			var urlShape string
+			switch v := pm["image_url"].(type) {
+			case string:
+				urlShape = "image_url=string(" + imageURLShape(v) + ")"
+			case map[string]any:
+				ik := make([]string, 0, len(v))
+				for k := range v {
+					ik = append(ik, k)
+				}
+				sort.Strings(ik)
+				u, _ := v["url"].(string)
+				urlShape = fmt.Sprintf("image_url.keys=%v url=%s", ik, imageURLShape(u))
+			default:
+				urlShape = fmt.Sprintf("image_url=%T", v)
+			}
+			role, _ := m["role"].(string)
+			out = append(out, fmt.Sprintf("role=%s keys=%v %s", role, keys, urlShape))
+			if len(out) >= n {
+				return out
+			}
+		}
+	}
+	return out
 }

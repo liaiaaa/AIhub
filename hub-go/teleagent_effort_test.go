@@ -46,3 +46,22 @@ func TestTeleagentEffortRejectsMinimalUpstreamName(t *testing.T) {
 		t.Error("minimal 绝不能透传给上游（会 400）")
 	}
 }
+
+// 2026-11-03：X-TeleAI-Client-Type 必须真的发出去。
+// 之前只定义了 teleagentClientType()，全仓库零调用点 —— 官网「调用端」列因此一直是空的。
+func TestTeleagentSignHeadersIncludeClientType(t *testing.T) {
+	tok := "aaa.bbb.ccc"
+	h, err := teleagentSignHeadersAt(tok, "dev123", "install-1", "POST",
+		"/superCowork/sapi/api/v1/chat/completions", "3.0.0-rc.1", []byte(`{}`), "1700000000", "nonce-1")
+	if err != nil {
+		t.Fatalf("签名失败：%v", err)
+	}
+	if h["X-TeleAI-Client-Type"] != "desktop" {
+		t.Errorf("调用端标识应为 desktop，实际 %q", h["X-TeleAI-Client-Type"])
+	}
+	// env 可覆盖（上游若改枚举值）
+	t.Setenv("AIHUB_TELEAGENT_CLIENT_TYPE", "app")
+	if got := teleagentClientType(); got != "app" {
+		t.Errorf("env 应可覆盖，实际 %q", got)
+	}
+}

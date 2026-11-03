@@ -438,6 +438,10 @@ func teleagentSignHeadersAt(token, deviceID, installID, method, pathWithQuery, a
 		"Accept-Encoding":           "identity",
 		"x-message-id":              "msg_" + msgID,
 		"x-session-id":              "ses_" + sessID,
+		// 2026-11-03 修：这个头之前只定义了函数、**从来没被发出去**
+		// （teleagentClientType 全仓库零调用点），所以官网用量面板「调用端」一直是空的。
+		// 桌面端自己发 desktop，我们照抄。
+		"X-TeleAI-Client-Type": teleagentClientType(),
 	}, nil
 }
 

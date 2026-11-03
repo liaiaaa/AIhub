@@ -27,12 +27,14 @@ echo "控制台： http://127.0.0.1:8801/（-port 可改）"
 #   AIHUB_TRAE_EFFORT=light   Trae 思考档位覆盖：light|high|extra_high
 #                             不设 = 自动取该模型支持的最高档（与 dom/intl 口径一致）
 #                             旧写法 low/medium 仍兼容（分别归一到 light/high）
+#   AIHUB_TELEAGENT_DUMP=1    上游 4xx 时把完整请求体写到 ta-fail-<rid>.json（排障用，含正文）
+#   AIHUB_TELEAGENT_CLIENT_TYPE=desktop  TeleAgent 出站「调用端」取值（默认 desktop）
 ENVS=()
 for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy \
 	AIHUB_ROOT WORKBUDDY_AUTH_DIR TRAE_USER_DATA_DIR QODER_APP_DATA \
 	ZCODE_RELAY_URL ZCODE_RELAY_KEY \
 	AIHUB_CHANNEL_RETRY AIHUB_NO_CHANNEL_RETRY AIHUB_KEEP_DUMPS \
-	AIHUB_TRAE_IDLE_SECS AIHUB_TRAE_EFFORT; do
+	AIHUB_TRAE_IDLE_SECS AIHUB_TRAE_EFFORT AIHUB_TELEAGENT_DUMP AIHUB_TELEAGENT_CLIENT_TYPE; do
 	if [ -n "${!v:-}" ]; then ENVS+=(--setenv="$v=${!v}"); fi
 done
 [ ${#ENVS[@]} -gt 0 ] && echo "带入环境变量：${ENVS[*]#--setenv=}"

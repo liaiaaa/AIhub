@@ -295,6 +295,8 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		// 兜底（2026-11-03）：图片形态仍然被上游拒时，去掉图片再试一次 ——
 		// 宁可回一句「图片没转过去」，也不要整轮对话失败。
 		if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body4err), "content.type") && hasImageParts(payload) {
+			p.log.Log("[%s] ⚠ 图片请求被上游拒：%s | 拒收前结构：%s", rid,
+				strings.TrimSpace(string(body4err)), teleagentPayloadShape(payload))
 			if b2, ok := stripImageParts(payload); ok {
 				p.log.Log("[%s] ⚠ 上游拒收图片 part，改为纯文本重试（%d 字节）", rid, len(b2))
 				if resp2, err2 := p.doUpstream(r, b2, rid); err2 == nil {
@@ -312,7 +314,11 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		// 光记错误体查不出差别，所以把**请求结构**（消息数、角色、每个 content part 的 type）
 		// 一起记下来。只记类型与长度，不记正文。
 	relay:
-		p.log.Log("[%s] ✗ HTTP %d | %s | %s", rid, resp.StatusCode, backend, strings.TrimSpace(string(body4err)))
+		mark := "✗"
+		if resp.StatusCode < 400 {
+			mark = "◀"
+		}
+		p.log.Log("[%s] %s HTTP %d | %s | %s", rid, mark, resp.StatusCode, backend, strings.TrimSpace(string(body4err)))
 		if payload != nil {
 			p.log.Log("[%s] 请求结构：%s", rid, teleagentPayloadShape(payload))
 			if os.Getenv("AIHUB_TELEAGENT_DUMP") == "1" {

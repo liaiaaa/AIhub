@@ -790,8 +790,9 @@ func (h *Hub) statusMap() map[string]any {
 	if teleagentP != nil && teleagentP.Running() {
 		teleagent["up"] = true
 		teleagent["ok"] = true
-		teleagent["detail"] = fmt.Sprintf("TeleAI 云端 · %d 个模型 · 桌面端凭据自动解密", len(teleagentModels)-1)
-		teleagent["models"] = len(teleagentModels) - 1
+		nTA := len(teleagentPublicModels())
+		teleagent["detail"] = fmt.Sprintf("TeleAI 云端 · %d 个模型 · 桌面端凭据自动解密", nTA)
+		teleagent["models"] = nTA
 	}
 
 	dirs := credDirs()

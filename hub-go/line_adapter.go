@@ -193,13 +193,7 @@ func (a teleagentAdapter) Chat(w http.ResponseWriter, r *http.Request) {
 func (a teleagentAdapter) NativeResponses() http.HandlerFunc { return nil }
 
 func (a teleagentAdapter) Models() []string {
-	out := make([]string, 0, len(teleagentModels))
-	for _, m := range teleagentModels {
-		if !m.Disabled {
-			out = append(out, m.ID)
-		}
-	}
-	return out
+	return teleagentPublicModels()
 }
 
 // zcodeAdapter Zcode：启动需要 apiKey（由 /api/zcode/start 的请求体带进来），

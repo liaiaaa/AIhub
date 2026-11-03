@@ -59,24 +59,42 @@ const (
 
 // teleagentModels TeleAgent 可用模型（来自应用自己的 model-catalog.json + 源码种子）。
 // 只写确定的：上下文/输出上限不确定的留 0，不编数字。
+//
+// 前台目录 vs 隐藏项（2026-11-03 用户指正「teleagent 应该就三个模型才对」）：
+// TeleAgent 桌面端模型选择器只展示 智能/旗舰/极速 三个（model-catalog.json 里也只有这三个）；
+// chat-lite / chat-nano 只存在于 TeleAgent.jsonc 的 provider.limits，前台不展示。
+// 所以对外目录（/v1/models、聚合可选清单、控制台下拉）**只列前台三个**；
+// 隐藏的两个仍可直接按 id 调用（实测 200），需要时把 Hidden 改 false 即可放出。
 var teleagentModels = []struct {
 	ID       string
 	Display  string
 	Context  int
 	MaxOut   int
-	Disabled bool
+	Disabled bool // 应用侧 blacklist，彻底不对外
+	Hidden   bool // 前台目录不展示：不进 /v1/models 与聚合清单，但按 id 直连仍可用
 }{
-	// 名字取自应用自己的 model-catalog.json（前台只展示前三个）。
+	// 名字取自应用自己的 model-catalog.json（前台只展示这三个）。
 	// 上限：model-catalog.json 写 400,000，而 TeleAgent.jsonc 的 provider.limits 写
 	// 1,000,000 —— 2026-11-02 用户确认「模型是支持 1M 上下文的」，按 1M 宣告。
 	{ID: "chat-pro", Display: "智能", Context: 1000000, MaxOut: 65536},
 	{ID: "chat-flagship", Display: "旗舰", Context: 1000000, MaxOut: 65536},
 	{ID: "chat-flash", Display: "极速", Context: 1000000, MaxOut: 65536},
-	// 轻量/轻速：配置里有、前台不展示，但实测可调用（2026-11-02 用 chat-lite/chat-nano 各打一次均 200）
-	{ID: "chat-lite", Display: "轻量", Context: 100000, MaxOut: 16384},
-	{ID: "chat-nano", Display: "轻速", Context: 100000, MaxOut: 16384},
+	// 轻量/轻速：配置里有、前台不展示，实测可调用（2026-11-02 各打一次均 200）
+	{ID: "chat-lite", Display: "轻量", Context: 100000, MaxOut: 16384, Hidden: true},
+	{ID: "chat-nano", Display: "轻速", Context: 100000, MaxOut: 16384, Hidden: true},
 	// 应用自己把它放在 blacklist 里，不对外暴露
 	{ID: "tele-safety-answer", Display: "安全审核", Disabled: true},
+}
+
+// teleagentPublicModels 对外目录（排除 Disabled 与 Hidden）。
+func teleagentPublicModels() []string {
+	out := make([]string, 0, 3)
+	for _, m := range teleagentModels {
+		if !m.Disabled && !m.Hidden {
+			out = append(out, m.ID)
+		}
+	}
+	return out
 }
 
 // TeleAgentProxy 一条线路一个实例。
@@ -139,8 +157,9 @@ func (p *TeleAgentProxy) Start() (bool, string) {
 			p.log.Log("serve error: %v", err)
 		}
 	}()
-	p.log.Log("==== proxy 启动（%d，模型 %d 个）====", p.Port, len(teleagentModels))
-	return true, "已启动（TeleAgent · " + fmt.Sprint(len(teleagentModels)-1) + " 个模型）"
+	nPub := len(teleagentPublicModels())
+	p.log.Log("==== proxy 启动（%d，模型 %d 个）====", p.Port, nPub)
+	return true, "已启动（TeleAgent · " + fmt.Sprint(nPub) + " 个模型）"
 }
 
 func (p *TeleAgentProxy) Stop() (bool, string) {
@@ -174,8 +193,8 @@ func (p *TeleAgentProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	data := make([]map[string]any, 0, len(teleagentModels))
 	for _, m := range teleagentModels {
-		if m.Disabled {
-			continue
+		if m.Disabled || m.Hidden {
+			continue // 前台目录不展示的模型不进列表
 		}
 		e := map[string]any{
 			"id": m.ID, "object": "model", "created": now, "owned_by": "teleagent",

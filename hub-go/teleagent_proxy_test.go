@@ -95,12 +95,34 @@ func TestTeleagentModelsExcludeDisabled(t *testing.T) {
 		t.Errorf("端口应为 8794，实际 %d", p.Port)
 	}
 	ids := teleagentAdapter{h: &Hub{}}.Models()
-	if len(ids) != 5 {
-		t.Fatalf("对外模型应为 5 个（6 个里去掉 blacklist 的 tele-safety-answer），实际 %d：%v", len(ids), ids)
+	// 2026-11-03 用户指正「teleagent 应该就三个模型才对」：前台目录（model-catalog.json）
+	// 只有 智能/旗舰/极速 三个，chat-lite/chat-nano 只在 TeleAgent.jsonc 的 provider.limits 里，
+	// 前台不展示 → 不进对外目录，但按 id 直连仍可用（见下面 Hidden 断言）。
+	if len(ids) != 3 {
+		t.Fatalf("对外模型应为 3 个（前台目录的三个），实际 %d：%v", len(ids), ids)
 	}
+	want := map[string]bool{"chat-pro": true, "chat-flagship": true, "chat-flash": true}
 	for _, id := range ids {
+		if !want[id] {
+			t.Errorf("对外目录出现非前台模型 %q", id)
+		}
 		if id == "tele-safety-answer" {
 			t.Error("tele-safety-answer 在应用里是 blacklist，不该对外暴露")
+		}
+	}
+	// 隐藏 ≠ 删除：chat-lite/chat-nano 应带 Hidden 标记，且元数据/图片判定仍在
+	for _, id := range []string{"chat-lite", "chat-nano"} {
+		var found *bool
+		for i := range teleagentModels {
+			if teleagentModels[i].ID == id {
+				f := teleagentModels[i].Hidden
+				found = &f
+			}
+		}
+		if found == nil {
+			t.Errorf("%s 不在表里（隐藏应是 Hidden 标记，不是从表里删）", id)
+		} else if !*found {
+			t.Errorf("%s 应标记 Hidden（前台不展示）", id)
 		}
 	}
 	if !p.Running() == false {

@@ -75,6 +75,19 @@ func buildDshModels(h *Hub) []dshPiModel {
 				m.MaxTokens = meta.MaxInput
 			}
 		}
+		// 兜底：条目**必须**带 contextWindow / maxTokens。
+		// 2026-11-03 事故：同步时某条线路没在跑 → modelMeta 取不到 → 写出没有窗口的条目，
+		// DSH 回落到默认小窗口，于是运行中报
+		// 「pi-ai detected context overflow for model "qoder.DeepSeek-Flash"」。
+		if m.ContextWindow <= 0 {
+			m.ContextWindow = h.contextWindow()
+		}
+		if m.MaxTokens <= 0 {
+			m.MaxTokens = 64000
+			if m.ContextWindow > 0 && m.MaxTokens > m.ContextWindow {
+				m.MaxTokens = m.ContextWindow
+			}
+		}
 		if lineSupportsImage(am.Line) {
 			m.Input = []string{"text", "image"}
 		} else {

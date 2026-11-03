@@ -115,3 +115,32 @@ func excerpt(s, anchor string, lines int) string {
 // 合并式同步：目录里没有的模型必须原样保留。
 // 真实事故（2026-11-03）：第一次同步把 intl.deepseek-v4.1-flash 删了，
 // 而 agent-default-model 正指向它。
+
+// 每个条目都必须带 contextWindow 与 maxTokens：
+// 缺了 DSH 会回落到默认小窗口，运行时报 context overflow（2026-11-03 真实事故）。
+func TestBuildDshModelsAlwaysHasWindow(t *testing.T) {
+	withAggList(t, []aggModel{
+		{Slug: "qoder.DeepSeek-Flash", Line: "qoder", Backend: "DeepSeek-Flash"},
+		{Slug: "mimo.v2", Line: "mimo", Backend: "v2"},
+	})
+	models := buildDshModels(&Hub{})
+	if len(models) != 2 {
+		t.Fatalf("应有 2 条，实际 %d", len(models))
+	}
+	for _, m := range models {
+		if m.ContextWindow <= 0 {
+			t.Errorf("%s 缺 contextWindow", m.ID)
+		}
+		if m.MaxTokens <= 0 {
+			t.Errorf("%s 缺 maxTokens", m.ID)
+		}
+		if m.MaxTokens > m.ContextWindow {
+			t.Errorf("%s 的输出上限(%d)超过上下文(%d)", m.ID, m.MaxTokens, m.ContextWindow)
+		}
+	}
+	// 渲染出来的 YAML 里必须两个字段都在
+	y := dshModelsYAML(models, "  ")
+	if strings.Count(y, "contextWindow:") != 2 || strings.Count(y, "maxTokens:") != 2 {
+		t.Errorf("YAML 里窗口/输出字段不全：\n%s", y)
+	}
+}

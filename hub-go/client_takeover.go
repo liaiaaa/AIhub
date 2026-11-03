@@ -376,6 +376,8 @@ func (h *Hub) apiClientsRestore(w http.ResponseWriter, r *http.Request) {
 		msg, err = restoreCodex()
 	case "claude":
 		msg, err = restoreClaude()
+	case "dsh":
+		msg, err = restoreDSHLatest()
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "app 只支持 codex / claude"})
 		return
@@ -388,7 +390,7 @@ func (h *Hub) apiClientsRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": msg})
 }
 
-// apiClientsTakeover POST /api/clients/takeover {"app":"codex"|"claude"}
+// apiClientsTakeover POST /api/clients/takeover {"app":"codex"|"claude"|"dsh"}
 func (h *Hub) apiClientsTakeover(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		App string `json:"app"`
@@ -401,8 +403,10 @@ func (h *Hub) apiClientsTakeover(w http.ResponseWriter, r *http.Request) {
 		msg, err = takeOverCodex()
 	case "claude":
 		msg, err = takeOverClaude()
+	case "dsh":
+		msg, err = takeOverDSH(h)
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "app 只支持 codex / claude"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "app 只支持 codex / claude / dsh"})
 		return
 	}
 	if err != nil {
@@ -448,5 +452,7 @@ func (h *Hub) apiClientsStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// 2026-10-19：Claude Code / Claude Desktop 已恢复官方直连，控制台不再接管它们，
 	// 所以这里不再回报 claude_base_url（前端也已去掉对应显示）。
+	// 2026-11-03：加上 DSH 接管状态（是否已配 aihub 模型、备份份数）。
+	out["dsh"] = dshTakeoverStatus()
 	writeJSON(w, http.StatusOK, out)
 }

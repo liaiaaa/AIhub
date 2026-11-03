@@ -745,11 +745,13 @@
           <thead><tr><th>客户端</th><th>配置文件</th><th>当前指向</th><th class="op" style="width:150px">操作</th></tr></thead>
           <tbody>
             <tr><td>Codex</td><td style="font-family:var(--mono);font-size:11.5px">~/.codex/config.toml</td><td id="st-codex">—</td><td class="op"><button class="sm" onclick="takeover('codex')">接管</button> <button class="sm" onclick="restoreClient('codex')">恢复官方</button></td></tr>
+            <tr><td>DSH</td><td style="font-family:var(--mono);font-size:11.5px">~/.dsh/profiles/web/cordis.patch.yml</td><td id="st-dsh">—</td><td class="op"><button class="sm" onclick="takeover('dsh')">同步模型</button> <button class="sm" onclick="restoreClient('dsh')">还原</button></td></tr>
           </tbody>
         </table>
         <div class="ctx-row" style="margin-top:8px">
           <span class="hint">接管 = 配置指向 :8790（Codex 的官方登录身份与官方模型 gpt-* 保留，经网关透传与第三方模型共存）；恢复官方 = 回到纯官方直连。均自动备份，改动重开客户端生效。<br>
-          2026-10-19 起只接管 Codex：Claude Code 与 Claude Desktop 已恢复官方直连，控制台不再改它们的配置（想手动接入可在上面「接入点」里复制配置）。</span>
+          2026-10-19 起只接管 Codex：Claude Code 与 Claude Desktop 已恢复官方直连，控制台不再改它们的配置（想手动接入可在上面「接入点」里复制配置）。<br>
+          DSH 的「同步模型」只重写 profile 里 aihub 那个 provider 的 models 列表（含每个模型的上下文/输出上限与思考档位），其他 provider、默认模型、agent 配置一个字都不动，同样先备份。</span>
         </div>
       </div>
 
@@ -2177,6 +2179,8 @@ function renderClients() {
       clients = d;
       const codex = document.getElementById('st-codex');
       if (codex) codex.textContent = d.codex_provider === 'aihub' ? 'provider=aihub ✓ 已接管' : ('provider=' + (d.codex_provider || '—') + '（未接管）');
+      const dsh = document.getElementById('st-dsh');
+      if (dsh && d.dsh) dsh.textContent = d.dsh.ok ? ('profile=' + d.dsh.profile + (d.dsh.backups ? ' · 备份 ' + d.dsh.backups + ' 份' : '')) : (d.dsh.msg || '—');
       renderOverview();
     })
     .catch(function () {});

@@ -61,6 +61,9 @@ var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Q
 // 不能拿 aggLineCN 当校验表——它含 "agg" 这个纯统计用的键，
 // 用它校验会让 /api/agg/add?line=agg 被误认为合法线路。
 func aggSelectableLine(line string) bool {
+	if lineHidden(line) {
+		return false // 隐藏的线路不能再被加进聚合白名单
+	}
 	switch line {
 	case "dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc":
 		return true
@@ -131,8 +134,16 @@ func aggSaveLocked() {
 func aggSnapshot() []aggModel {
 	aggMu.Lock()
 	defer aggMu.Unlock()
-	out := make([]aggModel, len(aggList))
-	copy(out, aggList)
+	// 2026-11-03：隐藏线路的模型不进聚合（否则 /v1/models 里还会列出它们，
+	// 调用时又因为线路不能启动而失败）。
+	hidden := hiddenLines()
+	out := make([]aggModel, 0, len(aggList))
+	for _, m := range aggList {
+		if hidden[m.Line] {
+			continue
+		}
+		out = append(out, m)
+	}
 	return out
 }
 

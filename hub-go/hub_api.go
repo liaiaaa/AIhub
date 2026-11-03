@@ -116,6 +116,10 @@ func (h *Hub) apiNick(w http.ResponseWriter, r *http.Request) {
 // apiLineStart 返回某条线路的启动 handler。响应体与收敛前的专用 handler 完全一致。
 func (h *Hub) apiLineStart(key string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if lineHidden(key) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": lineVisibilityErr(key)})
+			return
+		}
 		ad, ok := h.adapterFor(key)
 		if !ok {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "未知线路：" + key})

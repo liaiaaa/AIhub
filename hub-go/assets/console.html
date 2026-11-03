@@ -620,6 +620,7 @@
           <button data-f="down" onclick="setLineFilter('down')">已停止</button>
         </span>
         <span class="spacer"></span>
+        <button class="text" onclick="openLinesAdmin()">管理线路</button>
         <button class="text" onclick="refreshQuota()">刷新全部额度</button>
         <button class="danger sm" onclick="stopAll()">全部停止</button>
       </div>
@@ -790,6 +791,20 @@
 <div id="toast"></div>
 
 <!-- 日志弹层（2026-10-31）：点线路卡片上的「日志」打开，读 /api/logs/tail -->
+<div id="lines-mask" class="modal-mask" hidden onclick="if (event.target === this) closeLinesAdmin()">
+  <div class="modal">
+    <div class="modal-head">
+      <b>管理线路</b>
+      <span class="spacer"></span>
+      <button class="text" onclick="loadLines(true)">刷新</button>
+      <button class="text" onclick="closeLinesAdmin()">关闭</button>
+    </div>
+    <div class="modal-body" id="lines-admin-body" style="max-height:60vh;overflow:auto"></div>
+    <div class="modal-foot" style="padding:8px 14px;color:var(--muted,#888);font-size:12px">
+      隐藏只是不显示、不能启动、不进聚合；配置、凭据、日志都保留，随时可以点「显示」恢复。
+    </div>
+  </div>
+</div>
 <div id="log-mask" class="modal-mask" hidden onclick="if (event.target === this) closeLog()">
   <div class="modal">
     <div class="modal-head">
@@ -1280,10 +1295,86 @@ function gotoLine(name) {
 }
 
 // ---------- 总览线路 6 行 ----------
+// ---------- 线路显隐（2026-11-03） ----------
+// 用户要求：不用的线路（比如一个月不碰 mimo）隐藏起来，主页看不到、不能启动。
+// 隐藏状态存在数据根 lines.json，后端 /api/lines 返回；这里只做渲染过滤与管理弹层。
+let LINEV = {};        // key -> {key,display,port,aggregated,risk,hidden,running}
+
+function lineVisible(key) {
+  const v = LINEV[key];
+  return !(v && v.hidden);
+}
+
+async function loadLines(force) {
+  try {
+    const r = await fetch('/api/lines', { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    if (!d.ok) return;
+    const next = {};
+    (d.lines || []).forEach(function (l) { next[l.key] = l; });
+    const sig = function (o) { return Object.keys(o).map(function (k) { return k + ':' + !!o[k].hidden; }).join(','); };
+    const changed = sig(next) !== sig(LINEV);
+    LINEV = next;
+    renderLinesAdmin();
+    if (changed) {
+      // 磁贴是一次性建好、之后只更新内容的（ensureLineTiles 有 children.length 短路），
+      // 所以显隐变化时必须清空重建，否则隐藏的线路会一直留在页面上。
+      const grid = document.getElementById('lines-grid');
+      if (grid) grid.innerHTML = '';
+      ensureLineTiles();
+    }
+    if (changed || force) refresh();
+  } catch (e) { /* 拿不到就按「全部可见」渲染，不影响主功能 */ }
+}
+
+function openLinesAdmin() {
+  const mask = document.getElementById('lines-mask');
+  if (!mask) return;
+  mask.hidden = false;
+  renderLinesAdmin();
+  loadLines(true);
+}
+function closeLinesAdmin() {
+  const mask = document.getElementById('lines-mask');
+  if (mask) mask.hidden = true;
+}
+
+function renderLinesAdmin() {
+  const box = document.getElementById('lines-admin-body');
+  if (!box) return;
+  const keys = Object.keys(LINEV);
+  if (!keys.length) { box.innerHTML = '<div style="padding:14px;color:#888">加载中…</div>'; return; }
+  box.innerHTML = keys.map(function (k) {
+    const l = LINEV[k] || {};
+    const st = l.hidden ? '<span style="color:#999">已隐藏</span>' : (l.running ? '运行中' : '已停止');
+    const btn = l.hidden
+      ? '<button class="sm" onclick="setLineVisible(\'' + k + '\', true)">显示</button>'
+      : '<button class="sm" onclick="setLineVisible(\'' + k + '\', false)">隐藏</button>';
+    return '<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid #eee">' +
+      '<b style="min-width:150px">' + (l.display || k) + '</b>' +
+      '<span style="color:#888;font-size:12px">端口 ' + (l.port || '—') +
+        (l.aggregated ? ' · 参与聚合' : '') + (l.risk ? ' · ' + l.risk : '') + '</span>' +
+      '<span style="font-size:12px">' + st + '</span>' +
+      '<span style="flex:1"></span>' + btn + '</div>';
+  }).join('');
+}
+
+async function setLineVisible(key, visible) {
+  try {
+    const r = await fetch('/api/lines/' + (visible ? 'show' : 'hide'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key }), signal: AbortSignal.timeout(20000)
+    });
+    const d = await r.json();
+    toast(d.msg || (d.ok ? '已更新' : '操作失败'));
+    await loadLines(true);
+  } catch (e) { toast('操作失败：' + e); }
+}
+
 function renderLineList() {
   const box = document.getElementById('line-list');
   if (!box || !state) return;
-  box.innerHTML = SERVICES.map(function (s) {
+  box.innerHTML = SERVICES.filter(function (s) { return lineVisible(s.key); }).map(function (s) {
     const d = state[s.key] || { up:false, ok:false, detail:'' };
     const up = d.up;
     const st = up ? (d.ok ? '运行中' : (d.detail || '异常')) : '已停止';
@@ -1394,7 +1485,7 @@ async function doIntlCheckin() {
 function ensureLineTiles() {
   const box = document.getElementById('lines-grid');
   if (box.children.length) return;
-  box.innerHTML = SERVICES.map(svcTile).join('');
+  box.innerHTML = SERVICES.filter(function (s) { return lineVisible(s.key); }).map(svcTile).join('');
   loadCredStatus(false);
 }
 function svcTile(s) {
@@ -2260,6 +2351,7 @@ const startPage = (location.hash || '').replace('#', '');
 if (startPage && PAGE_TITLES[startPage]) switchPage(startPage);
 ensureLineTiles();
 render();
+loadLines(false);
 refresh();
 refreshNick();
 aggRefresh();

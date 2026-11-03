@@ -219,6 +219,19 @@ func (h *Hub) restoreLines() {
 	if len(lines) == 0 {
 		return
 	}
+	// 2026-11-03：被隐藏的线路不参与自动恢复（用户明确要求「隐藏=不能启动」）
+	hidden := hiddenLines()
+	kept := make([]string, 0, len(lines))
+	for _, n := range lines {
+		if hidden[n] {
+			continue
+		}
+		kept = append(kept, n)
+	}
+	lines = kept
+	if len(lines) == 0 {
+		return
+	}
 	logHub("自动恢复上次运行的线路：%v", lines)
 	for _, name := range lines {
 		ok, msg := h.startLineByName(name)

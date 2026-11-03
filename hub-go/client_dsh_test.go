@@ -144,3 +144,33 @@ func TestBuildDshModelsAlwaysHasWindow(t *testing.T) {
 		t.Errorf("YAML 里窗口/输出字段不全：\n%s", y)
 	}
 }
+
+// 图片能力必须按线路声明：能发图的 dom/intl/qoder/trae/teleagent 写 text+image，
+// 其余只写 text（2026-11-03 用户报「没有声明是否支持图片」）。
+func TestBuildDshModelsDeclaresImage(t *testing.T) {
+	withAggList(t, []aggModel{
+		{Slug: "dom.glm-5.3-flash", Line: "dom", Backend: "glm-5.3-flash"},
+		{Slug: "qoder.DeepSeek-Flash", Line: "qoder", Backend: "DeepSeek-Flash"},
+		{Slug: "teleagent.chat-pro", Line: "teleagent", Backend: "chat-pro"},
+		{Slug: "mimo.v2-flash", Line: "mimo", Backend: "v2-flash"},
+	})
+	models := buildDshModels(&Hub{})
+	got := map[string][]string{}
+	for _, m := range models {
+		got[m.ID] = m.Input
+	}
+	wantImage := []string{"dom.glm-5.3-flash", "qoder.DeepSeek-Flash", "teleagent.chat-pro"}
+	for _, id := range wantImage {
+		if len(got[id]) != 2 || got[id][1] != "image" {
+			t.Errorf("%s 应声明 text+image，实际 %v", id, got[id])
+		}
+	}
+	if len(got["mimo.v2-flash"]) != 1 || got["mimo.v2-flash"][0] != "text" {
+		t.Errorf("mimo 不该声明图片输入，实际 %v", got["mimo.v2-flash"])
+	}
+	// 渲染出来的 YAML 里要真的有 image
+	y := dshModelsYAML(models, "  ")
+	if strings.Count(y, "- image") != 3 {
+		t.Errorf("YAML 里 image 条目数应为 3，实际 %d", strings.Count(y, "- image"))
+	}
+}

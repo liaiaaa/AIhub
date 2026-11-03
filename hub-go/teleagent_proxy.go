@@ -77,9 +77,11 @@ var teleagentModels = []struct {
 	// 名字取自应用自己的 model-catalog.json（前台只展示这三个）。
 	// 上限：model-catalog.json 写 400,000，而 TeleAgent.jsonc 的 provider.limits 写
 	// 1,000,000 —— 2026-11-02 用户确认「模型是支持 1M 上下文的」，按 1M 宣告。
-	{ID: "chat-pro", Display: "智能", Context: 1000000, MaxOut: 65536},
-	{ID: "chat-flagship", Display: "旗舰", Context: 1000000, MaxOut: 65536},
-	{ID: "chat-flash", Display: "极速", Context: 1000000, MaxOut: 65536},
+	{ID: "chat-pro", Display: "智能", Context: 934000, MaxOut: 65536},
+	{ID: "chat-flagship", Display: "旗舰", Context: 934000, MaxOut: 65536},
+	{ID: "chat-flash", Display: "极速", Context: 934000, MaxOut: 65536},
+	// 上下文按 934000 报：官方目录写 400000，但用户实际可用约 1M，
+	// 取 934k 是**留出余量**（2026-11-03 用户明确「按照 934k 来就行，预留出来点」）。
 	// 轻量：**是桌面端的识图模型**（runtime.js 里 `smallModelRef = "NewApi/chat-lite"`，
 	// 图片识别、摘要这类小活都走它）。2026-11-03 实测它能准确读出截图里的文字与控件，
 	// 所以从「隐藏」放出来，并作为 aihub 图片转文字的首选视觉模型。

@@ -12,9 +12,9 @@ func TestTeleagentModelMapping(t *testing.T) {
 		context int
 		maxOut  int
 	}{
-		"chat-pro":      {"智能", 1000000, 65536},
-		"chat-flagship": {"旗舰", 1000000, 65536},
-		"chat-flash":    {"极速", 1000000, 65536},
+		"chat-pro":      {"智能", 934000, 65536},
+		"chat-flagship": {"旗舰", 934000, 65536},
+		"chat-flash":    {"极速", 934000, 65536},
 		"chat-lite":     {"轻量", 100000, 16384},
 		"chat-nano":     {"轻速", 100000, 16384},
 	}

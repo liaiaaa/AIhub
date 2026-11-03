@@ -62,7 +62,7 @@ var creditsState = struct {
 
 const creditsTTL = 5 * time.Minute
 
-var creditKeys = []string{"dom", "intl", "qoder", "trae"}
+var creditKeys = []string{"dom", "intl", "qoder", "trae", "teleagent"}
 
 // creditsSnapshot 返回各平台额度（缓存优先）；过期/强制时后台补拉。
 // force=true 立即作废全部缓存。
@@ -170,6 +170,8 @@ func fetchCredit(h *Hub, key string) *creditInfo {
 		return qoderCredits()
 	case "trae":
 		return traeCredits()
+	case "teleagent":
+		return teleagentCredits()
 	}
 	return &creditInfo{OK: false, Text: "未知平台"}
 }

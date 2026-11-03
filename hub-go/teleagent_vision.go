@@ -46,7 +46,9 @@ func visionModelCandidates() []string {
 	if v := strings.TrimSpace(os.Getenv("AIHUB_VISION_MODEL")); v != "" {
 		return []string{v}
 	}
-	return []string{"qoder.Qwen3.8-Flash", "teleagent.chat-flash", "trae.glm-5.3"}
+	// chat-lite 排在第一位：桌面端自己就用它（runtime.js 的 smallModelRef = NewApi/chat-lite），
+	// 读截图里的 UI 文案比通用视觉模型更准，而且它是 TeleAgent 自家额度。
+	return []string{"teleagent.chat-lite", "qoder.Qwen3.8-Flash", "teleagent.chat-flash"}
 }
 
 // visionAggURL 聚合网关地址（我们自己，避免绕到外面去）。

@@ -80,8 +80,10 @@ var teleagentModels = []struct {
 	{ID: "chat-pro", Display: "智能", Context: 1000000, MaxOut: 65536},
 	{ID: "chat-flagship", Display: "旗舰", Context: 1000000, MaxOut: 65536},
 	{ID: "chat-flash", Display: "极速", Context: 1000000, MaxOut: 65536},
-	// 轻量/轻速：配置里有、前台不展示，实测可调用（2026-11-02 各打一次均 200）
-	{ID: "chat-lite", Display: "轻量", Context: 100000, MaxOut: 16384, Hidden: true},
+	// 轻量：**是桌面端的识图模型**（runtime.js 里 `smallModelRef = "NewApi/chat-lite"`，
+	// 图片识别、摘要这类小活都走它）。2026-11-03 实测它能准确读出截图里的文字与控件，
+	// 所以从「隐藏」放出来，并作为 aihub 图片转文字的首选视觉模型。
+	{ID: "chat-lite", Display: "轻量", Context: 100000, MaxOut: 16384},
 	{ID: "chat-nano", Display: "轻速", Context: 100000, MaxOut: 16384, Hidden: true},
 	// 应用自己把它放在 blacklist 里，不对外暴露
 	{ID: "tele-safety-answer", Display: "安全审核", Disabled: true},

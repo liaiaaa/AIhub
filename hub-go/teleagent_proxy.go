@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -290,7 +291,17 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 2026-11-02 用户报「显示几个思考后出现的报错」——先保证下次有据可查。
 	if resp.StatusCode >= 400 {
 		body4err, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		// 2026-11-03 用户报「chat-pro 发图 400 取值范围 ['text']」，但同参数手工探测却 200 ——
+		// 光记错误体查不出差别，所以把**请求结构**（消息数、角色、每个 content part 的 type）
+		// 一起记下来。只记类型与长度，不记正文。
 		p.log.Log("[%s] ✗ HTTP %d | %s | %s", rid, resp.StatusCode, backend, strings.TrimSpace(string(body4err)))
+		if payload != nil {
+			p.log.Log("[%s] 请求结构：%s", rid, teleagentPayloadShape(payload))
+			if os.Getenv("AIHUB_TELEAGENT_DUMP") == "1" {
+				_ = os.WriteFile(dataPath(fmt.Sprintf("ta-fail-%s.json", rid)), body, 0o600)
+				p.log.Log("[%s] 已把完整请求体写到 ta-fail-%s.json", rid, rid)
+			}
+		}
 		writeJSON(w, resp.StatusCode, map[string]any{"error": map[string]any{
 			"message": fmt.Sprintf("TeleAgent 上游 HTTP %d：%s", resp.StatusCode, strings.TrimSpace(string(body4err))),
 			"type":    "upstream_error",
@@ -494,4 +505,66 @@ func uuidV4() (string, error) {
 	buf[6] = (buf[6] & 0x0f) | 0x40
 	buf[8] = (buf[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16]), nil
+}
+
+// teleagentPayloadShape 把请求体的**结构**压成一行：消息数、角色、content 里出现的 part 类型、
+// 以及每种 part 的个数。只描述形状，不含正文（用户内容不进日志）。
+func teleagentPayloadShape(payload map[string]any) string {
+	msgs, _ := payload["messages"].([]any)
+	roles := make([]string, 0, len(msgs))
+	types := map[string]int{}
+	for _, raw := range msgs {
+		m, _ := raw.(map[string]any)
+		role, _ := m["role"].(string)
+		roles = append(roles, role)
+		switch c := m["content"].(type) {
+		case string:
+			types["<string>"]++
+		case []any:
+			for _, part := range c {
+				pm, _ := part.(map[string]any)
+				t, _ := pm["type"].(string)
+				if t == "" {
+					t = "<no-type>"
+				}
+				types[t]++
+				// image_url 这类 part 光看 type 不够：url 是 data URL 还是附件路径/URI，
+				// 决定上游认不认。这里只记「什么形状」，不记 base64 正文。
+				if t == "image_url" {
+					iu, _ := pm["image_url"].(map[string]any)
+					u, _ := iu["url"].(string)
+					types[imageURLShape(u)]++
+				}
+			}
+		case nil:
+			types["<null>"]++
+		default:
+			types[fmt.Sprintf("<%T>", c)]++
+		}
+	}
+	keys := make([]string, 0, len(types))
+	for k := range types {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s×%d", k, types[k]))
+	}
+	return fmt.Sprintf("msgs=%d roles=[%s] parts=[%s]", len(msgs), strings.Join(roles, ","), strings.Join(parts, " "))
+}
+
+// imageURLShape 描述一个 image_url.url 的形状（不落正文）。
+func imageURLShape(u string) string {
+	if u == "" {
+		return "image_url{空url}"
+	}
+	if strings.HasPrefix(u, "data:") {
+		head, b64, _ := strings.Cut(u, ",")
+		return fmt.Sprintf("image_url{%s len=%d}", strings.TrimPrefix(head, "data:"), len(b64))
+	}
+	if len(u) > 80 {
+		u = u[:80] + "…"
+	}
+	return "image_url{" + u + "}"
 }

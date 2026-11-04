@@ -271,11 +271,17 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		// 图片一律先转文字 —— 与桌面端行为一致（见 teleagent_vision.go），同时也避开
 		// 「原生吃图但极慢」的路径：2026-11-03 实测同一张 2092×918 截图，
 		// teleagent.chat-lite 1.4s、teleagent.chat-pro 79.4s；用户就是等不及 79s 才终止任务的。
-		if teleagentVisionEnabled() && hasImageParts(payload) {
+		// 图片处理策略（2026-11-04 用户反馈「旗舰看不见图，只能用 OCR」后改成 auto）：
+		//   auto（默认）：**能吃图的模型（chat-pro / chat-flash / chat-lite）原样透传图片**，
+		//                让它真正「看图」；只有纯文本模型（chat-flagship / chat-nano）才提前转文字。
+		//   always      ：一律先转文字（2026-11-03 那版行为，为绕开 chat-pro 原生吃图 79 秒）。
+		// 透传后被上游 400 的话，下面还有「转文字重发 → 去图重试」两级兜底。
+		if teleagentVisionEnabled() && hasImageParts(payload) &&
+			(teleagentVisionMode() == "always" || !modelSupportsImage("teleagent", backend)) {
 			if n, ok := replaceImagesWithDescriptions(payload, func(format string, args ...any) {
 				p.log.Log("[%s] "+format, append([]any{rid}, args...)...)
 			}); ok && n > 0 {
-				p.log.Log("[%s] %s：%d 张图已转成文字", rid, backend, n)
+				p.log.Log("[%s] %s：%d 张图已转成文字（该模型不吃图，按桌面端做法先识图）", rid, backend, n)
 			}
 		}
 		if b, err := json.Marshal(payload); err == nil {

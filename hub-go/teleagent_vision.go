@@ -166,6 +166,16 @@ func dataURLBytes(u string) []byte {
 	return b
 }
 
+// teleagentVisionMode 图片处理档位：auto（默认，能吃图的模型透传）/ always（一律转文字）。
+// 用 AIHUB_TELEAGENT_VISION=always 切到旧行为。
+func teleagentVisionMode() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("AIHUB_TELEAGENT_VISION")))
+	if v == "always" || v == "force" || v == "1" {
+		return "always"
+	}
+	return "auto"
+}
+
 // teleagentVisionEnabled 是否启用「图片转文字」（默认开，AIHUB_TELEAGENT_VISION=0 可关）。
 func teleagentVisionEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("AIHUB_TELEAGENT_VISION")))

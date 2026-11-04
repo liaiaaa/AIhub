@@ -62,3 +62,34 @@ func TestDataURLBytes(t *testing.T) {
 		t.Error("非 data URL 应返回 nil")
 	}
 }
+
+// 2026-11-04：用户反馈「旗舰（chat-flagship）看不见图，只能用 OCR」。
+// 旗舰是纯文本模型，转文字是对的；但 chat-pro/chat-flash/chat-lite 能吃图，
+// 不该也被转成文字 —— 所以默认档位是 auto（透传），always 才是「一律转文字」。
+func TestTeleagentVisionMode(t *testing.T) {
+	for _, v := range []string{"", "auto", "on", "true"} {
+		t.Setenv("AIHUB_TELEAGENT_VISION", v)
+		if got := teleagentVisionMode(); got != "auto" {
+			t.Errorf("%q 应为 auto，实际 %s", v, got)
+		}
+	}
+	for _, v := range []string{"always", "force", "1"} {
+		t.Setenv("AIHUB_TELEAGENT_VISION", v)
+		if got := teleagentVisionMode(); got != "always" {
+			t.Errorf("%q 应为 always，实际 %s", v, got)
+		}
+	}
+}
+
+// 能吃图的模型走透传，纯文本模型才转文字 —— 这条断言直接对着真实模型表。
+func TestVisionAutoKeepsNativeImageModels(t *testing.T) {
+	if !modelSupportsImage("teleagent", "chat-pro") {
+		t.Error("chat-pro 应支持图片（透传）")
+	}
+	if !modelSupportsImage("teleagent", "chat-lite") {
+		t.Error("chat-lite 应支持图片（它是桌面端识图模型）")
+	}
+	if modelSupportsImage("teleagent", "chat-flagship") {
+		t.Error("chat-flagship 是纯文本模型，应转文字")
+	}
+}

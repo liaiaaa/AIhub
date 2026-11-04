@@ -93,17 +93,14 @@ const traeEffortFile = "trae_effort.txt"
 var traeModelEfforts = map[string][]string{
 	"Doubao-Seed-2.1-Turbo":    {"light", "high"},
 	"Doubao-Seed-2.1-Pro":      {"light", "high"},
-	"Doubao-Seed-Code":         {"light", "high"},
 	"step-5-preview":           {"light", "high"},
 	"glm-5.3-flash":            {"light", "high", "extra_high"},
 	"glm-5.3-flashx":           {"light", "high", "extra_high"},
 	"glm-5.3":                  {"light", "high", "extra_high"},
 	"deepseek-v4.1-flash":      {"light", "high", "extra_high"},
 	"DeepSeek-V4-Pro-Official": {"light", "high", "extra_high"},
-	"kimi-k3.1-pro":            {"light", "high", "extra_high"},
 	"kimi-k3":                  {"light", "high", "extra_high"},
 	"minimax-m3.1-flash":       {"light", "high", "extra_high"},
-	"qwen3.8-flash":            {"light", "high", "extra_high"},
 	"qwen3.8-max":              {"light", "high", "extra_high"},
 	// 以下模型官方 support_thinking=false，注入档位没有意义
 	"Doubao-Seed-Evolving": nil,
@@ -280,10 +277,10 @@ type TraeProxy struct {
 //
 // 分组说明：
 //
-//	① 目录内 · 非流式可用（17）：正常走 chat/completions。
-//	② 目录内 · 仅流式可用（3）：Doubao-Seed-Code / kimi-k3.1-pro / qwen3.8-flash ——
-//	   非流式上游回 code=4001「param is invalid」或 code=1005，流式正常出帧。
-//	   客户端要是发 stream=false 就会看到 502，这里保留是因为流式能用。
+//	① 目录内 · 可用（25）：正常走 chat/completions。
+//	② 已剔除（2026-11-04 实测全部不可用）：Doubao-Seed-Code / kimi-k3.1-pro / qwen3.8-flash ——
+//	   流式和非流式都回 code=4001「param is invalid」或 code=1005（原来它们只是「仅流式可用」，
+//	   现在上游彻底关了）。用户正是踩到 kimi-k3.1-pro 报 1005 才反馈的。
 //	③ 目录里已下线但上游仍服务（9）：老客户端还在用，实测全部 200，保留兼容。
 //	④ 自定义 gpt-5（1）：实测可用。
 //
@@ -296,8 +293,7 @@ var TraeModels = []string{
 	"deepseek-v4.1-flash", "DeepSeek-V4-Pro-Official",
 	"kimi-k3", "mimo-v2.6-flash", "mimo-v2.6-pro",
 	"minimax-m3.1-flash", "minimax-m3", "step-5-preview", "qwen3.8-max",
-	// ② 目录内 · 仅流式可用（非流式会 502，见上）
-	"Doubao-Seed-Code", "kimi-k3.1-pro", "qwen3.8-flash",
+	// ② 2026-11-04 起不可用，已剔除（见上）
 	// ③ 目录已下线、上游仍服务（兼容老客户端）
 	"glm-5.2", "glm-5", "glm-5-turbo", "qwen-3.7-plus",
 	"Doubao-Seed-2.0-Code", "DeepSeek-V4-Pro", "DeepSeek-V4-Flash",

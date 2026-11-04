@@ -65,8 +65,8 @@ func TestTraeAdapterModelsMirrorTraeModels(t *testing.T) {
 	if len(got) != len(TraeModels) {
 		t.Fatalf("trae 适配器模型数 %d，TraeModels %d", len(got), len(TraeModels))
 	}
-	if len(got) != 28 {
-		t.Errorf("TraeModels 应为 28 个，实际 %d", len(got))
+	if len(got) != 25 {
+		t.Errorf("TraeModels 应为 25 个，实际 %d", len(got))
 	}
 }
 

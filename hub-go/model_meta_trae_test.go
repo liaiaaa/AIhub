@@ -43,8 +43,7 @@ func TestTraeModelMeta(t *testing.T) {
 		out   int
 	}{
 		{"Doubao-Seed-2.1-Turbo", 256000, 32000}, // 小窗口模型
-		{"Doubao-Seed-Code", 256000, 32000},
-		{"mimo-v2.6-flash", 981504, 64000}, // 非整 1M
+		{"mimo-v2.6-flash", 981504, 64000},       // 非整 1M
 		{"glm-5.3-flashx", 1000000, 64000},
 		{"qwen3.8-max", 1000000, 64000},
 		{"step-5-preview", 1000000, 64000},
@@ -75,21 +74,23 @@ func TestTraeModelsListMatchesUpstream(t *testing.T) {
 		}
 		has[m] = true
 	}
-	if len(TraeModels) != 28 {
-		t.Errorf("TraeModels 应为 28 个，实际 %d", len(TraeModels))
+	// 2026-11-04：剔除 3 个上游已关停的（Doubao-Seed-Code / kimi-k3.1-pro / qwen3.8-flash），28 → 25
+	if len(TraeModels) != 25 {
+		t.Errorf("TraeModels 应为 25 个，实际 %d", len(TraeModels))
 	}
 	// 上游目录里有、旧清单缺的那批，必须补进来
 	for _, want := range []string{
-		"glm-5.3-flash", "glm-5.3-flashx", "qwen3.8-max", "qwen3.8-flash",
+		"glm-5.3-flash", "glm-5.3-flashx", "qwen3.8-max",
 		"mimo-v2.6-flash", "mimo-v2.6-pro", "step-5-preview", "minimax-m3.1-flash",
-		"Doubao-Seed-Evolving", "Doubao-Seed-Code", "kimi-k3.1-pro", "DeepSeek-V4-Pro-Official",
+		"Doubao-Seed-Evolving", "DeepSeek-V4-Pro-Official",
 	} {
 		if !has[want] {
 			t.Errorf("TraeModels 缺少上游可用模型：%s", want)
 		}
 	}
 	// 实测上游报错的必须剔除
-	for _, bad := range []string{"custom_model_gemini", "custom_model_deepseek_reasoner"} {
+	for _, bad := range []string{"custom_model_gemini", "custom_model_deepseek_reasoner",
+		"Doubao-Seed-Code", "kimi-k3.1-pro", "qwen3.8-flash"} {
 		if has[bad] {
 			t.Errorf("TraeModels 不该包含实测报错的模型：%s", bad)
 		}

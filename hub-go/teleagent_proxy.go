@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -271,6 +272,16 @@ func (p *TeleAgentProxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		// 图片一律先转文字 —— 与桌面端行为一致（见 teleagent_vision.go），同时也避开
 		// 「原生吃图但极慢」的路径：2026-11-03 实测同一张 2092×918 截图，
 		// teleagent.chat-lite 1.4s、teleagent.chat-pro 79.4s；用户就是等不及 79s 才终止任务的。
+		// 输出预算下限（2026-11-04 实测）：TeleAgent 的模型都是「先思考再答」，
+		// max_tokens 给太小会把预算全花在 reasoning 上，正文 0 字、finish_reason=length，
+		// 客户端看到的就是「空回答」然后无限重试。实测同一请求：
+		//   max_tokens=60   → 28.9s，reasoning 110 字，正文 0 字（finish=length）
+		//   max_tokens=300  → 1.5s，正文 77 字（finish=stop）
+		// 所以这里兜一个下限，客户端要得比它小就抬上来（可用 AIHUB_TELEAGENT_MIN_TOKENS 调）。
+		if mt := teleagentMaxTokens(payload); mt > 0 && mt < teleagentMinTokens() {
+			payload["max_tokens"] = teleagentMinTokens()
+			p.log.Log("[%s] max_tokens %d 太小（会全花在思考上、正文为空）→ 抬到 %d", rid, mt, teleagentMinTokens())
+		}
 		// 图片处理策略（2026-11-04 用户反馈「旗舰看不见图，只能用 OCR」后改成 auto）：
 		//   auto（默认）：**能吃图的模型（chat-pro / chat-flash / chat-lite）原样透传图片**，
 		//                让它真正「看图」；只有纯文本模型（chat-flagship / chat-nano）才提前转文字。
@@ -804,4 +815,27 @@ func teleagentPartsSample(payload map[string]any, n int) []string {
 		}
 	}
 	return out
+}
+
+// teleagentMaxTokens 读请求里的输出上限（客户端可能用 max_tokens 或 max_completion_tokens）。
+func teleagentMaxTokens(payload map[string]any) int {
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		switch v := payload[key].(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		}
+	}
+	return 0
+}
+
+// teleagentMinTokens 输出预算下限，默认 1024（见上面的实测注释）。
+func teleagentMinTokens() int {
+	if v := strings.TrimSpace(os.Getenv("AIHUB_TELEAGENT_MIN_TOKENS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1024
 }

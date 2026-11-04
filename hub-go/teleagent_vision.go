@@ -40,8 +40,9 @@ const (
 		"直接输出结果，不要开场白。"
 	visionPromptVersion = "v2" // 提示词版本，进缓存 key
 	visionMaxTokens     = 3000
-	visionCacheMax      = 128 // 图片描述缓存条数上限
-	visionTimeout       = 90 * time.Second
+	visionCacheMax      = 128              // 图片描述缓存条数上限
+	visionTimeout       = 25 * time.Second // 单张图识图上限：客户端首字节超时很短，卡住等于整轮失败
+	visionParallel      = 3                // 并发识图路数
 	visionMaxPixels     = 4096
 )
 
@@ -86,6 +87,50 @@ func describeImage(dataURL string) (string, error) {
 	}
 	visionCache.Unlock()
 
+	var lastErr error
+	done := make(chan struct{})
+	var text string
+	go func() {
+		defer close(done)
+		for _, model := range visionModelCandidates() {
+			t, err := func() (string, error) {
+				if strings.HasPrefix(model, "teleagent.") {
+					return askTeleagentVisionDirect(strings.TrimPrefix(model, "teleagent."), dataURL)
+				}
+				return askVisionModel(model, dataURL)
+			}()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			text = t
+			return
+		}
+	}()
+	select {
+	case <-done:
+		if text == "" {
+			if lastErr == nil {
+				lastErr = fmt.Errorf("没有可用的视觉模型")
+			}
+			return "", lastErr
+		}
+		visionCache.Lock()
+		if len(visionCache.m) >= visionCacheMax {
+			visionCache.m = map[string]string{}
+		}
+		visionCache.m[key] = text
+		visionCache.Unlock()
+		return text, nil
+	case <-time.After(visionTimeout):
+		return "", fmt.Errorf("识图超时（%s）", visionTimeout)
+	}
+}
+
+// describeImageSlow 旧实现保留给测试/回退用（串行、无超时）。
+func describeImageSlow(dataURL string) (string, error) {
+	key := visionCacheKey(dataURL)
+	_ = key
 	var lastErr error
 	for _, model := range visionModelCandidates() {
 		// 走 TeleAgent 上游直连（而不是绕回自己的聚合口）：
@@ -198,11 +243,23 @@ func teleagentVisionEnabled() bool {
 }
 
 // replaceImagesWithDescriptions 把请求里所有图片 part 换成视觉模型给出的文字。
-// 返回替换张数；一张都没成功时 ok=false（调用方退回去图逻辑）。
+// 多张图**并发**识图（默认 3 路）：DSH 这类客户端首字节超时很短，串行三张图能拖到 20 秒以上，
+// 2026-11-04 20:04 那次「3~4 张图 + 客户端 2 秒就断」就是这么来的。
 func replaceImagesWithDescriptions(payload map[string]any, logf func(string, ...any)) (int, bool) {
+	if payload == nil {
+		return 0, false
+	}
 	msgs, _ := payload["messages"].([]any)
-	replaced := 0
-	for _, raw := range msgs {
+
+	type slot struct {
+		msgIdx int
+		idx    int
+		url    string
+		text   string
+		ok     bool
+	}
+	var work []*slot
+	for mi, raw := range msgs {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			continue
@@ -211,12 +268,9 @@ func replaceImagesWithDescriptions(payload map[string]any, logf func(string, ...
 		if !ok {
 			continue
 		}
-		out := make([]any, 0, len(parts))
-		for _, p := range parts {
-			pm, _ := p.(map[string]any)
-			t, _ := pm["type"].(string)
-			if t != "image_url" {
-				out = append(out, p)
+		for i, part := range parts {
+			pm, _ := part.(map[string]any)
+			if t, _ := pm["type"].(string); t != "image_url" {
 				continue
 			}
 			var u string
@@ -226,20 +280,63 @@ func replaceImagesWithDescriptions(payload map[string]any, logf func(string, ...
 			case map[string]any:
 				u, _ = v["url"].(string)
 			}
-			if !strings.HasPrefix(u, "data:") {
-				continue // 非 data URL（附件引用等）没法定，直接丢
-			}
-			text, err := describeImage(u)
+			// 非 data URL（附件引用等）交给上游也不会被接受，直接标记为丢弃
+			work = append(work, &slot{msgIdx: mi, idx: i, url: u})
+		}
+	}
+	if len(work) == 0 {
+		return 0, false
+	}
+
+	sem := make(chan struct{}, visionParallel)
+	var wg sync.WaitGroup
+	started := time.Now()
+	for _, w := range work {
+		if !strings.HasPrefix(w.url, "data:") {
+			continue // 不认识的图片引用：不尝试识别，回填阶段直接丢
+		}
+		wg.Add(1)
+		go func(w *slot) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			text, err := describeImage(w.url)
 			if err != nil {
 				logf("⚠ 图片转文字失败：%v", err)
+				return
+			}
+			w.text, w.ok = text, true
+			logf("图片 %d 字节 → 文字 %d 字", len(dataURLBytes(w.url)), len([]rune(text)))
+		}(w)
+	}
+	wg.Wait()
+	logf("识图完成：%d 张，用时 %.1fs", len(work), time.Since(started).Seconds())
+
+	byMsg := map[int]map[int]*slot{}
+	for _, w := range work {
+		if byMsg[w.msgIdx] == nil {
+			byMsg[w.msgIdx] = map[int]*slot{}
+		}
+		byMsg[w.msgIdx][w.idx] = w
+	}
+	replaced := 0
+	for mi, idxs := range byMsg {
+		m, _ := msgs[mi].(map[string]any)
+		parts, _ := m["content"].([]any)
+		out := make([]any, 0, len(parts))
+		for i, part := range parts {
+			w, hit := idxs[i]
+			if !hit {
+				out = append(out, part)
 				continue
 			}
+			if !w.ok {
+				continue // 转不了就丢，别把图发给不吃图的上游
+			}
 			replaced++
-			sz := len(dataURLBytes(u))
-			logf("图片 %d 字节 → 文字 %d 字", sz, len([]rune(text)))
 			out = append(out, map[string]any{
 				"type": "text",
-				"text": "[图片内容（自动识别）]\n" + text,
+				"text": "[图片内容（自动识别）]\n" + w.text,
 			})
 		}
 		if len(out) == 0 {
@@ -253,8 +350,6 @@ func replaceImagesWithDescriptions(payload map[string]any, logf func(string, ...
 	return replaced, true
 }
 
-// askTeleagentVisionDirect 直接打 TeleAgent 上游做识图，绕开本机聚合口。
-// 这样既避免「转文字 → 聚合口 → 本代理 → 又转文字」的递归，也省一跳。
 func askTeleagentVisionDirect(backend, dataURL string) (string, error) {
 	tok, err := teleagentToken()
 	if err != nil {

@@ -29,10 +29,20 @@ import (
 )
 
 const (
-	visionPrompt    = "把这张图里的信息完整转成文字：有文字就逐字抄下来（保持原有顺序与表格结构），没有文字就客观描述画面内容。只输出结果本身，不要客套话。"
-	visionCacheMax  = 128 // 图片描述缓存条数上限
-	visionTimeout   = 90 * time.Second
-	visionMaxPixels = 4096
+	// visionPrompt 识图提示词。2026-11-04 用户反馈「旗舰只看到 OCR 结果、内容不够」
+	// —— 原来那句「完整转成文字」模型容易偷懒概括，改成明确要求逐行抄录 + 保留结构。
+	// 改动提示词会改变缓存 key（见 visionCacheKey），旧缓存自动失效。
+	visionPrompt = "请把这张图**逐行完整转写**成文字：" +
+		"① 图里所有可见文字都照原文抄下来，不要概括、不要省略、不要改写；" +
+		"② 保留原有顺序、标题层级、列表序号、表格行列关系（表格用 Markdown 表格）；" +
+		"③ 界面截图还要说明控件位置与状态（按钮文字、输入框占位符、报错文案、时间戳等）；" +
+		"④ 如果几乎没有文字，就客观描述画面内容与布局。" +
+		"直接输出结果，不要开场白。"
+	visionPromptVersion = "v2" // 提示词版本，进缓存 key
+	visionMaxTokens     = 3000
+	visionCacheMax      = 128 // 图片描述缓存条数上限
+	visionTimeout       = 90 * time.Second
+	visionMaxPixels     = 4096
 )
 
 // visionCache 图片哈希 → 文字描述。
@@ -60,10 +70,15 @@ func visionAggURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", AggPort)
 }
 
+// visionCacheKey 图片哈希 + 提示词版本：换提示词后旧描述自动作废。
+func visionCacheKey(dataURL string) string {
+	sum := sha256.Sum256([]byte(visionPromptVersion + "\x00" + dataURL))
+	return hex.EncodeToString(sum[:])
+}
+
 // describeImage 把一张 data URL 图片交给视觉模型，返回文字描述（带缓存）。
 func describeImage(dataURL string) (string, error) {
-	sum := sha256.Sum256([]byte(dataURL))
-	key := hex.EncodeToString(sum[:])
+	key := visionCacheKey(dataURL)
 	visionCache.Lock()
 	if v, ok := visionCache.m[key]; ok {
 		visionCache.Unlock()
@@ -105,7 +120,7 @@ func describeImage(dataURL string) (string, error) {
 func askVisionModel(model, dataURL string) (string, error) {
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
-		"max_tokens": 800,
+		"max_tokens": visionMaxTokens,
 		"messages": []any{map[string]any{
 			"role": "user",
 			"content": []any{
@@ -251,7 +266,7 @@ func askTeleagentVisionDirect(backend, dataURL string) (string, error) {
 	}
 	body, err := json.Marshal(map[string]any{
 		"model":      backend,
-		"max_tokens": 800,
+		"max_tokens": visionMaxTokens,
 		"messages": []any{map[string]any{
 			"role": "user",
 			"content": []any{

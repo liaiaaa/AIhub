@@ -56,6 +56,20 @@ func newLineServer(h http.Handler) *http.Server {
 	return &http.Server{Handler: h, ReadHeaderTimeout: lineReadHeaderTimeout}
 }
 
+// newLineServerFor 同 newLineServer，但顺带把「这条线路有真实请求」记进心跳的
+// 空闲闸门（heartbeat.go:noteRealTraffic）。line 用 lineSpecs 的 key。
+func newLineServerFor(line string, h http.Handler) *http.Server {
+	return newLineServer(lineActivityMiddleware(line, h))
+}
+
+// lineActivityMiddleware 只做记账，不改任何请求语义。
+func lineActivityMiddleware(line string, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		noteRealTraffic(line)
+		h.ServeHTTP(w, r)
+	})
+}
+
 // closeLineServer 优雅关闭线路：先给在途请求 lineShutdownGrace 收尾，
 // 超时则强制断开，最后关 listener，保证端口一定释放。
 //

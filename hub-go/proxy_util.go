@@ -143,6 +143,12 @@ func randUUID() string {
 // tcp 127.0.0.1:43345: connect: connection refused`，intl 整条线路不可用。
 // 现在代理候选地址在进程内**探测一次**：TCP 连不上就不走它，回落直连。
 func newBackendClient() *http.Client {
+	return newBackendClientFor("")
+}
+
+// newBackendClientFor 同 newBackendClient，但带上线路名：
+// 出站 TLS 指纹按线路选档（见 tlsfp.go），line 为空时用全局默认档。
+func newBackendClientFor(line string) *http.Client {
 	tr := &http.Transport{
 		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
@@ -154,20 +160,28 @@ func newBackendClient() *http.Client {
 		// 只给「等响应头」设上限，不影响流式 body 的读取时长。
 		ResponseHeaderTimeout: 120 * time.Second,
 		Proxy: func(req *http.Request) (*url.URL, error) {
-			if u, _ := http.ProxyFromEnvironment(req); u != nil {
-				if proxyReachable(u) {
-					return u, nil
-				}
-				return nil, nil // 代理死了：直连
-			}
-			u := systemProxy(req)
-			if u != nil && !proxyReachable(u) {
-				return nil, nil
-			}
-			return u, nil
+			return resolveRequestProxy(req), nil
 		},
 	}
+	applyTLSFingerprint(tr, line)
 	return &http.Client{Transport: tr}
+}
+
+// resolveRequestProxy 出站代理选择的唯一实现：
+// 环境变量优先（与 Python httpx trust_env 一致）→ 探活 → 死了就直连；
+// 环境变量没有代理时回退系统代理。tlsfp.go 的拨号层也复用它。
+func resolveRequestProxy(req *http.Request) *url.URL {
+	if u, _ := http.ProxyFromEnvironment(req); u != nil {
+		if proxyReachable(u) {
+			return u
+		}
+		return nil // 代理死了：直连
+	}
+	u := systemProxy(req)
+	if u != nil && !proxyReachable(u) {
+		return nil
+	}
+	return u
 }
 
 // backendClient 带超时的后端 client。
@@ -249,12 +263,18 @@ func proxyReachable(u *url.URL) bool {
 // 用于国内可达的后端（copilot.tencent.com / mimo-server-cn.xiaomimimo.com），
 // 避免本地代理软件关闭或切换网络后误走残留的 127.0.0.1:10808 等失效代理。
 func directClient() *http.Client {
+	return directClientFor("")
+}
+
+// directClientFor 同 directClient，带线路名用于出站 TLS 指纹选档（见 tlsfp.go）。
+func directClientFor(line string) *http.Client {
 	tr := &http.Transport{
 		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 15 * time.Second,
 		Proxy:               nil,
 	}
+	applyTLSFingerprint(tr, line) // Proxy 为 nil → 拨号层判定直连
 	return &http.Client{Transport: tr}
 }
 

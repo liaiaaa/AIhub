@@ -15,6 +15,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,9 +29,9 @@ import (
 // 键用「文件名 + 那一行的原文」而不是行号 —— 行号会随上面加几行注释就漂掉，
 // 漂了守卫就变成要么误报要么漏报。
 var bareClientAllowed = map[string]bool{
-	`proxy_agg.go|client := &http.Client{Timeout: 5 * time.Second}`:        true, // http://127.0.0.1:<线路端口>/v1/models
-	`proxy_anthropic.go|return &http.Client{Timeout: 10 * time.Minute}`:    true, // aggHTTPClient：网关到线路本地端口
-	`zcode_relay.go|client := &http.Client{Timeout: zcodeRelayProbeWait}`:  true, // zcodeRelayProbeURL = http://127.0.0.1:8807
+	`proxy_agg.go|client := &http.Client{Timeout: 5 * time.Second}`:       true, // http://127.0.0.1:<线路端口>/v1/models
+	`proxy_anthropic.go|return &http.Client{Timeout: 10 * time.Minute}`:   true, // aggHTTPClient：网关到线路本地端口
+	`zcode_relay.go|client := &http.Client{Timeout: zcodeRelayProbeWait}`: true, // zcodeRelayProbeURL = http://127.0.0.1:8807
 }
 
 func TestNoBareHTTPClientOnRemotePaths(t *testing.T) {
@@ -86,7 +87,17 @@ func TestBackendClientHasProxyFallback(t *testing.T) {
 		t.Fatalf("Transport 类型意外：%T", c.Transport)
 	}
 	if tr.Proxy == nil {
-		t.Error("Proxy 判定函数没设，等于没有死代理回落")
+		// 2026-11-05：启用出站 TLS 指纹后 Proxy 被**有意**置空。
+		// net/http 在走代理时不会调用自定义 DialTLSContext，代理判断 + CONNECT
+		// 改由 tlsfp.go 的拨号层接管（详见该文件「为什么必须接管 Proxy」）。
+		// 这里改为断言「接管确实发生」且死代理判定仍然有效。
+		if tr.DialTLSContext == nil {
+			t.Fatal("Proxy 被置空却没有接管 DialTLSContext：死代理回落能力丢了")
+		}
+		dead := &url.URL{Scheme: "http", Host: "127.0.0.1:1"}
+		if proxyReachable(dead) {
+			t.Fatal("127.0.0.1:1 不该被判为可用代理")
+		}
 	}
 	// 真发一次请求确认可用（回环服务，不碰上游）。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

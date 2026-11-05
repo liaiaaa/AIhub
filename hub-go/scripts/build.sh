@@ -8,7 +8,7 @@
 #  与 build.bat 的差异：
 #    - 不加 -H=windowsgui（那是 Windows 专属链接参数，Linux 上直接报错）
 #    - GOCACHE/GOPATH 默认放 ~/.cache 与 ~/.local/share，可用环境变量覆盖
-#    - GOPROXY 默认走 goproxy.cn（本模块零第三方依赖，通常用不到）
+#    - GOPROXY 默认走 goproxy.cn（2026-11-05 起有第三方依赖 utls，首次构建必须能拉到模块）
 # ============================================================
 set -euo pipefail
 

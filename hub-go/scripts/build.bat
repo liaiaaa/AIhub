@@ -12,6 +12,9 @@ rem   - %~dp0 is this script's dir (scripts\); root is its parent.
 rem   - IMPORTANT: keep .bat files ASCII-only + CRLF. cmd.exe on a
 rem     Chinese Windows reads .bat as GBK; UTF-8 Chinese comments
 rem     corrupt parsing and break the script (this actually happened).
+rem   - 2026-11-05: module now depends on github.com/refraction-networking/utls.
+rem     First build needs network. If proxy.golang.org is blocked, set
+rem     GOPROXY=https://goproxy.cn,direct before running this script.
 rem ============================================================
 setlocal
 

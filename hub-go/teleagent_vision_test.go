@@ -93,3 +93,41 @@ func TestVisionAutoKeepsNativeImageModels(t *testing.T) {
 		t.Error("chat-flagship 是纯文本模型，应转文字")
 	}
 }
+
+// TestVisionHeadersCarryTimestampAndNonce 钉住 2026-11-05 修的那个签名 bug。
+//
+// 之前 askTeleagentVisionDirect 调 teleagentSignHeadersAt(..., ts="", nonce="")，
+// 结果 X-SuperAgent-Timestamp / X-SuperAgent-Nonce 是**空串**发出去，
+// 上游按时间戳+nonce 校验直接判废 → 日志 242 次「识图没有返回内容」，
+// 每张带图请求白烧两次上游往返。
+func TestVisionHeadersCarryTimestampAndNonce(t *testing.T) {
+	tok := "aaa.bbb.ccc" // 三段即算合法（签名只用第三段做密钥）
+	hdrs, err := teleagentVisionHeaders(tok, "dev-1", "inst-1", "/superCowork/sapi/api/v1/chat/completions", []byte(`{"model":"chat-lite"}`))
+	if err != nil {
+		t.Fatalf("签名失败：%v", err)
+	}
+	ts := hdrs["X-SuperAgent-Timestamp"]
+	nonce := hdrs["X-SuperAgent-Nonce"]
+	if ts == "" {
+		t.Fatal("X-SuperAgent-Timestamp 不能为空（这就是之前的 bug）")
+	}
+	if nonce == "" {
+		t.Fatal("X-SuperAgent-Nonce 不能为空")
+	}
+	// ts 必须是秒级时间戳，不是毫秒/日期
+	if len(ts) != 10 {
+		t.Errorf("时间戳应是 10 位秒级，得到 %q", ts)
+	}
+	// nonce 应是 UUIDv4 形状
+	if len(nonce) != 36 || nonce[14] != '4' {
+		t.Errorf("nonce 应是 UUIDv4，得到 %q", nonce)
+	}
+	if hdrs["X-SuperAgent-Signature"] == "" {
+		t.Error("签名为空")
+	}
+	// 两次调用的 nonce 必须不同（防重放字段不能恒定）
+	h2, _ := teleagentVisionHeaders(tok, "dev-1", "inst-1", "/x", []byte(`{}`))
+	if h2["X-SuperAgent-Nonce"] == nonce {
+		t.Error("nonce 每次都一样，等于没防重放")
+	}
+}

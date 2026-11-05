@@ -148,9 +148,9 @@ func (p *TeleAgentProxy) Start() (bool, string) {
 	}
 	p.mu.Lock()
 	p.token, p.devID, p.insID = token, dev, ins
-	p.cli = &http.Client{Transport: directClient().Transport, Timeout: 0}
+	p.cli = &http.Client{Transport: directClientFor("teleagent").Transport, Timeout: 0}
 	p.ln = ln
-	p.srv = newLineServer(p)
+	p.srv = newLineServerFor("teleagent", p)
 	srv := p.srv
 	p.mu.Unlock()
 
@@ -444,7 +444,7 @@ func (p *TeleAgentProxy) doUpstream(r *http.Request, body []byte, rid string) (*
 		}
 	}
 	if cli == nil {
-		cli = &http.Client{Transport: directClient().Transport, Timeout: 0}
+		cli = &http.Client{Transport: directClientFor("teleagent").Transport, Timeout: 0}
 	}
 
 	headers, err := teleagentSignHeaders(token, dev, ins, http.MethodPost, teleagentChatPath, body)

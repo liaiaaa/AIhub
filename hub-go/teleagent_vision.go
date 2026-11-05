@@ -182,7 +182,7 @@ func askVisionModel(model, dataURL string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := directClient().Do(req)
+	resp, err := directClientFor("teleagent").Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -350,6 +350,20 @@ func replaceImagesWithDescriptions(payload map[string]any, logf func(string, ...
 	return replaced, true
 }
 
+// teleagentVisionHeaders 识图请求的签名头。
+//
+// 2026-11-05 修一个真 bug：这里之前调的是 teleagentSignHeadersAt(..., ts="", nonce="")，
+// 于是 X-SuperAgent-Timestamp / X-SuperAgent-Nonce **发出去是空串**，签名派生键里
+// 也带着这两个空值 —— 上游按「时间戳 + nonce」校验，空值判废。
+// 后果：hub.log 里 242 次「识图没有返回内容」，每张带图请求白烧两次 teleagent
+// 上游往返，再回落别的线路。
+//
+// 单独抽成函数是为了能被测试钉住：teleagentSignHeadersAt 是给测试用的「可复现」
+// 版本（ts/nonce 由调用方给），生产路径不该拿它的空参数形态直接用。
+func teleagentVisionHeaders(tok, dev, inst, path string, body []byte) (map[string]string, error) {
+	return teleagentSignHeaders(tok, dev, inst, http.MethodPost, path, body)
+}
+
 func askTeleagentVisionDirect(backend, dataURL string) (string, error) {
 	tok, err := teleagentToken()
 	if err != nil {
@@ -379,7 +393,7 @@ func askTeleagentVisionDirect(backend, dataURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	hdrs, err := teleagentSignHeadersAt(tok, dev, inst, http.MethodPost, path, teleagentAppVersion(), body, "", "")
+	hdrs, err := teleagentVisionHeaders(tok, dev, inst, path, body)
 	if err != nil {
 		return "", err
 	}
@@ -387,7 +401,7 @@ func askTeleagentVisionDirect(backend, dataURL string) (string, error) {
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := directClient().Do(req)
+	resp, err := directClientFor("teleagent").Do(req)
 	if err != nil {
 		return "", err
 	}

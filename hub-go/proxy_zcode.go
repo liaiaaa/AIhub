@@ -197,7 +197,7 @@ func (p *ZcodeProxy) Start() (bool, string) {
 
 	p.log = NewFileLogger(dataPath("converter-zcode.log"))
 	// api.z.ai 国内外均可直连，不读系统/环境代理（与 Qoder/dom 一致）
-	p.client = directClient()
+	p.client = directClientFor("zcode")
 
 	// 桌面端身份（User-Agent/X-Device-Mid 等，请求指纹对齐官方客户端）
 	p.identity = zcodeLoadIdentity()
@@ -235,7 +235,7 @@ func (p *ZcodeProxy) Start() (bool, string) {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
 
-	srv := newLineServer(p)
+	srv := newLineServerFor("zcode", p)
 	p.mu.Lock()
 	p.server = srv
 	p.ln = ln

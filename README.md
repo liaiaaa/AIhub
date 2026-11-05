@@ -85,6 +85,12 @@ Linux 上可用的环境变量：
 |------|------|
 | `AIHUB_ROOT` | 固定数据根目录 |
 | `QODER_APP_DATA` | 覆盖 Qoder 桌面端数据目录 |
+| `AIHUB_WB_LIVE_CRED` | WorkBuddy 桌面端实时凭据路径（`off` 关闭同步） |
+| `AIHUB_WB_LIVE_DEST` | 上面那份凭据同步到的 hub 副本路径 |
+| `AIHUB_WB_CN_BASE` | 国内 WorkBuddy 上游 base（默认 `https://www.workbuddy.cn`） |
+| `AIHUB_HTTP2` / `AIHUB_HTTP2_<线路>` | 出站 HTTP/2 开关（默认关，见客户端画像） |
+| `AIHUB_TLS_FP` / `AIHUB_TLS_FP_<线路>` | 出站 TLS 档位（chrome/firefox/safari/edge/golang） |
+| `AIHUB_HEARTBEAT` / `_MIN` / `_MAX` / `_IDLE` / `_MAXDAY` / `_QUIET_FROM` / `_QUIET_TO` | 心跳模拟参数 |
 | `QODER_SAFE_STORAGE_PASSWORD` | safeStorage 主口令（自动查不到时手工指定） |
 | `QODER_SAFE_STORAGE_KEY` | 已派生密钥（base64/hex，16 或 32 字节） |
 | `QODER_SAFE_STORAGE_APP` | 密钥环条目 `application` 属性取值 |
@@ -110,7 +116,7 @@ Windows 是注册表 Internet Settings，Linux 是 GNOME dconf（`org.gnome.syst
 | 国内 | 8787 | codebuddy 国内 | 凭证文件（直连） |
 | 国际 | 8799 | `www.workbuddy.ai` | 凭证目录（读系统代理，需 VPN） |
 | MiMo | 8798 | 小米 MiMo | 小米账号 SSO（直连） |
-| Qoder | 8797 | `gateway.qoder.com.cn` | 桌面端凭据 DPAPI 自动解密（直连） |
+| Qoder | 8797 | `gateway.qoder.com.cn` | 桌面端凭据 safeStorage 自动解密（直连）；账号快照见下 |
 | Zcode | 8796 | `api.z.ai`（GLM 系列） | 桌面端凭据自动解密 / 手动 API Key（直连） |
 
 DSH 里填：
@@ -160,6 +166,59 @@ hub-go 这轮做的事（细节与真机结果见 `hub-go/docs/2026-10-25-封号
 别用主账号、别同 IP 多号并发。设备指纹（qimei 等）与多出口隔离本轮**没有做**——
 没有抓包证据时乱加头比不加更可疑。
 
+### 探测到的新模型可以直接加进目录（2026-11-05）
+
+修掉一个死角：探测走上游目录、添加下拉只读线路自己的 `/v1/models`，
+所以「探到 hy4 但加不了」。现在线路没启动会回落上游目录、在跑会并上新模型，
+探测表格里每行还有一个「加入目录」按钮（线路头有「新模型全加入」）。
+细节见 `hub-go/docs/2026-11-05-探测到但加不进目录的修复.md`。
+
+### teleagent 在 dsh 里慢的定位（2026-11-05）
+
+结论：慢在上游模型解码吞吐，不在反代链路。dsh 只能用 teleagent 的「旗舰
+chat-flagship」（实测 47.6 tok/s / 21.0 ms-per-token），而 qoder 主力
+DeepSeek-Flash 是 120.1 tok/s（8.33 ms/token）——差 2.5 倍；建连+TTFT+hub 跳数
+只占一个回合的 1–5%。**别把 flagship 换成 chat-pro**：pro 每 token 快 2.3 倍，
+但答案长 3.1 倍（out_p50 1978 vs 636），现网回合墙钟反而从 12.4s 变 14.6s。
+数据、排除掉的假设（上游根本不支持 h2、流式没被整体缓冲、无限流退避）、
+以及顺手修掉的 vision 签名 bug（`X-SuperAgent-Timestamp/Nonce` 之前发空串，
+242 次「识图没有返回内容」）见 `hub-go/docs/2026-11-05-teleagent线路慢的定位.md`；
+复测工具留在 `hub-go/.tmp/bench/`。
+
+### 出站 TLS 指纹与客户端心跳（2026-11-05）
+
+上面补的是「头」与「身份句」，这轮补「传输层指纹」与「节奏」——判据里剩下的两维。
+细节、参数、验证数据见 `hub-go/docs/2026-11-05-出站TLS指纹与客户端心跳.md`。
+
+- **TLS 指纹伪装（uTLS）**：出站握手不再用 Go 默认 ClientHello，按线路固定档位
+  （Electron 桌面端 → `chrome`，opencode CLI → `golang`）。实测 JA3 从
+  `03117a8e…`（Go）变成 `8650dbb6…`（Chrome 族，带 GREASE / ALPS / ECH）。
+  **默认走 HTTP/1.1**（ALPN 只报 http/1.1、`TLSNextProto` 置空）：社区两个 Go 反代的
+  抓包与实证都说这些客户端的 API 是 HTTP/1.1 + keep-alive，而 Go 的 h2 帧指纹与
+  Chromium 不同，装 Chrome 却发 Go 的 h2 帧反而更矛盾。要开 h2 用 `AIHUB_HTTP2=1`。
+  代理（HTTP CONNECT / SOCKS5）由拨号层自己建隧道 ——
+  否则 net/http 走代理时会绕过自定义 TLS，指纹静默回退。
+  开关：`AIHUB_TLS_FP=chrome|firefox|safari|edge|golang|off`，
+  按线路覆盖 `AIHUB_TLS_FP_INTL=firefox`；写错档位会按默认档跑并打日志。
+- **客户端心跳模拟**：官方桌面端没人聊天时也会每几分钟拉一次目录/积分。hub 现在
+  按 4~9 分钟抖动、01:00~07:00 静默、最近 90 秒有真实请求就让路、每天最多 120 次，
+  只对在跑的线路发**只读 GET**（dom/intl 目录、qoder 模型列表、zcode 客户端配置、
+  teleagent 积分），不发聊天/签到/不重试。trae 唯一周期动作是 token 轮换，会和真实
+  请求抢 refreshToken，**故意不发**。开关：`AIHUB_HEARTBEAT=0`，或控制台
+  「设置 · 出站伪装」卡片点关闭；配置落 `<数据根>/heartbeat.json`。
+- 国内 WorkBuddy 的凭据会自动跟随**桌面端实时文件**（`~/.local/share/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info`）：
+  读取前比 mtime，比副本新就原子覆盖（`hub-go/dom_live_cred.go`）。开关：`AIHUB_WB_LIVE_CRED` / `AIHUB_WB_LIVE_DEST`。
+- 国内 WorkBuddy 的上游默认是 `https://www.workbuddy.cn`（依据本机安装包里的
+  `cli/product.json`；旧域 `copilot.tencent.com` 可用 `AIHUB_WB_CN_BASE` 回退）。
+- **按线路客户端画像**：反代谁就装谁 —— 每条线路的 TLS 档、HTTP 版本、心跳节奏集中在
+  `hub-go/client_profile.go` 一张表里（WorkBuddy/Qoder/Trae/Zcode/TeleAgent → chrome +
+  HTTP/1.1；opencode CLI → golang）。身份（UA/版本）仍由 `line_identity.go` 单点定义；
+  `/api/status` 的 `client_profiles` 可看当前生效值。社区调研与取舍见
+  `hub-go/docs/2026-11-05-社区方案调研与客户端画像.md`。
+- 状态查看：`GET /api/tls-fingerprint`、`GET /api/heartbeat`（也并入 `/api/status`）。
+- 已知缺口：HTTP/2 帧指纹（SETTINGS/priority 顺序）仍是 Go 的形状，只补齐了 TLS 层；
+  uTLS 首次构建需要能拉到模块（`scripts/build.sh` 默认 goproxy.cn）。
+
 ## 思考档位（reasoning effort）
 
 **hub-go 侧规则**（2026-10-08 用户要求：客户端没发档位就用最高档）：
@@ -168,6 +227,17 @@ hub-go 这轮做的事（细节与真机结果见 `hub-go/docs/2026-10-25-封号
   `reasoning_effort` / `thinking` 对象 / `enable_thinking` / budget / 消息里的
   `[no-thinking]` 标记一律尊重，不覆盖。
 - 国内 / 国际：注入 `reasoning_effort=max`（`proxy_cn.go`、`proxy_intl.go`）。
+- Qoder 凭据**自动留档**：后台每 20 秒比一次 `auth.v1.dat`，发现被覆盖就把旧号存成
+  `auto-时间戳` 快照（`hub-go/qoder_vault_watch.go`）。换号前不用手动点。
+- Qoder 的账号切换用**和 WorkBuddy 多凭证一样的卡片**（`/api/qoder/creds`，快照即凭证，
+  点卡片=写回 auth.v1.dat 并重启线路）；`hub-go/qoder_creds.go`。
+- **Qoder 账号快照**（2026-11-05）：Qoder 只有一份 `auth.v1.dat`，桌面端换号会覆盖它。
+  控制台设置页「Qoder 账号快照」可把当前凭据存到 `<数据根>/qoder-accounts/<名字>/`，
+  切换前自动把当前凭据备份成 `auto-时间戳`。接口：`/api/qoder/accounts`（GET）、
+  `.../save`、`.../use`、`.../delete`。切换前请先退出 Qoder 桌面端。
+- **签到**（2026-11-05）：一键签到现在覆盖 国内 WorkBuddy（全部凭证）+ Qoder + Trae。
+  Qoder 走 `GET /sash/api/v1/me/campaigns` 找 `CLAIM_BENEFIT` 活动再 POST claim
+  （**列表是 GET，旧实现用 POST 会 404 并被误读成「没有活动」**）；仍然只在手动点按钮时执行。
 - Qoder / Zcode：取该模型目录里的**最高档**（`qoder_thinking.go`、`zcodeHighestEffort`），
   不是目录默认档。
 - MiMo / Trae：`ThinkingDefault` 留空 = 纯透传（上游档位语义未验证）。

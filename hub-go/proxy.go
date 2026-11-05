@@ -176,16 +176,16 @@ func (p *Proxy) Start() (bool, string) {
 	}
 
 	srv := &http.Server{
-		Handler:           p,
+		Handler:           lineActivityMiddleware(p.Name, p),
 		ReadHeaderTimeout: 20 * time.Second,
 	}
 	p.mu.Lock()
 	p.auth = auth
 	p.log = log
 	if p.DirectOnly {
-		p.client = directClient()
+		p.client = directClientFor(p.Name)
 	} else {
-		p.client = newBackendClient()
+		p.client = newBackendClientFor(p.Name)
 	}
 	p.server = srv
 	p.ln = ln

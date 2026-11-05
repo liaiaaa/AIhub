@@ -219,6 +219,7 @@ var (
 )
 
 func recordUsage(r usageRec) {
+	noteRealTraffic(r.Line) // 心跳空闲闸门：这条线路刚有真实请求
 	r.TS = time.Now().Unix()
 	r.Date = time.Now().Format("2006-01-02")
 	b, err := json.Marshal(r)

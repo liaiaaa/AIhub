@@ -955,6 +955,72 @@ func (h *Hub) apiAggModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models, "ratios": ratios, "meta": metas})
 }
 
+// mergeUnique 把 extra 里 base 没有的项追加到 base 后面（不排序、不去重 base 内部）。
+// 返回合并结果与「是否追加过」。
+func mergeUnique(base, extra []string) ([]string, bool) {
+	out := append([]string(nil), base...)
+	var appended bool
+	for _, e := range extra {
+		if e == "" || stringInSlice(out, e) {
+			continue
+		}
+		out = append(out, e)
+		appended = true
+	}
+	return out, appended
+}
+
+// aggLineModelsPayload 组装 /api/agg/line_models 的响应（倍率/元数据按 id 现算）。
+func (h *Hub) aggLineModelsPayload(line string, models []string, displays map[string]string, source, note string) map[string]any {
+	ratios := map[string]string{}
+	metas := map[string]any{}
+	names := map[string]string{}
+	for _, id := range models {
+		if v, ok := h.modelRatio(line, id); ok {
+			ratios[id] = ratioLabel(v)
+		}
+		if mj := metaJSON(h.modelMeta(line, id)); mj != nil {
+			metas[id] = mj
+		}
+		if dn := displays[id]; dn != "" {
+			names[id] = dn
+		}
+	}
+	out := map[string]any{"ok": true, "models": models, "ratios": ratios, "meta": metas,
+		"line_cn": aggLineCN[line], "source": source}
+	if len(names) > 0 {
+		out["display"] = names
+	}
+	if note != "" {
+		out["note"] = note
+	}
+	return out
+}
+
+// probeLineModelIDs 取某条线路的上游模型 id（与「探测新模型」同一个数据源）。
+// 会打上游，调用方自己把握频率；失败返回空切片（调用方回落）。
+//
+// 做成包级变量是为了单测能注入假上游结果 —— 否则这条路径只能靠真网络测，
+// 而它恰恰是「线路没启动也要能加模型」的关键分支。
+var probeLineModelIDs = func(h *Hub, line string) ([]string, map[string]string) {
+	pl := probeLine(h, line)
+	if !pl.Up || len(pl.Models) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(pl.Models))
+	displays := map[string]string{}
+	for _, m := range pl.Models {
+		if m.ID == "" {
+			continue
+		}
+		ids = append(ids, m.ID)
+		if m.Display != "" && m.Display != m.ID {
+			displays[m.ID] = m.Display
+		}
+	}
+	return ids, displays
+}
+
 func (h *Hub) apiAggAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Line  string `json:"line"`
@@ -990,8 +1056,16 @@ func (h *Hub) apiAggRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "msg": msg})
 }
 
-// apiAggLineModels 拉某条线路的在线模型目录（线路自己的 /v1/models，
-// 四条线路都是标准 OpenAI list 格式）。线路没启动时 ok=false。
+// apiAggLineModels 拉某条线路可加入目录的模型清单。
+//
+// 2026-11-05 修一个用户报的死角：「探测新模型能探到 hy4，但目录模型那边加不了」。
+// 根因是两条路径的数据源不一样 ——
+//   - 探测（/api/models/probe）直接打**上游目录**，线路没启动也能出结果；
+//   - 添加下拉（本接口）只读**线路自己的 /v1/models**，线路没跑就返回
+//     ok=false「请先启动它」。于是探测看到的模型，在下拉里根本不存在。
+//
+// 现在：线路在跑 → 用线路目录打底，再并上上游探测里多出来的 id；
+// 线路没跑 → 直接回上游探测结果（source=upstream），不再要求先启动线路。
 func (h *Hub) apiAggLineModels(w http.ResponseWriter, r *http.Request) {
 	line := r.URL.Query().Get("line")
 	if !aggSelectableLine(line) {
@@ -999,7 +1073,16 @@ func (h *Hub) apiAggLineModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.lineRunning(line) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": "线路未启动，请先在上方启动它", "models": []any{}})
+		ids, displays := probeLineModelIDs(h, line)
+		if len(ids) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "models": []any{},
+				"msg": "线路未启动，且上游目录也没取到模型（可先启动线路再试）",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, h.aggLineModelsPayload(line, ids, displays, "upstream",
+			"线路未启动：下面是上游实时目录，可直接加入（加入只是写进目录，真正调用前要先在上方启动这条线路）"))
 		return
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -1024,15 +1107,14 @@ func (h *Hub) apiAggLineModels(w http.ResponseWriter, r *http.Request) {
 			models = append(models, d.ID)
 		}
 	}
-	ratios := map[string]string{}
-	metas := map[string]any{}
-	for _, id := range models {
-		if v, ok := h.modelRatio(line, id); ok {
-			ratios[id] = ratioLabel(v)
-		}
-		if mj := metaJSON(h.modelMeta(line, id)); mj != nil {
-			metas[id] = mj
-		}
+	// 并上上游目录里多出来的模型：探测能看到、线路目录还没广告出去的（新模型），
+	// 不加这一段就还是「探得到但加不了」。
+	ids, displays := probeLineModelIDs(h, line)
+	merged, appended := mergeUnique(models, ids)
+	source := "line"
+	if appended {
+		source = "line+upstream"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models, "ratios": ratios, "meta": metas, "line_cn": aggLineCN[line]})
+	models = merged
+	writeJSON(w, http.StatusOK, h.aggLineModelsPayload(line, models, displays, source, ""))
 }

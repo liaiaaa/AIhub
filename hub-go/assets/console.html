@@ -778,6 +778,35 @@
       </div>
 
       <div class="card">
+        <div class="card-h"><span class="t">出站伪装（心跳 / TLS 指纹）</span><span class="spacer"></span>
+          <button class="text" onclick="loadStealth()">刷新</button></div>
+        <div class="ctx-row"><span>客户端心跳：</span><span class="cur" id="hb-state">—</span>
+          <span class="spacer"></span>
+          <button class="sm" id="hb-toggle" onclick="hbToggle()" style="display:none">—</button></div>
+        <div class="ctx-row"><span class="hint" id="hb-detail" style="font-size:11.5px;color:var(--faint)">加载中…</span></div>
+        <div id="hb-lines" class="maint-logs"></div>
+        <div class="ctx-row" style="margin-top:10px"><span>TLS 指纹：</span><span class="cur" id="tls-state">—</span></div>
+        <div id="tls-lines" class="maint-logs"></div>
+        <div class="ctx-row" style="margin-top:8px">
+          <span class="hint" style="font-size:11.5px;color:var(--faint)">心跳 = 官方桌面端那种「没人聊天也在定时拉目录/积分」的只读流量：间隔 4~9 分钟带抖动、01:00~07:00 静默、最近 90 秒有真实请求就让路、每天最多 120 次；只发 GET，不发聊天、不签到、不动 token。TLS 指纹按线路固定 ClientHello（桌面端 chrome / opencode golang），改档位用环境变量 <span class="mono">AIHUB_TLS_FP</span>，重启控制台生效。</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span class="t">Qoder 账号快照</span><span class="spacer"></span>
+          <button class="text" onclick="loadQoderAccounts()">刷新</button></div>
+        <div class="ctx-row">
+          <span>当前登录：</span><span class="cur" id="qa-current">—</span>
+          <span class="spacer"></span>
+          <button class="primary sm" onclick="qaSave()">存快照</button>
+        </div>
+        <div class="ctx-row" style="margin-top:8px">
+          <span class="hint" style="font-size:11.5px;color:var(--faint)">Qoder 桌面端只有一份 auth.v1.dat，换号登录会把旧号覆盖掉（2026-11-05 就是这么丢的号）。快照存在 <span class="mono">数据根/qoder-accounts/&lt;名字&gt;/</span>；后台每 20 秒比一次凭据，换号会自动留档，不用手动点。<b>日常切换请用「线路」页 Qoder 卡片的凭证卡片</b>（和 WorkBuddy 多凭证一样点一下就切）；这里是管理视图（删除旧快照）。<b>切换前请先退出 Qoder 桌面端</b>，否则它退出时会把旧登录态写回去。</span>
+        </div>
+        <div id="qa-list" class="maint-logs"><div class="gw-desc">加载中…</div></div>
+      </div>
+
+      <div class="card">
         <div class="card-h"><span class="t">运行维护</span><span class="spacer"></span>
           <button class="text" onclick="loadMaint()">刷新</button></div>
         <div class="ctx-row"><span>数据根：</span><span class="mono" id="maint-root">—</span></div>
@@ -828,7 +857,7 @@
 const SERVICES = [
   { key:'dom',   name:'国内 WorkBuddy', cred:true,  quota:true, risk:'上游 10-23 收紧非官方客户端识别：反代到 dsh/Codex 这类 agent 框架是明确高风险，建议只在需要时手动启用，别用主账号。' },
   { key:'intl',  name:'国际 WorkBuddy AI', cred:true,  quota:true },
-  { key:'qoder', name:'Qoder CN（阿里）', quota:true },
+  { key:'qoder', name:'Qoder CN（阿里）', cred:true, quota:true, qvault:true },
   { key:'trae',  name:'Trae CN（字节）', quota:true },
   { key:'teleagent', name:'TeleAgent（TeleAI）', quota:true },
   { key:'mimo',  name:'MiMo（小米）' },
@@ -1122,6 +1151,181 @@ async function loadMaint() {
   }
 }
 
+// ---------- 设置页·Qoder 账号快照（2026-11-05） ----------
+async function loadQoderAccounts() {
+  const cur = document.getElementById('qa-current');
+  const box = document.getElementById('qa-list');
+  if (!box) return;
+  try {
+    const d = await fetch('/api/qoder/accounts', { signal: AbortSignal.timeout(8000) }).then(function (r) { return r.json(); });
+    if (!d.ok) { box.innerHTML = '<div class="gw-desc">' + escHTML(d.msg) + '</div>'; return; }
+    const c = d.current;
+    cur.textContent = c
+      ? (c.nick || '(无昵称)') + ' · ' + (c.uid || '').slice(0, 8) + ' · 到期 ' + (c.expiresAt || '—').slice(0, 10)
+      : ('读不到当前凭据：' + (d.current_error || ''));
+    const list = d.accounts || [];
+    if (!list.length) {
+      box.innerHTML = '<div class="gw-desc">还没有快照。点「存快照」把当前登录存下来。</div>';
+      return;
+    }
+    box.innerHTML = list.map(function (a) {
+      const tag = a.current ? ' <span class="chip ok" style="font-size:10.5px">当前</span>' : '';
+      const sub = [a.nick, (a.uid || '').slice(0, 8), a.expiresAt ? ('到期 ' + a.expiresAt.slice(0, 10)) : '', a.savedAt].filter(Boolean).join(' · ');
+      return '<div class="maint-row">' +
+        '<span class="m-k">' + escHTML(a.name) + tag + '</span>' +
+        '<span class="m-f" title="' + escHTML(sub) + '">' + escHTML(sub) + '</span>' +
+        '<span class="m-s mono">' + (a.size || 0) + ' B</span>' +
+        '<span class="m-t"><button class="sm" onclick="qaUse(\'' + escHTML(a.name) + '\')">切换</button> ' +
+        '<button class="sm" onclick="qaDelete(\'' + escHTML(a.name) + '\')">删除</button></span></div>';
+    }).join('') + '<div class="gw-desc" style="margin-top:6px">快照目录：<span class="mono">' + escHTML(d.dir) + '</span>' +
+      (d.running ? '　Qoder 线路在跑，切换后会自动重启。' : '') + '</div>';
+  } catch (e) {
+    box.innerHTML = '<div class="gw-desc">请求失败：' + escHTML(e) + '</div>';
+  }
+}
+
+async function qaSave() {
+  const name = prompt('快照名字（中英文/数字/- _ .）：', '');
+  if (!name) return;
+  showMsg('正在保存快照…');
+  try {
+    const r = await fetch('/api/qoder/accounts/save', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: name }), signal: AbortSignal.timeout(15000) });
+    const d = await r.json(); showMsg(d.msg, !d.ok);
+  } catch (e) { showMsg('保存失败：' + e, true); }
+  loadQoderAccounts();
+}
+
+async function qaUse(name) {
+  if (!confirm('切到快照「' + name + '」？\n\n请先退出 Qoder 桌面端，否则它退出时会把当前登录态写回去。\n当前凭据会自动备份成 auto-时间戳。')) return;
+  showMsg('正在切换…');
+  try {
+    const r = await fetch('/api/qoder/accounts/use', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: name, start: true }), signal: AbortSignal.timeout(40000) });
+    const d = await r.json(); showMsg(d.msg, !d.ok);
+  } catch (e) { showMsg('切换失败：' + e, true); }
+  loadQoderAccounts();
+}
+
+async function qaDelete(name) {
+  if (!confirm('删除快照「' + name + '」？此操作不可撤销。')) return;
+  try {
+    const r = await fetch('/api/qoder/accounts/delete', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: name }), signal: AbortSignal.timeout(10000) });
+    const d = await r.json(); showMsg(d.msg, !d.ok);
+  } catch (e) { showMsg('删除失败：' + e, true); }
+  loadQoderAccounts();
+}
+
+// ---------- 设置页·出站伪装（心跳 / TLS 指纹，2026-11-05） ----------
+let hbSnapshot = null;
+
+function escHTML(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function fmtAgo(iso) {
+  if (!iso) return '—';
+  const t = new Date(iso);
+  if (isNaN(t.getTime()) || t.getFullYear() < 2000) return '—';
+  const sec = Math.round((Date.now() - t.getTime()) / 1000);
+  if (sec < 0) return Math.round(-sec / 60) + ' 分钟后';
+  if (sec < 90) return sec + ' 秒前';
+  if (sec < 5400) return Math.round(sec / 60) + ' 分钟前';
+  return Math.round(sec / 3600) + ' 小时前';
+}
+
+async function loadStealth() {
+  const st = document.getElementById('hb-state');
+  const btn = document.getElementById('hb-toggle');
+  const detail = document.getElementById('hb-detail');
+  const lines = document.getElementById('hb-lines');
+  const tlsState = document.getElementById('tls-state');
+  const tlsLines = document.getElementById('tls-lines');
+  if (!st || !lines) return;
+
+  let hb = null, tls = null;
+  try {
+    const rs = await Promise.all([
+      fetch('/api/heartbeat', { signal: AbortSignal.timeout(8000) }).then(function (r) { return r.json(); }),
+      fetch('/api/tls-fingerprint', { signal: AbortSignal.timeout(8000) }).then(function (r) { return r.json(); })
+    ]);
+    hb = rs[0] && rs[0].heartbeat;
+    tls = rs[1] && rs[1].tls_fingerprint;
+  } catch (e) {
+    lines.innerHTML = '<div class="gw-desc">读取失败：' + escHTML(e) + '</div>';
+    return;
+  }
+
+  if (hb) {
+    hbSnapshot = hb;
+    const s = hb.settings || {};
+    st.textContent = hb.enabled
+      ? ('运行中 · 今天 ' + (hb.day_count || 0) + ' 次' + (s.max_per_day ? (' / 上限 ' + s.max_per_day) : ''))
+      : '已关闭';
+    btn.style.display = '';
+    btn.textContent = hb.enabled ? '关闭' : '开启';
+    detail.textContent = '间隔 ' + s.min_interval_sec + '~' + s.max_interval_sec + ' 秒 · 静默 ' +
+      String(s.quiet_from_hour).padStart(2, '0') + ':00~' + String(s.quiet_to_hour).padStart(2, '0') + ':00' +
+      ' · 空闲闸门 ' + s.idle_gate_sec + ' 秒' +
+      ' · 上次成功 ' + fmtAgo(hb.last_run) +
+      (hb.next_tick ? (' · 下次约 ' + fmtAgo(hb.next_tick)) : '') +
+      (hb.last_skip ? (' · 最近跳过：' + hb.last_skip) : '');
+    const rows = (hb.lines || []).map(function (l) {
+      const ok = l.last_ok ? '<span style="color:var(--ok,#2e7d32)">成功</span>' : '<span style="color:var(--err,#c62828)">失败</span>';
+      return '<div class="maint-row"><span class="m-k">' + escHTML(l.line) + '</span>' +
+        '<span class="m-f" title="' + escHTML(l.label) + '">' + escHTML(l.last_detail || l.label || '—') + '</span>' +
+        '<span class="m-s">' + (l.count ? ok : '—') + '</span>' +
+        '<span class="m-t mono">' + (l.count || 0) + ' 次 · ' + fmtAgo(l.last_at) + '</span></div>';
+    }).join('');
+    lines.innerHTML = rows || '<div class="gw-desc">还没有心跳记录（没有在跑的线路，或刚启动）</div>';
+  }
+
+  if (tls) {
+    tlsState.textContent = tls.enabled ? ('已启用 · ' + (tls.global || '')) : '未启用';
+    const stats = tls.lines || {};
+    const profiles = tls.clients || [];
+    const rows = profiles.map(function (c) {
+      const l = stats[c.line] || {};
+      const cadence = c.heartbeat ? ('心跳 ' + c.hb_min + '~' + c.hb_max + 's') : '无心跳';
+      return '<div class="maint-row"><span class="m-k">' + escHTML(c.line) + '</span>' +
+        '<span class="m-f" title="' + escHTML(c.note || '') + '">' + escHTML(c.client || c.display || '') +
+        ' · ' + escHTML(c.tls) + ' · ' + (c.http2 ? 'h2' : 'HTTP/1.1') + ' · ' + cadence + '</span>' +
+        '<span class="m-s">' + (l.handshakes || 0) + ' 次</span>' +
+        '<span class="m-t mono">' + escHTML(l.last_tls || '—') + ' ' + fmtAgo(l.last_at) + '</span></div>';
+    }).join('');
+    // 未登记线路（启动期 (default) 等）也显示出来，避免「明明握手了却看不到」
+    const extra = Object.keys(stats).filter(function (k) {
+      return !profiles.some(function (c) { return c.line === k; });
+    }).sort().map(function (k) {
+      const l = stats[k];
+      return '<div class="maint-row"><span class="m-k">' + escHTML(k) + '</span>' +
+        '<span class="m-f">' + escHTML(l.profile) + ' · ' + escHTML(l.last_tls || '—') + ' · ALPN ' + escHTML(l.last_alpn || '—') + '</span>' +
+        '<span class="m-s">' + (l.handshakes || 0) + ' 次</span>' +
+        '<span class="m-t mono">' + fmtAgo(l.last_at) + (l.fallbacks ? (' · 回退 ' + l.fallbacks) : '') + '</span></div>';
+    }).join('');
+    tlsLines.innerHTML = rows + extra || '<div class="gw-desc">还没有握手记录（线路还没发过出站请求）</div>';
+  }
+}
+
+async function hbToggle() {
+  if (!hbSnapshot) return;
+  const want = !hbSnapshot.settings.enabled;
+  try {
+    const r = await fetch('/api/heartbeat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: want })
+    });
+    const d = await r.json();
+    showMsg(d.msg || (d.ok ? '已更新' : '更新失败'), !d.ok);
+    loadStealth();
+  } catch (e) {
+    showMsg('请求失败：' + e, true);
+  }
+}
+
 // ---------- 页面切换 ----------
 const PAGE_TITLES = { dash:'总览', lines:'线路与凭证', models:'模型', usage:'用量', settings:'设置' };
 function switchPage(name) {
@@ -1135,7 +1339,7 @@ function switchPage(name) {
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   if (name === 'lines') { loadCredStatus(false); loadFailures(false); }
   if (name === 'usage') loadUsage();
-  if (name === 'settings') { renderClients(); loadCtx(); loadMaint(); }
+  if (name === 'settings') { renderClients(); loadCtx(); loadMaint(); loadStealth(); loadQoderAccounts(); }
 }
 
 async function post(path, body) {
@@ -1218,10 +1422,13 @@ function renderOverview() {
 
   // 需要关注
   const att = [];
-  ['dom','intl'].forEach(function (line) {
+  ['dom','intl','qoder'].forEach(function (line) {
     (credStatus[line] || []).forEach(function (c) {
       if (c.state === '风控') att.push({ name: c.name, kind: 'risk', why: '推理被拦，建议换其它凭证' });
       else if (c.state === '渠道拦截') att.push({ name: c.name, kind: 'risk', why: '渠道拦截（11128）· 已本地暂停出站，建议改用其它线路' });
+      // Qoder 快照特有的坏状态：票已废，切过去也用不了
+      else if (c.state === '登录失效' || c.state === '已过期') att.push({ name: c.name, kind: 'risk', why: (c.state + '：' + (c.reason || '')) });
+      else if (c.state === '解不开') att.push({ name: c.name, kind: 'risk', why: '快照在本机解不开：' + (c.reason || '') });
       else if (!c.ok && c.until) att.push({ name: c.name, kind: 'risk', why: (c.state || '') + '：' + credWhy(c) });
     });
   });
@@ -1283,7 +1490,7 @@ function renderOverview() {
 
 function gotoLine(name) {
   switchPage('lines');
-  const key = ['dom','intl'].find(function (l) { return (credStatus[l] || []).some(function (c) { return c.name === name; }); }) || 'intl';
+  const key = ['dom','intl','qoder'].find(function (l) { return (credStatus[l] || []).some(function (c) { return c.name === name; }); }) || 'intl';
   setTimeout(function () {
     const tile = document.getElementById('stile-' + key);
     if (tile) tile.classList.remove('collapsed');
@@ -1492,7 +1699,9 @@ function renderCheckin() {
   }
   tags.innerHTML = lines.map(function (l) {
     const s = l[1] || '';
-    const cls = s.indexOf('签到成功') >= 0 || s.indexOf('活跃已上报') >= 0 ? 'ok' : 'no';
+    const cls = s.indexOf('签到成功') >= 0 || s.indexOf('活跃已上报') >= 0 ||
+      s.indexOf('今日已签到') >= 0 || s.indexOf('无可领活动') >= 0 ||
+      s.indexOf('未开放') >= 0 ? 'ok' : 'no';
     return '<span class="chip ' + cls + '" title="' + (s || '未签到') + '">' +
       l[0] + ' ' + shortCheckin(s || '—') + '</span>';
   }).join('');
@@ -1549,15 +1758,37 @@ function svcTile(s) {
     credSum +
     (s.quota ? '<div class="tile-credit"><span id="credit-' + s.key + '">额度 —</span>' +
       '<button class="credit-ref text" onclick="refreshQuota(\'' + s.key + '\')">刷新额度</button></div>' : '') +
+
     extra +
     '<div class="tile-btns">' +
     '<button id="tile-primary-' + s.key + '" class="sm" onclick="act(\'' + s.key + '/start\')">启用</button>' +
     '<span class="spacer"></span>' +
     (s.cred ? '<button class="text" onclick="act(\'' + s.key + '/switch\')">换凭证并重启</button>' : '') +
+    (s.qvault ? '<button class="text" onclick="qoderVaultSaveTile()">存当前号快照</button>' : '') +
     '<button class="text" onclick="openLog(\'' + s.key + '\')">日志</button>' +
     (s.key === 'intl' || s.key === 'dom' ? '<span class="golink" onclick="gotoModels(\'' + s.key + '\')">在模型页查看线路模型 →</span>' : '') +
     '</div></div></div>';
 }
+// ---------- Qoder 快照：线路卡片只留「存当前号快照」，切换走凭证卡片 ----------
+// 2026-11-05 用户反馈原来的「下拉 + 切换」太丑，要求和 WorkBuddy 多凭证一样。
+// 现在 qoder 用 cred:true，看板/点选全部复用 renderCreds('qoder')。
+async function qoderVaultSaveTile() {
+  let cur = '';
+  try {
+    const d = await fetch('/api/qoder/accounts', { signal: AbortSignal.timeout(8000) }).then(function (r) { return r.json(); });
+    cur = (d.current && d.current.nick) || '';
+  } catch (e) { /* 拿不到昵称就用空默认名 */ }
+  const name = prompt('给当前登录的号起个快照名：', cur);
+  if (!name) return;
+  showMsg('正在保存快照…');
+  try {
+    const r = await fetch('/api/qoder/accounts/save', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name: name }), signal: AbortSignal.timeout(15000) });
+    const j = await r.json(); showMsg(j.msg, !j.ok);
+  } catch (e) { showMsg('保存失败：' + e, true); }
+  await loadCredStatus(true);
+}
+
 function updateLineTiles() {
   if (!state) return;
   SERVICES.forEach(function (s) {
@@ -1682,8 +1913,9 @@ function renderCreds(line) {
     // 设过一次 checked，之后 cur 变了但 sig 没变（或反过来）就会两者不一致。
     const radio = card.querySelector('input[type="radio"]');
     if (radio) radio.checked = (c.name === cur);
-    card.classList.toggle('bad', !c.ok && (c.state === '风控' || c.state === '渠道拦截'));
-    card.classList.toggle('warn', (!c.ok && c.state !== '风控' && c.state !== '渠道拦截') || (c.ok && c.model_limits && c.model_limits.length));
+    card.classList.toggle('bad', !c.ok && CRED_BAD_STATES.indexOf(c.state) >= 0);
+    card.classList.toggle('warn', (c.ok && c.model_limits && c.model_limits.length) ||
+      (!c.ok && CRED_BAD_STATES.indexOf(c.state) < 0 && c.state !== '未知'));
     card.title = credTitle(c);
     const badge = card.querySelector('.cred-badge');
     if (badge) { badge.className = 'cred-badge ' + credCls(c); badge.textContent = credBadgeText(c); }
@@ -1708,10 +1940,15 @@ function renderCreds(line) {
     }, 30000);
   }
 }
+// credBadState 不可用的状态集合（Qoder 快照比 WorkBuddy 多几种：
+// 登录失效 / 已过期 / 解不开，都是「这张票现在不能用」）。
+const CRED_BAD_STATES = ['风控', '渠道拦截', '登录失效', '已过期', '解不开'];
+const CRED_WARN_STATES = ['额度用尽', '限流'];
+
 function credCls(c) {
   if (c.ok) return (c.model_limits && c.model_limits.length) ? 'warn' : 'ok';
-  if (c.state === '风控') return 'bad';
-  if (c.state === '渠道拦截') return 'bad';
+  if (CRED_BAD_STATES.indexOf(c.state) >= 0) return 'bad';
+  if (CRED_WARN_STATES.indexOf(c.state) >= 0) return 'warn';
   if (c.state === '限流') return 'warn';
   return '';
 }
@@ -1781,7 +2018,30 @@ function toggleCreds(line) {
   const open = box.classList.toggle('open');
   if (sum) sum.classList.toggle('open', open);
 }
-function setCred(line, name) { post(line + '/cred', { cred: name }); }
+function setCred(line, name) {
+  if (line === 'qoder') { qoderSetCred(name); return; }
+  post(line + '/cred', { cred: name });
+}
+
+// Qoder 的「凭证」= 账号快照。点卡片不是只存偏好（dom/intl 那样），而是
+// 真把那份 auth.v1.dat 写回去并重启线路，所以要确认，且切完要重拉看板。
+async function qoderSetCred(name) {
+  const prev = ((credStatus.qoder || []).find(function (c) { return c.selected; }) || {}).name || '';
+  if (prev === name) return;
+  if (!confirm('切到账号快照「' + name + '」？\n\n这会：\n1) 把该快照写回桌面端 auth.v1.dat（切换前自动备份当前那份）\n2) 重启 Qoder 线路\n\n建议先退出 Qoder 桌面端，否则它退出时会把当前登录态写回去。')) {
+    renderCreds('qoder'); // 单选框回到原选中项
+    return;
+  }
+  showMsg('正在切换…');
+  try {
+    const r = await fetch('/api/qoder/cred', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ cred: name }), signal: AbortSignal.timeout(60000) });
+    const j = await r.json();
+    showMsg(j.msg, !j.ok);
+  } catch (e) { showMsg('切换失败：' + e, true); }
+  await loadCredStatus(true);
+  refresh();
+}
 
 // 停用的线路默认折叠成一行，但整行可点：折叠时必须还能展开，
 // 否则「刷新额度」这些控件永远碰不到（用户 2026-10-17 报「未启动线路无法查额度」）。
@@ -1910,9 +2170,16 @@ async function probeModels() {
   }
   if (btn) { btn.disabled = false; btn.textContent = '探测'; }
 }
+// aggHasSlug 目录模型里是否已有这个 slug（数据来自 /api/agg/models 缓存）。
+function aggHasSlug(slug) {
+  return !!(aggModelsCache && (aggModelsCache.models || []).some(function (m) { return m.slug === slug; }));
+}
+
+let lastProbeLines = [];
 function renderProbe(lines) {
   const box = document.getElementById('probe-result');
   if (!box) return;
+  lastProbeLines = lines || [];
   box.innerHTML = '<div class="agg-row"><span class="tag">排序：免费 → 倍率低 → 倍率未知</span></div>' +
     lines.map(function (l) {
       const name = (SERVICES.find(function (s) { return s.key === l.line; }) || {}).name || l.line;
@@ -1920,17 +2187,59 @@ function renderProbe(lines) {
       const head = '<tr><td class="slug" style="width:40%">' + name + '</td><td>' + up +
         (l.new_count ? ' <span class="ratio free">新模型 ' + l.new_count + '</span>' : '') +
         (l.free_count ? ' <span class="ratio free">免费 ' + l.free_count + '</span>' : '') +
-        '</td><td class="op"></td></tr>';
+        '</td><td class="op">' + (l.new_count ? '<button class="sm" onclick="probeAddAll(\'' + l.line + '\',this)">新模型全加入</button>' : '') + '</td></tr>';
       const rows = (l.models || []).map(function (m) {
         const shown = m.display ? (m.display + ' <span style="color:var(--faint)">(' + m.id + ')</span>') : m.id;
-        return '<tr' + (m.new ? '' : ' class="down"') + '><td class="slug">' + shown + metaSub(m.meta) + '</td>' +
+        const inCat = aggHasSlug(l.line + '.' + m.id) ? ' <span class="chip ok" style="font-size:10.5px">已在目录</span>' : '';
+        const addBtn = '<button class="sm" onclick="probeAdd(\'' + l.line + '\',\'' + m.id + '\',this)">加入目录</button>';
+        return '<tr' + (m.new ? '' : ' class="down"') + '><td class="slug">' + shown + metaSub(m.meta) + inCat + '</td>' +
           '<td>' + (m.new ? '<span class="ratio free">新</span>' : '') + '</td>' +
-          '<td class="op">' + (m.ratio ? '<span class="ratio' + (m.free ? ' free' : '') + '">' + m.ratio + '</span>' : '<span style="color:var(--faint)">—</span>') + '</td></tr>';
+          '<td class="op">' + (m.ratio ? '<span class="ratio' + (m.free ? ' free' : '') + '">' + m.ratio + '</span>' : '<span style="color:var(--faint)">—</span>') + ' ' + addBtn + '</td></tr>';
       }).join('');
       return '<table class="agg-table" style="margin-bottom:10px"><thead><tr>' +
-        '<th style="width:40%">' + name + (l.note ? ' <span style="font-weight:400;color:var(--faint)">· ' + l.note + '</span>' : '') + '</th><th style="width:60px"></th><th class="op" style="width:90px">倍率</th></tr></thead>' +
+        '<th style="width:40%">' + name + (l.note ? ' <span style="font-weight:400;color:var(--faint)">· ' + l.note + '</span>' : '') + '</th><th style="width:60px"></th><th class="op" style="width:190px">倍率 · 操作</th></tr></thead>' +
         '<tbody>' + head + rows + '</tbody></table>';
     }).join('');
+}
+
+// probeAdd / probeAddAll：从探测结果直接把模型加进目录模型。
+//
+// 2026-11-05 修用户报的死角：「探测能探到 hy4，但目录模型那边加不了」。
+// 根因是两条路径数据源不同 —— 探测打**上游目录**（线路没启动也有结果），
+// 添加下拉只读**线路自己的 /v1/models**（线路没跑就报「请先启动」，
+// 新模型压根不在选项里）。后端已让 line_models 并上上游目录，这里再给
+// 探测结果一行一个直加按钮，省掉「切页签 → 选线路 → 翻模型 → 点加入」四步。
+async function probeAdd(line, model, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '加入中…'; }
+  try {
+    const r = await fetch('/api/agg/add', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ line: line, model: model }), signal: AbortSignal.timeout(20000) });
+    const d = await r.json();
+    showMsg(d.msg || ('已加入 ' + line + '.' + model), !d.ok);
+  } catch (e) { showMsg('加入失败：' + e, true); }
+  if (btn) { btn.disabled = false; btn.textContent = '加入目录'; }
+  await aggRefresh();
+  renderProbe(lastProbeLines); // 重画，让「已在目录」标记出现
+}
+
+async function probeAddAll(line, btn) {
+  const items = ((lastProbeLines || []).find(function (l) { return l.line === line; }) || {}).models || [];
+  const todo = items.filter(function (m) { return m.new && !aggHasSlug(line + '.' + m.id); });
+  if (!todo.length) { showMsg('这条线路没有待加入的新模型'); return; }
+  if (!confirm('把 ' + line + ' 的 ' + todo.length + ' 个新模型全部加入目录？')) return;
+  if (btn) { btn.disabled = true; btn.textContent = '加入中…'; }
+  let done = 0, fail = 0;
+  for (const m of todo) {
+    try {
+      const r = await fetch('/api/agg/add', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ line: line, model: m.id }), signal: AbortSignal.timeout(20000) });
+      const d = await r.json(); d.ok ? done++ : fail++;
+    } catch (e) { fail++; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '新模型全加入'; }
+  showMsg('已加入 ' + done + ' 个' + (fail ? ('，失败 ' + fail + ' 个') : ''), fail > 0);
+  await aggRefresh();
+  renderProbe(lastProbeLines);
 }
 
 // ---------- 复制到剪贴板 ----------
@@ -2300,7 +2609,7 @@ async function loadCredits(force, key) {
 async function loadCredStatus(force) {
   // 国内/国际各拉一次。用 allSettled 而不是 all：一条线的接口挂了不能把另一条
   // 的看板也一起清空（国内是新加的接口，更要能独立失败）。
-  await Promise.allSettled(['dom','intl'].map(async function (line) {
+  await Promise.allSettled(['dom','intl','qoder'].map(async function (line) {
     try {
       const r = await fetch('/api/' + line + '/creds' + (force ? '?force=1' : ''), { signal: AbortSignal.timeout(30000) });
       const d = await r.json();
@@ -2320,7 +2629,7 @@ async function loadCredStatus(force) {
 async function refreshQuota(key) {
   const jobs = [loadCredits(true, key)];
   // 凭证卡片只有 dom/intl 有；其它线路（qoder/trae/zcode）跳过
-  if (!key || key === 'dom' || key === 'intl') jobs.push(loadCredStatus(true));
+  if (!key || key === 'dom' || key === 'intl' || key === 'qoder') jobs.push(loadCredStatus(true));
   await Promise.allSettled(jobs);
 }
 
@@ -2341,7 +2650,7 @@ function render() {
   renderLineList();
   renderCheckin();
   updateLineTiles();
-  ['dom','intl'].forEach(renderCreds);
+  ['dom','intl','qoder'].forEach(renderCreds);
   renderAgg();
 }
 

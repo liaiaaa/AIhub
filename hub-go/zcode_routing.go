@@ -50,7 +50,7 @@ func newZcodeRouting(identity *zcodeIdentity, credential func() string) *zcodeRo
 		origin:     zcodeRoutingOrigin,
 		identity:   identity,
 		credential: credential,
-		client:     &http.Client{Transport: directClient().Transport, Timeout: zcodeRoutingTimeout},
+		client:     &http.Client{Transport: directClientFor("zcode").Transport, Timeout: zcodeRoutingTimeout},
 	}
 }
 

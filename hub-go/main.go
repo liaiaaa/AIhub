@@ -83,6 +83,9 @@ func main() {
 	mux.HandleFunc("/api/lines/hide", hub.apiLineHide)
 	mux.HandleFunc("/api/lines/show", hub.apiLineShow)
 	mux.HandleFunc("/api/status", hub.apiStatus)
+	// 2026-11-05：客户端心跳模拟 + 出站 TLS 指纹（见 heartbeat.go / tlsfp.go）
+	mux.HandleFunc("/api/heartbeat", hub.apiHeartbeat)
+	mux.HandleFunc("/api/tls-fingerprint", hub.apiTLSFingerprint)
 	mux.HandleFunc("/api/nick", hub.apiNick)
 	mux.HandleFunc("/api/dom/cred", hub.apiDomCred)
 	mux.HandleFunc("/api/dom/switch", hub.apiDomSwitch)
@@ -108,6 +111,14 @@ func main() {
 	mux.HandleFunc("/api/zcode/key", hub.apiZcodeKey)
 	mux.HandleFunc("/api/intl/cred", hub.apiIntlCred)
 	mux.HandleFunc("/api/intl/switch", hub.apiIntlSwitch)
+	// Qoder 账号快照（2026-11-05）：桌面端换号会覆盖 auth.v1.dat，旧号就此丢失。
+	// Qoder 多凭证看板：与 dom/intl 同一套卡片 UI（creds 列表 + 点选切换）
+	mux.HandleFunc("/api/qoder/creds", hub.apiQoderCreds)
+	mux.HandleFunc("/api/qoder/cred", hub.apiQoderCred)
+	mux.HandleFunc("/api/qoder/accounts", hub.apiQoderAccounts)
+	mux.HandleFunc("/api/qoder/accounts/save", hub.apiQoderAccountsSave)
+	mux.HandleFunc("/api/qoder/accounts/use", hub.apiQoderAccountsUse)
+	mux.HandleFunc("/api/qoder/accounts/delete", hub.apiQoderAccountsDelete)
 	mux.HandleFunc("/api/checkin", hub.apiCheckin)
 	mux.HandleFunc("/api/intl/checkin", hub.apiIntlCheckin)
 	mux.HandleFunc("/api/intl/creds", hub.apiIntlCreds)
@@ -146,6 +157,11 @@ func main() {
 	// 签到改由控制台「一键签到」手动触发，详见 checkin.go。
 	// 上游模型目录后台抓一次：/v1/models 的倍率+上下文靠它，不能等用户点控制台。
 	go hub.warmWBCatalogs()
+	// 客户端心跳模拟（2026-11-05）：只发只读请求，间隔带抖动、夜间静默、有真实请求时让路。
+	hub.StartHeartbeat()
+	// Qoder 凭据变更监听（2026-11-05）：桌面端换号会原地覆盖 auth.v1.dat，
+	// 旧号凭据当场销毁。这里每 20 秒比一次内容，变了就把旧的自动存成快照。
+	go startQoderVaultWatch(hub.heartbeatStopCh())
 	select {}
 }
 

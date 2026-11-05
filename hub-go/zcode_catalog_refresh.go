@@ -191,7 +191,7 @@ func (p *ZcodeProxy) fetchRemoteCatalog() ([]zcodeModelEntry, error) {
 	url := fmt.Sprintf("%s/api/v1/client/configs?app_version=%s&platform=%s",
 		zcodeCatalogOrigin, id.appVersion, id.platformParam())
 
-	client := &http.Client{Transport: directClient().Transport, Timeout: 5 * time.Second}
+	client := &http.Client{Transport: directClientFor("zcode").Transport, Timeout: 5 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err

@@ -121,7 +121,7 @@ func (p *ZcodeProxy) refreshQuotaLocked() {
 
 	url := fmt.Sprintf("%s/api/v1/zcode-plan/billing/balance?app_version=%s&platform=%s",
 		zcodeCatalogOrigin, p.identity.appVersion, p.identity.platformParam())
-	client := &http.Client{Transport: directClient().Transport, Timeout: 3 * time.Second}
+	client := &http.Client{Transport: directClientFor("zcode").Transport, Timeout: 3 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		p.quotaError = err.Error()

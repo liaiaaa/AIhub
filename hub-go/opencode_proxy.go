@@ -231,8 +231,8 @@ func (p *OpencodeProxy) Start() (bool, string) {
 	}
 	p.mu.Lock()
 	p.ln = ln
-	p.cli = newBackendClient() // 走系统/环境代理：免费档有区域校验
-	p.portS = newLineServer(p)
+	p.cli = newBackendClientFor("oc") // 走系统/环境代理：免费档有区域校验
+	p.portS = newLineServerFor("oc", p)
 	p.mu.Unlock()
 
 	go func() {

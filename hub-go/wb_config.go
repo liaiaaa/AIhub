@@ -383,7 +383,7 @@ func (h *Hub) refreshWBCatalog(line string, p *Proxy, force bool) *wbCatalog {
 		logHub("%s 目录刷新失败：取认证头失败：%v", line, err)
 		return nil
 	}
-	client := newBackendClient()
+	client := newBackendClientFor(line)
 	client.Timeout = 20 * time.Second
 	cat, err := fetchWBCatalog(client, p.Backend, line, headers)
 	if err != nil {

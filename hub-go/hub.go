@@ -38,6 +38,9 @@ type Hub struct {
 	// 根因不是 switch 脚本探测有问题——是「线路在跑」这个事实只存在于内存里，
 	// 进程一退就丢，重启时无从得知该恢复哪些。现在把它落到磁盘。
 	lastLines []string
+
+	// hb 客户端心跳模拟（2026-11-05，见 heartbeat.go）。nil = 未启动。
+	hb *heartbeatState
 }
 
 // checkinRecord 最近一次签到结果（逻辑见 checkin.go），随 state.json 持久化，
@@ -802,22 +805,26 @@ func (h *Hub) statusMap() map[string]any {
 	}
 	sort.Strings(creds) // 固定顺序，避免下拉/单选框每次刷新都跳动
 	return map[string]any{
-		"dom":          dom,
-		"intl":         intl,
-		"mimo":         mimo,
-		"qoder":        qoder,
-		"zcode":        zcode,
-		"trae":         trae,
-		"oc":           oc,
-		"teleagent":    teleagent,
-		"intl_cred":    cred,
-		"creds":        creds,
-		"dom_cred":     domCred,
-		"dom_creds":    domCredNames(),
-		"default_cred": defaultIntlCred,
-		"checkin":      h.checkinSnapshot(),
-		"agg":          aggStatusEntry(),
-		"ctx_window":   h.contextWindow(),
+		"dom":             dom,
+		"intl":            intl,
+		"mimo":            mimo,
+		"qoder":           qoder,
+		"zcode":           zcode,
+		"trae":            trae,
+		"oc":              oc,
+		"teleagent":       teleagent,
+		"intl_cred":       cred,
+		"creds":           creds,
+		"dom_cred":        domCred,
+		"qoder_cred":      qoderCredCurrentName(),
+		"dom_creds":       domCredNames(),
+		"default_cred":    defaultIntlCred,
+		"checkin":         h.checkinSnapshot(),
+		"agg":             aggStatusEntry(),
+		"heartbeat":       h.heartbeatStatus(),
+		"tls_fp":          tlsFingerprintSummary(),
+		"client_profiles": clientProfilesSummary(),
+		"ctx_window":      h.contextWindow(),
 	}
 }
 

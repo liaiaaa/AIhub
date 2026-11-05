@@ -324,12 +324,12 @@ func (p *TraeProxy) Start() (bool, string) {
 	if err != nil {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
-	tr := directClient().Transport
+	tr := directClientFor("trae").Transport
 	p.mu.Lock()
 	p.auth, p.dev = info, dev
 	p.cli = &http.Client{Transport: tr}
 	p.ln = ln
-	p.portS = newLineServer(p)
+	p.portS = newLineServerFor("trae", p)
 	srv := p.portS
 	p.mu.Unlock()
 

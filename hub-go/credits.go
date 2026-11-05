@@ -180,7 +180,7 @@ func fetchCredit(h *Hub, key string) *creditInfo {
 
 func wbCredits(h *Hub, intl bool) *creditInfo {
 	var cm *CredentialManager
-	base := "https://copilot.tencent.com"
+	base := wbCNBase()
 	ua := officialDomBillingUA() // 单段：billing 域白名单 UA
 	name := "国内 WorkBuddy"
 	if !intl {

@@ -89,7 +89,7 @@ func domProbeInfer(cm *CredentialManager, p *Proxy) (probeResult, string) {
 	}
 	_, _, client := p.runtime()
 	if client == nil {
-		client = newBackendClient() // 与线路同源：认 GNOME 系统代理 + 死代理自动回落直连
+		client = newBackendClientFor(p.Name) // 与线路同源：认 GNOME 系统代理 + 死代理自动回落直连
 		client.Timeout = 20 * time.Second
 	}
 	return intlProbeDo(client, req, "") // 响应归类与 intl 完全同族（同后端体系，错误码一致）
@@ -114,7 +114,7 @@ func domCreditsRaw(cm *CredentialManager, p *Proxy) (remain, total float64, ok b
 	headers["X-IDE-Type"] = "WorkBuddy"
 	_, _, client := p.runtime()
 	if client == nil {
-		client = newBackendClient()
+		client = newBackendClientFor(p.Name)
 		client.Timeout = 20 * time.Second
 	}
 	body, status, err := postJSONWithClient(client, p.Backend+"/billing/meter/get-user-resource-summary", headers, []byte("{}"))
@@ -338,7 +338,7 @@ func wbCreditExpiriesFetch(cm *CredentialManager, p *Proxy) []credExpiry {
 	headers["X-IDE-Type"] = "WorkBuddy"
 	_, _, client := p.runtime()
 	if client == nil {
-		client = newBackendClient()
+		client = newBackendClientFor(p.Name)
 		client.Timeout = 20 * time.Second
 	}
 	post := func(path string) map[string]any {

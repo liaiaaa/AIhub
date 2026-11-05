@@ -70,6 +70,8 @@ func NewCredentialManager(path, backend, defaultDomain, userAgent string) *Crede
 // load 读取并缓存 auth 文件。调用方必须持有 c.mu。
 // 返回解析后的结构体，以及原始 JSON（保留未知字段，供回写使用）。
 func (c *CredentialManager) load() (*SessionFile, map[string]any, error) {
+	// 桌面端刷新过 token 就先把实时文件同步过来（见 dom_live_cred.go）。
+	c.syncDomLiveCred()
 	st, err := os.Stat(c.path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("无法读取 auth 文件：%v", err)
@@ -312,7 +314,7 @@ func (c *CredentialManager) buildHeaders(auth *AuthData, acct *AccountData) map[
 		uid, ent = acct.UID, acct.EnterpriseID
 	}
 	return map[string]string{
-		"Content-Type":    "application/json",
+		"Content-Type": "application/json",
 		// 官方客户端发的是 "application/json, text/plain, */*"；只写 application/json
 		// 是另一个可被上游区分「非官方客户端」的细节（2026-10-25 对齐）。
 		"Accept":          "application/json, text/plain, */*",

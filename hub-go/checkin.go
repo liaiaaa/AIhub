@@ -228,8 +228,19 @@ func qoderCheckin() checkinResult {
 		"Accept":          "application/json",
 		"Content-Type":    "application/json",
 	}
+	// 桌面端 SDK 对 campaigns.list 调的是 requireMachineIdentity()：
+	// 带机器身份更像客户端（实测不带也返回 200，但带上零成本）。
+	if mt, mtype := qoderMachineInfo(); mt != "" {
+		headers["X-Machine-Id"] = mt
+		if mtype != "" {
+			headers["X-Machine-Type"] = mtype
+		}
+	}
 	campaigns, _, err := func() ([]qoderCampaign, int, error) {
-		body, status, err := httpPostJSON(qoderOpenAPIBase+"/sash/api/v1/me/campaigns", headers, nil)
+		// 2026-11-05 实测修正：campaigns **列表是 GET**（POST 一律 404
+		// {"errorCode":"NotFound"}）。旧实现用 POST，于是永远解析成「没有活动」，
+		// 看起来像「账号没活动」，实际是方法用错。领取仍是 POST。
+		body, status, err := httpGetJSON(qoderOpenAPIBase+"/sash/api/v1/me/campaigns", headers)
 		if err != nil {
 			return nil, status, err
 		}
@@ -258,7 +269,12 @@ func qoderCheckin() checkinResult {
 		}
 	}
 	if len(claimable) == 0 {
-		return checkinResult{OK: true, Detail: "今日无可领活动（可能已领）"}
+		// 区分「有活动但都领过了」和「压根没有活动」：前者是今天已经签完，
+		// 后者可能是活动下线/账号不在活动范围，两者的处置完全不同。
+		if len(campaigns) > 0 {
+			return checkinResult{OK: true, Detail: fmt.Sprintf("今日已领（%d 个活动均已完成）", len(campaigns))}
+		}
+		return checkinResult{OK: true, Detail: "今日无活动（上游未下发）"}
 	}
 	var got []string
 	failed := 0
@@ -495,10 +511,14 @@ func traeRewardField(m map[string]any) string {
 
 // runCheckin 执行签到并持久化结果；返回给控制台的汇总文案。
 //
-// 2026-10-08 变更：Qoder 签到永久停用——网关活动领取反复失败，且该平台
-// 对自动/定时类操作风控敏感（用户拍板）。仅保留国内 WorkBuddy + Trae。
+// 2026-10-08 曾把 Qoder 签到标为「永久停用」（当时活动领取反复失败，且平台
+// 对自动/定时操作风控敏感）。2026-11-05 用户要求恢复：改用新的
+// campaigns 流程（Cosy-ClientType: 10 + CLAIM_BENEFIT），实测能正常返回
+// 「今日无可领活动（可能已领）」，说明接口本身是通的。
+// **仍然只在用户点「一键签到」时触发**，不恢复自动定时器（见 autoCheckinLoop）。
 func runCheckin(h *Hub) (bool, string) {
 	domCh := make(chan checkinResult, 1)
+	qoderCh := make(chan checkinResult, 1)
 	traeCh := make(chan checkinResult, 1)
 	go func() {
 		defer recoverGoroutine("checkin.go:500")
@@ -506,20 +526,24 @@ func runCheckin(h *Hub) (bool, string) {
 	}()
 	go func() {
 		defer recoverGoroutine("checkin.go:501")
+		qoderCh <- qoderCheckin()
+	}()
+	go func() {
+		defer recoverGoroutine("checkin.go:502")
 		traeCh <- traeCheckin()
 	}()
 	dom := <-domCh
+	qoder := <-qoderCh
 	trae := <-traeCh
-	const qoderDetail = "已停用"
 
 	h.mu.Lock()
 	h.checkin = checkinRecord{
 		Date:  time.Now().Format("2006-01-02"),
 		Time:  time.Now().Format("15:04:05"),
 		Dom:   dom.Detail,
-		Qoder: qoderDetail,
+		Qoder: qoder.Detail,
 		Trae:  trae.Detail,
-		OK:    dom.OK && trae.OK,
+		OK:    dom.OK && qoder.OK && trae.OK,
 	}
 	h.saveStateLocked()
 	rec := h.checkin

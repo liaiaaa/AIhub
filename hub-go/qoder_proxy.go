@@ -147,14 +147,14 @@ func (p *QoderProxy) Start() (bool, string) {
 	// gateway.qoder.com.cn 国内（阿里云）可达：直连，不读系统/环境代理。
 	// 推理请求在 Sign 里显式带 Accept-Encoding: identity，Go 不会自动加
 	// gzip/解压；万一上游仍回 gzip，由 qoderMaybeDecompress 兜底。
-	p.client = directClient()
+	p.client = directClientFor("qoder")
 
 	ln, err := listenLinePort(p.Port)
 	if err != nil {
 		return false, fmt.Sprintf("端口 %d 被占用，无法启动：%v", p.Port, err)
 	}
 
-	srv := newLineServer(p)
+	srv := newLineServerFor("qoder", p)
 	p.mu.Lock()
 	p.server = srv
 	p.ln = ln

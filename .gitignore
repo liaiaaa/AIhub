@@ -139,3 +139,6 @@ cred-backups/
 *.vscdb
 *.vscdb-journal
 *.jsonl
+
+# Qoder 账号快照（auth.v1.dat 是加密凭据、meta.json 含 uid/email，绝不入库）
+qoder-accounts/

@@ -98,6 +98,9 @@ func qoderCredsStatus(force bool) []intlCredStatus {
 	if err != nil {
 		return nil
 	}
+	// 一个账号只出一条：历史遗留的同 uid 快照（token 刷新产生的 auto-*/-2）
+	// 不重复展示 —— 这正是 2026-11-06 用户报「实际就 2 个凭证，为什么显示四个」的成因。
+	list = qoderVaultDedupeByUID(list)
 	out := make([]intlCredStatus, 0, len(list))
 	for _, a := range list {
 		st := intlCredStatus{

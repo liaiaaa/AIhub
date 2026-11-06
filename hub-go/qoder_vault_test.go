@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,14 +87,25 @@ func TestQoderVaultUseSwitchesAndBacksUp(t *testing.T) {
 		t.Fatalf("切换后应是 A，得到 %s", cur.UID)
 	}
 	list, _ := qoderVaultList()
-	var hasAuto bool
+	// 2026-11-06 改口径：切换前的 B 不再产生 `auto-<时间戳>` 新条目，
+	// 而是**覆盖 B 已有的快照**（同 uid 只留一条）。语义不变：B 的内容必须找得回来。
+	var bKept bool
 	for _, a := range list {
-		if len(a.Name) > 5 && a.Name[:5] == "auto-" && a.UID == "uid-b" {
-			hasAuto = true
+		if a.UID == "uid-b" {
+			bKept = true
+			b, err := os.ReadFile(qoderVaultPath(a.Name))
+			if err != nil || !strings.Contains(string(b), "tok-b") {
+				t.Fatalf("切换前的 B 内容应保存在快照 %s 里，实际读不到/内容不对：%v", a.Name, err)
+			}
 		}
 	}
-	if !hasAuto {
+	if !bKept {
 		t.Fatalf("切换前的 B 应被自动备份，列表：%+v", list)
+	}
+	for _, a := range list {
+		if strings.HasPrefix(a.Name, "auto-") {
+			t.Errorf("同账号已有快照时不该再建 auto-* 条目：%+v", a)
+		}
 	}
 }
 

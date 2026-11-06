@@ -178,6 +178,188 @@ func qoderVaultFindByContent(b []byte) string {
 	return ""
 }
 
+// qoderVaultFindByUID 找同一账号（uid 相同）最新的快照名；没有返回空串。
+//
+// 为什么按 uid 而不是按内容判重（2026-11-06 用户报「实际就 2 个凭证，为什么显示四个」）：
+// token 每次刷新字节都变，按内容判重会把**同一个账号**存成多份快照
+// （实测仓库里 nick5461534038 有 3 份：本体 + -2 + auto-20261106-172045，uid 全同）。
+// 一个账号只该有一条，刷新时覆盖更新即可。
+func qoderVaultFindByUID(uid string) string {
+	if uid == "" {
+		return ""
+	}
+	all, err := qoderVaultList()
+	if err != nil {
+		return ""
+	}
+	for _, a := range all { // qoderVaultList 已按 SavedAt 倒序 → 第一个就是最新的
+		if a.UID == uid {
+			return a.Name
+		}
+	}
+	return ""
+}
+
+// qoderVaultDedupeByUID 同一 uid 只保留最新一份（入参需已按 SavedAt 倒序）。
+// uid 为空的条目原样保留 —— 没有身份就没法判重，宁可多显示一条也不要误删。
+func qoderVaultDedupeByUID(in []qoderAccountMeta) []qoderAccountMeta {
+	seen := make(map[string]bool, len(in))
+	out := make([]qoderAccountMeta, 0, len(in))
+	for _, a := range in {
+		if a.UID != "" {
+			if seen[a.UID] {
+				continue
+			}
+			seen[a.UID] = true
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// qoderVaultNameForLive 给「桌面端当前凭据」挑一个快照名：
+// 同 uid 已有快照 → 复用那个名字（覆盖更新）；否则用昵称，昵称被占了用 nick-2/-3；再不行 auto-时间戳。
+func qoderVaultNameForLive(b []byte) string {
+	plain, _, err := qoderOpenCreds(qoderAppDataDir(), b)
+	if err != nil {
+		return ""
+	}
+	var creds qoderCreds
+	_ = json.Unmarshal(plain, &creds)
+	if n := qoderVaultFindByUID(creds.User.ID); n != "" {
+		return n
+	}
+	return ""
+}
+
+// qoderVaultPruneDupes 清理历史遗留的重复快照：同一 uid 只留最新一份。
+//
+// 保守规则（宁可留错也不误删）：
+//   - uid 为空的不参与（判不了身份）；
+//   - 只删 auto-* / 带 -2/-3 后缀的**旧**副本；用昵称建的原始条目即使不是最新也不动，
+//     避免把用户手工存的快照删掉。
+func qoderVaultPruneDupes() int {
+	all, err := qoderVaultList()
+	if err != nil {
+		return 0
+	}
+	// 按 uid 分组：qoderVaultList 已按 SavedAt 倒序，每组第一条即最新
+	type grp struct {
+		keep   qoderAccountMeta
+		others []qoderAccountMeta
+	}
+	groups := map[string]*grp{}
+	order := []string{}
+	for _, a := range all {
+		if a.UID == "" {
+			continue
+		}
+		g := groups[a.UID]
+		if g == nil {
+			groups[a.UID] = &grp{keep: a}
+			order = append(order, a.UID)
+			continue
+		}
+		g.others = append(g.others, a)
+	}
+	// 昵称占用表（非 auto-* 的条目占着可读名）
+	taken := map[string]bool{}
+	for _, a := range all {
+		if !strings.HasPrefix(a.Name, "auto-") && a.Nick != "" {
+			taken[a.Nick] = true
+		}
+	}
+	changed := 0
+	isDupName := func(name string) bool {
+		if strings.HasPrefix(name, "auto-") {
+			return true
+		}
+		if i := strings.LastIndex(name, "-"); i > 0 {
+			return isAllDigits(name[i+1:])
+		}
+		return false
+	}
+	for _, uid := range order {
+		g := groups[uid]
+		nick := g.keep.Nick
+		// 1) 删同账号旧副本：auto-* / 数字后缀 / 名字就是昵称但已被新版取代的那条
+		for _, a := range g.others {
+			if !isDupName(a.Name) && a.Name != nick {
+				continue // 手工起的、和昵称不同的名字：不动
+			}
+			if err := qoderVaultDelete(a.Name); err != nil {
+				logHub("qoder 重复快照 %s 清理失败：%v", a.Name, err)
+				continue
+			}
+			changed++
+			if a.Name == nick {
+				taken[nick] = false
+			}
+			logHub("qoder 清理重复快照：%s（账号 %s 保留更新的那份 %s）", a.Name, uid, g.keep.Name)
+		}
+		// 2) 留下的若是 auto-*，且昵称已无人占用 → 改名成可读昵称
+		if strings.HasPrefix(g.keep.Name, "auto-") && nick != "" && !taken[nick] {
+			if err := qoderVaultRename(g.keep.Name, nick); err != nil {
+				logHub("qoder 快照改名 %s → %s 失败：%v", g.keep.Name, nick, err)
+			} else {
+				changed++
+				taken[nick] = true
+				logHub("qoder 快照改名：%s → %s（同账号只剩这一份，用可读昵称）", g.keep.Name, nick)
+			}
+		}
+	}
+	return changed
+}
+
+// qoderVaultRename 把一份快照改名（目录 + meta.json 里的 name）。
+func qoderVaultRename(from, to string) error {
+	from, err := sanitizeVaultName(from)
+	if err != nil {
+		return err
+	}
+	to, err = sanitizeVaultName(to)
+	if err != nil {
+		return err
+	}
+	if from == to || to == "" {
+		return nil
+	}
+	src := filepath.Join(qoderVaultRoot(), from)
+	dst := filepath.Join(qoderVaultRoot(), to)
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("目标名 %q 已存在", to)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+	mp := filepath.Join(dst, "meta.json")
+	mb, err := os.ReadFile(mp)
+	if err != nil {
+		return nil // 目录已改名成功，meta 缺失不影响可用性
+	}
+	var meta qoderAccountMeta
+	if json.Unmarshal(mb, &meta) != nil {
+		return nil
+	}
+	meta.Name = to
+	if nb, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		_ = os.WriteFile(mp, nb, 0o600)
+	}
+	return nil
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // qoderVaultUse 把某份快照写回桌面端凭据文件（切换账号）。
 // 当前凭据若还没快照过，会先自动存一份 `auto-<时间戳>`，避免「切过去就丢」。
 func qoderVaultUse(name string) (string, error) {
@@ -201,6 +383,11 @@ func qoderVaultUse(name string) (string, error) {
 	backedUp := false
 	if cur, err := os.ReadFile(livePath); err == nil && len(cur) > 0 {
 		if string(cur) != string(b) {
+			// 当前这份（要切走的号）按 uid 判重：同账号已有快照就覆盖它，
+			// 不再新增一条 —— 否则每切一次号，列表就多一条同账号的快照。
+			if dst := qoderVaultNameForLive(cur); dst != "" {
+				autoName = dst
+			}
 			if _, err := qoderVaultSave(autoName); err != nil {
 				return "", fmt.Errorf("切换前自动备份当前凭据失败，已中止：%w", err)
 			}

@@ -58,8 +58,11 @@ func qoderVaultWatchTick() (string, error) {
 	}
 
 	// 内容变了：先把旧的那份（seen）存成快照，再更新基线。
-	// 去重：同一个账号来回切时，旧内容可能已经是某份快照，不重复存。
+	// 去重：先按内容，再按 uid —— 同一账号 token 刷新不该产生第二条快照（见 ensureCurrentSnapshotted）。
 	archived := qoderVaultFindByContent(seen)
+	if archived == "" {
+		archived = qoderVaultNameForLive(seen)
+	}
 	if archived == "" {
 		name := "auto-" + time.Now().Format("20060102-150405")
 		meta, err := qoderVaultStore(name, seen)
@@ -82,8 +85,12 @@ func qoderVaultWatchTick() (string, error) {
 	return archived, nil
 }
 
-// ensureCurrentSnapshotted 保证「当前凭据」在快照仓库里有一份（按内容判重）。
-// 名字优先用昵称；昵称被别的账号占了就用 nick-2、nick-3…，再不行用 auto-current-时间戳。
+// ensureCurrentSnapshotted 保证「当前凭据」在快照仓库里有一份。
+//
+// 判重顺序（2026-11-06 修「2 个账号显示 4 条」）：
+//  1. 内容完全相同 → 直接用那份；
+//  2. **同一 uid** 已有快照 → 覆盖它（token 刷新只更新，不新增条目）；
+//  3. 都没有 → 用昵称建新的，昵称被别的账号占了才加 -2/-3 后缀。
 func ensureCurrentSnapshotted(live []byte) (string, error) {
 	if len(live) == 0 {
 		return "", nil
@@ -92,10 +99,20 @@ func ensureCurrentSnapshotted(live []byte) (string, error) {
 		return existing, nil
 	}
 	base := ""
+	uid := ""
 	if plain, _, err := qoderOpenCreds(qoderAppDataDir(), live); err == nil {
 		var c qoderCreds
 		if json.Unmarshal(plain, &c) == nil {
 			base = strings.TrimSpace(c.User.Name)
+			uid = c.User.ID
+		}
+	}
+	// 同账号的旧快照：覆盖更新，列表里始终只有一条
+	if same := qoderVaultFindByUID(uid); same != "" {
+		meta, err := qoderVaultStore(same, live)
+		if err == nil {
+			logHub("qoder 账号 %s 的凭据已刷新（覆盖快照 %s，不新增条目）", meta.Nick, same)
+			return meta.Name, nil
 		}
 	}
 	if base == "" {
@@ -130,6 +147,10 @@ func startQoderVaultWatch(stop <-chan struct{}) {
 		// 启动时先跑一轮：把当前凭据记成基线（若已有基线且不同，会立刻留档）。
 		if _, err := qoderVaultWatchTick(); err != nil {
 			logHub("qoder 凭据监听首轮失败：%v", err)
+		}
+		// 基线建好后再清理历史重复快照，免得把刚要复用的那条删掉。
+		if n := qoderVaultPruneDupes(); n > 0 {
+			logHub("qoder 快照仓库清理完成：去掉 %d 条同账号重复项", n)
 		}
 		t := time.NewTicker(qoderVaultPollSec * time.Second)
 		defer t.Stop()

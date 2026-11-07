@@ -18,12 +18,14 @@ import (
 	"testing"
 )
 
-// 内置快照必须覆盖官方 14 个 key，且包含用户关心的 GLM / DeepSeek 系列。
+// 内置快照必须覆盖官方 14 个 key，外加 2026-11-07 上线的 QoDuck（lmodel，
+// 只在 app 分组）。这里同时钉死两个倍率 bug 不再复发：qfmodel 是 0.1x（不是免费），
+// QoDuck 才是免费。
 func TestDefaultCatalogCoversAllOfficialKeys(t *testing.T) {
 	want := []string{
 		"auto", "qmodel_38max", "qfmodel", "qmodel_latest", "qmodel", "q37fmodel",
 		"dmodel", "dfmodel", "gmodel", "gfmodel", "gm51model",
-		"kmodel_latest", "kmodel", "mmodel",
+		"kmodel_latest", "kmodel", "mmodel", "lmodel",
 	}
 	got := map[string]qoderModelEntry{}
 	for _, m := range defaultQoderCatalog() {
@@ -64,6 +66,7 @@ func TestDefaultCatalogDisplayNames(t *testing.T) {
 		"gm51model":     "GLM-5.2",
 		"kmodel_latest": "Kimi-K3",
 		"mmodel":        "MiniMax-M2.7",
+		"lmodel":        "QoDuck",
 	}
 	byKey := map[string]string{}
 	for _, m := range defaultQoderCatalog() {
@@ -294,9 +297,9 @@ func TestHandleModelsNoDuplicates(t *testing.T) {
 		t.Errorf("object = %q, want list", resp.Object)
 	}
 
-	// 14 个模型 → 恰好 14 条，且 id 互不相同（这是本次修复的核心诉求）
-	if len(resp.Data) != 14 {
-		t.Errorf("条目数 = %d, want 14（一个模型只许一条，不许重复）", len(resp.Data))
+	// 15 个模型 → 恰好 15 条，且 id 互不相同（这是本次修复的核心诉求）
+	if len(resp.Data) != 15 {
+		t.Errorf("条目数 = %d, want 15（一个模型只许一条，不许重复）", len(resp.Data))
 	}
 	ids := map[string]int{}
 	for _, d := range resp.Data {

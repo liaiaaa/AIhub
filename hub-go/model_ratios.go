@@ -299,10 +299,15 @@ func (h *Hub) modelRatio(line, model string) (float64, bool) {
 		if p := h.qoderForAgg(); p != nil {
 			for _, m := range p.catalogSnapshot() {
 				if m.Key == model || m.DisplayName == model {
+					// 2026-11-07：price_factor 优先（qfmodel 官方 0.1 但 is_free 残留 true）。
+					// 只有 price_factor==0 且 is_free 才是真免费（QoDuck/lmodel）。
+					if m.PriceFactor > 0 {
+						return m.PriceFactor, true
+					}
 					if m.IsFree {
 						return 0, true
 					}
-					return m.PriceFactor, true
+					return 0, false
 				}
 			}
 		}

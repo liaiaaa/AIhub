@@ -685,12 +685,14 @@
       </div>
 
       <details class="rollback" id="probe-details">
-        <summary>探测新模型 <span class="tag">倍率/免费只标有依据的数据</span></summary>
+        <summary>模型更新 <span class="tag">跟着官方清单走</span></summary>
         <div class="rb-body">
           <div class="agg-row">
-            <button class="primary sm" onclick="probeModels()" id="probe-btn">探测</button>
-            <span class="tag" id="probe-note">逐线路对比目录与上游（qoder/zcode 实时目录；dom/intl 尽力而为）</span>
+            <button class="primary sm" onclick="probeModels()" id="probe-btn">探测并更新</button>
+            <button class="sm" onclick="probeModels({purge:false,mode:'supplement'})" id="probe-replace-btn">只补充不删</button>
+            <span class="tag" id="probe-note">点一次＝按官方清单更新：官方新增/下架同步进目录；只把免费项单独汇总。抓不到实时目录时自动只增不删。</span>
           </div>
+          <div id="probe-free"></div>
           <div id="probe-result"></div>
         </div>
       </details>
@@ -2155,20 +2157,61 @@ function gotoModels(line) {
   }, 60);
 }
 
-// ---------- 探测（默认折叠） ----------
-async function probeModels() {
+// ---------- 模型更新（默认折叠） ----------
+// 2026-11-07：点一次＝按官方清单更新目录。普通按钮严格镜像（官方删了也删），
+// 第二按钮是「只补充不删」的保险选项；后端会按 Authoritative 护栏自动降级。
+async function probeModels(opts) {
+  opts = opts || {};
   const btn = document.getElementById('probe-btn');
+  const alt = document.getElementById('probe-replace-btn');
   const box = document.getElementById('probe-result');
-  if (btn) { btn.disabled = true; btn.textContent = '探测中…'; }
-  if (box) box.innerHTML = '<div class="gw-desc">探测中…</div>';
+  const freeBox = document.getElementById('probe-free');
+  if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
+  if (alt) alt.disabled = true;
+  if (box) box.innerHTML = '<div class="gw-desc">正在拉取官方清单并更新目录…</div>';
+  if (freeBox) freeBox.innerHTML = '';
   try {
-    const r = await fetch('/api/models/probe', { signal: AbortSignal.timeout(30000) });
+    const r = await fetch('/api/models/probe/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts), signal: AbortSignal.timeout(60000)
+    });
     const d = await r.json();
+    const sync = d.sync || {};
+    renderProbeFree(sync.free || []);
     renderProbe(d.lines || []);
+    await aggRefresh();
+    renderProbe(d.lines || []); // 重画，让「已在目录」标记反映本次更新
+    const bits = [];
+    bits.push('新增 ' + (sync.added || []).length + '、移除 ' + (sync.removed || []).length);
+    if ((sync.skipped || []).length) bits.push('未删（清单不可靠/为空）：' + (sync.skipped || []).join('、'));
+    if (sync.backup) bits.push('删前备份：<span class="slug">' + escHTML(sync.backup) + '</span>');
+    if (box) box.insertAdjacentHTML('afterbegin',
+      '<div class="rb-note"><b>本次模型更新</b> · ' + bits.join(' · ') + '</div>');
+    showMsg(d.msg || '模型更新完成', d.ok === false);
   } catch (e) {
-    if (box) box.innerHTML = '<div class="gw-desc">探测失败：' + e + '</div>';
+    if (box) box.innerHTML = '<div class="gw-desc">模型更新失败：' + escHTML(String(e)) + '</div>';
+    showMsg('模型更新失败：' + e, true);
   }
-  if (btn) { btn.disabled = false; btn.textContent = '探测'; }
+  if (btn) { btn.disabled = false; btn.textContent = '探测并更新'; }
+  if (alt) alt.disabled = false;
+}
+
+function renderProbeFree(list) {
+  const box = document.getElementById('probe-free');
+  if (!box) return;
+  if (!list || !list.length) {
+    box.innerHTML = '<div class="rb-note">本次没有发现免费模型。</div>';
+    return;
+  }
+  box.innerHTML = '<div class="rb-note"><b>本次免费模型（' + list.length + '）</b></div>' +
+    '<div class="agg-row">' + list.map(function (name) {
+      return '<span class="chip ok" style="font-size:11px">' + escHTML(name) + '</span>';
+    }).join('') + '</div>';
+}
+
+// probeBackend：Qoder 聚合目录用官方 DisplayName（不是 qfmodel 这类内部 key）。
+function probeBackend(l, m) {
+  return (l.line === 'qoder' && m.display) ? m.display : m.id;
 }
 // aggHasSlug 目录模型里是否已有这个 slug（数据来自 /api/agg/models 缓存）。
 function aggHasSlug(slug) {
@@ -2189,9 +2232,10 @@ function renderProbe(lines) {
         (l.free_count ? ' <span class="ratio free">免费 ' + l.free_count + '</span>' : '') +
         '</td><td class="op">' + (l.new_count ? '<button class="sm" onclick="probeAddAll(\'' + l.line + '\',this)">新模型全加入</button>' : '') + '</td></tr>';
       const rows = (l.models || []).map(function (m) {
+        const backend = probeBackend(l, m);
         const shown = m.display ? (m.display + ' <span style="color:var(--faint)">(' + m.id + ')</span>') : m.id;
-        const inCat = aggHasSlug(l.line + '.' + m.id) ? ' <span class="chip ok" style="font-size:10.5px">已在目录</span>' : '';
-        const addBtn = '<button class="sm" onclick="probeAdd(\'' + l.line + '\',\'' + m.id + '\',this)">加入目录</button>';
+        const inCat = aggHasSlug(l.line + '.' + backend) ? ' <span class="chip ok" style="font-size:10.5px">已在目录</span>' : '';
+        const addBtn = '<button class="sm" onclick="probeAdd(\'' + l.line + '\',\'' + backend + '\',this)">加入目录</button>';
         return '<tr' + (m.new ? '' : ' class="down"') + '><td class="slug">' + shown + metaSub(m.meta) + inCat + '</td>' +
           '<td>' + (m.new ? '<span class="ratio free">新</span>' : '') + '</td>' +
           '<td class="op">' + (m.ratio ? '<span class="ratio' + (m.free ? ' free' : '') + '">' + m.ratio + '</span>' : '<span style="color:var(--faint)">—</span>') + ' ' + addBtn + '</td></tr>';

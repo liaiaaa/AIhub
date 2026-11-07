@@ -244,11 +244,10 @@ func (p *QoderProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		entry := map[string]any{
 			"id": id, "object": "model", "created": 1700000000, "owned_by": m.Vendor,
 		}
-		// dsh 等客户端读 name：官方显示名 + 计费倍率（目录 price_factor）
-		if m.IsFree {
-			entry["name"] = id + " · 免费"
-		} else if m.PriceFactor > 0 {
-			entry["name"] = id + " · " + ratioLabel(m.PriceFactor)
+		// dsh 等客户端读 name：官方显示名 + 计费倍率。
+		// 2026-11-07：走 qoderEntryRatio，price_factor 优先（qfmodel 0.1x 不再误标免费）。
+		if label, _ := qoderEntryRatio(m); label != "" {
+			entry["name"] = id + " · " + label
 		}
 		if id != m.Key {
 			entry["resolves_to"] = m.Key // 透出真实 key，便于排查

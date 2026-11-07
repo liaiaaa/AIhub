@@ -90,6 +90,7 @@ func main() {
 	mux.HandleFunc("/api/dom/cred", hub.apiDomCred)
 	mux.HandleFunc("/api/dom/switch", hub.apiDomSwitch)
 	mux.HandleFunc("/api/models/probe", hub.apiModelsProbe)
+	mux.HandleFunc("/api/models/probe/sync", hub.apiModelsProbeSync)
 	// 观测类只读接口（UI 的限流看板 / 日志弹层 / 设置页维护区）
 	mux.HandleFunc("/api/limits", hub.apiLimits)
 	mux.HandleFunc("/api/logs/tail", hub.apiLogsTail)

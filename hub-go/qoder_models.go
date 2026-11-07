@@ -29,9 +29,15 @@ import (
 // QoderModelListURL 官方模型目录接口（COSY 签名，GET，body 为空）。
 const QoderModelListURL = "https://gateway.qoder.com.cn/algo/api/v2/model/list"
 
-// qoderCatalogGroup 动态拉取时采用的清单分组。
-// chat 组包含全部 14 个模型，与桌面端 chat_model_preferences 表完全一致。
+// qoderCatalogGroup 动态拉取时采用的**主**清单分组。
+// chat 组是对话主目录；2026-11-07 起再并上 qoderAuxCatalogGroups 里独有的模型
+// （QoDuck/lmodel 只在 app 分组，过去只取 chat 直接漏掉，用户报「上新了免费的
+// qoduck 却探测不出来」）。
 const qoderCatalogGroup = "chat"
+
+// qoderAuxCatalogGroups 补充分组：按 key 去重后把主分组没有的条目并进来。
+// 只加「客户端专属」分组，不碰 byok_*（自建模型）与 experts（专家预设）。
+var qoderAuxCatalogGroups = []string{"app"}
 
 // qoderModelEntry 目录中的一个模型。
 type qoderModelEntry struct {
@@ -76,13 +82,22 @@ func defaultQoderCatalog() []qoderModelEntry {
 		{Key: "auto", DisplayName: "Auto", Vendor: "qoder-cn", PriceFactor: 0.5,
 			IsReasoning: true, IsVision: true, IsDefault: true, MaxInputTokens: 200000},
 		{Key: "qmodel_38max", DisplayName: "Qwen3.8-Max", Vendor: "alibaba", PriceFactor: 0.5,
+			IsReasoning: true, IsVision: true, MaxInputTokens: 180000,
+			ContextWindows: []string{"200K", "400K", "1M"},
+			Efforts:        []string{"low", "medium", "xhigh"}, DefaultEffort: "medium", SupportsDisabled: true},
+		// 2026-11-07 对齐官方 /algo/api/v2/model/list 真值：qfmodel 的 price_factor=0.1，
+		// is_free 残留 true。倍率判定已改为 price_factor 优先（见 qoderEntryRatio），
+		// 这里保留两个字段与官方一致，避免「内置快照显示免费、动态目录显示 0.1x」。
+		{Key: "qfmodel", DisplayName: "Qwen3.8-Flash", Vendor: "alibaba", PriceFactor: 0.1,
 			IsFree: true, IsReasoning: true, IsVision: true, MaxInputTokens: 180000,
 			ContextWindows: []string{"200K", "400K", "1M"},
 			Efforts:        []string{"low", "medium", "xhigh"}, DefaultEffort: "medium", SupportsDisabled: true},
-		{Key: "qfmodel", DisplayName: "Qwen3.8-Flash", Vendor: "alibaba", PriceFactor: 0,
+		// QoDuck（2026-11-07 上线）：只在 app 分组，price_factor=0 / tags=["free"]，
+		// 真免费。离线兜底也带上它，免得没网时探测又看不见。
+		{Key: "lmodel", DisplayName: "QoDuck", Vendor: "qoder-cn", PriceFactor: 0,
 			IsFree: true, IsReasoning: true, IsVision: true, MaxInputTokens: 180000,
 			ContextWindows: []string{"200K", "400K", "1M"},
-			Efforts:        []string{"low", "medium", "xhigh"}, DefaultEffort: "medium", SupportsDisabled: true},
+			Efforts:        []string{"low", "high", "xhigh"}, DefaultEffort: "high", SupportsDisabled: true},
 		{Key: "qmodel_latest", DisplayName: "Qwen3.7-Max", Vendor: "alibaba", PriceFactor: 0.5,
 			IsReasoning: true, IsVision: true, MaxInputTokens: 180000,
 			ContextWindows: []string{"200K", "400K", "1M"}, SupportsDisabled: true},
@@ -221,82 +236,135 @@ func parseQoderModelList(raw []byte) ([]qoderModelEntry, error) {
 		return nil, fmt.Errorf("解析模型目录 JSON 失败：%w", err)
 	}
 
-	var list []qoderRemoteModel
-	if rawChat, ok := groups[qoderCatalogGroup]; ok {
-		if err := json.Unmarshal(rawChat, &list); err != nil {
-			return nil, fmt.Errorf("解析 %s 分组失败：%w", qoderCatalogGroup, err)
+	// parseOne 把一个分组解析成目录条目（过滤 enable=false / 空 key）。
+	parseOne := func(name string) ([]qoderModelEntry, error) {
+		rawList, ok := groups[name]
+		if !ok {
+			return nil, nil
 		}
+		var list []qoderRemoteModel
+		if err := json.Unmarshal(rawList, &list); err != nil {
+			return nil, fmt.Errorf("解析 %s 分组失败：%w", name, err)
+		}
+		out := make([]qoderModelEntry, 0, len(list))
+		for _, m := range list {
+			key := strings.TrimSpace(m.Key)
+			if key == "" {
+				continue
+			}
+			if m.Enable != nil && !*m.Enable {
+				continue // 官方已下架
+			}
+			display := strings.TrimSpace(m.DisplayName)
+			if display == "" {
+				display = key
+			}
+			windows := make([]string, 0, len(m.ContextCfg))
+			for wn := range m.ContextCfg {
+				windows = append(windows, wn)
+			}
+			sort.Strings(windows)
+			efforts, defaultEffort, supportsDisabled := qoderParseThinkingConfig(m.ThinkingConfig)
+			ctxCfg := make(map[string]qoderContextTier, len(m.ContextCfg))
+			for wn, t := range m.ContextCfg {
+				ctxCfg[wn] = qoderContextTier{TokenCount: t.TokenCount, IsDefault: t.IsDefault}
+			}
+			if len(ctxCfg) == 0 {
+				ctxCfg = qoderContextConfigFromWindows(windows)
+			}
+			out = append(out, qoderModelEntry{
+				Key:              key,
+				DisplayName:      display,
+				Vendor:           qoderVendorFor(display),
+				PriceFactor:      m.PriceFactor,
+				IsFree:           m.IsFree,
+				IsReasoning:      m.IsReasoning,
+				IsVision:         m.IsVL,
+				IsDefault:        m.IsDefault,
+				MaxInputTokens:   m.MaxInput,
+				MaxOutputTokens:  m.MaxOutput,
+				ContextWindows:   windows,
+				ContextConfig:    ctxCfg,
+				Efforts:          efforts,
+				DefaultEffort:    defaultEffort,
+				SupportsDisabled: supportsDisabled,
+			})
+		}
+		return out, nil
 	}
-	if len(list) == 0 {
-		// 分组名变动时的兜底：取第一个非空数组
+
+	// 主分组（chat）优先；缺失或全被过滤空时回退第一个非空分组（保留旧行为）。
+	mainName := qoderCatalogGroup
+	main, err := parseOne(mainName)
+	if err != nil {
+		return nil, err
+	}
+	if len(main) == 0 {
 		names := make([]string, 0, len(groups))
-		for name := range groups {
-			names = append(names, name)
+		for n := range groups {
+			names = append(names, n)
 		}
 		sort.Strings(names)
-		for _, name := range names {
-			var cand []qoderRemoteModel
-			if json.Unmarshal(groups[name], &cand) == nil && len(cand) > 0 {
-				list = cand
+		for _, n := range names {
+			cand, e := parseOne(n)
+			if e == nil && len(cand) > 0 {
+				main, mainName = cand, n
 				break
 			}
 		}
 	}
-	if len(list) == 0 {
+	if len(main) == 0 {
 		return nil, fmt.Errorf("模型目录为空（分组：%d 个）", len(groups))
 	}
 
-	out := make([]qoderModelEntry, 0, len(list))
-	for _, m := range list {
-		key := strings.TrimSpace(m.Key)
-		if key == "" {
+	// 补充分组：按 key 去重并上主分组没有的条目。
+	// 2026-11-07：QoDuck（lmodel）只在 app 分组，过去只取 chat 直接漏掉，
+	// 用户报「今天上了免费的 qoduck 也没探测出来」。
+	seen := make(map[string]bool, len(main)+8)
+	out := make([]qoderModelEntry, 0, len(main)+8)
+	for _, e := range main {
+		if seen[e.Key] {
 			continue
 		}
-		if m.Enable != nil && !*m.Enable {
-			continue // 官方已下架
-		}
-		display := strings.TrimSpace(m.DisplayName)
-		if display == "" {
-			display = key
-		}
-		windows := make([]string, 0, len(m.ContextCfg))
-		for name := range m.ContextCfg {
-			windows = append(windows, name)
-		}
-		sort.Strings(windows)
-		efforts, defaultEffort, supportsDisabled := qoderParseThinkingConfig(m.ThinkingConfig)
-
-		// 上下文档位：官方 context_config 优先；缺失时从档位标签推（内置快照路径）
-		ctxCfg := make(map[string]qoderContextTier, len(m.ContextCfg))
-		for name, t := range m.ContextCfg {
-			ctxCfg[name] = qoderContextTier{TokenCount: t.TokenCount, IsDefault: t.IsDefault}
-		}
-		if len(ctxCfg) == 0 {
-			ctxCfg = qoderContextConfigFromWindows(windows)
-		}
-
-		out = append(out, qoderModelEntry{
-			Key:              key,
-			DisplayName:      display,
-			Vendor:           qoderVendorFor(display),
-			PriceFactor:      m.PriceFactor,
-			IsFree:           m.IsFree,
-			IsReasoning:      m.IsReasoning,
-			IsVision:         m.IsVL,
-			IsDefault:        m.IsDefault,
-			MaxInputTokens:   m.MaxInput,
-			MaxOutputTokens:  m.MaxOutput,
-			ContextWindows:   windows,
-			ContextConfig:    ctxCfg,
-			Efforts:          efforts,
-			DefaultEffort:    defaultEffort,
-			SupportsDisabled: supportsDisabled,
-		})
+		seen[e.Key] = true
+		out = append(out, e)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("模型目录无有效条目")
+	for _, name := range qoderAuxCatalogGroups {
+		if name == mainName {
+			continue
+		}
+		extra, e := parseOne(name)
+		if e != nil {
+			continue
+		}
+		for _, m := range extra {
+			if seen[m.Key] {
+				continue
+			}
+			seen[m.Key] = true
+			out = append(out, m)
+		}
 	}
 	return out, nil
+}
+
+// qoderEntryRatio 统一的「展示倍率 / 是否免费」判定。
+//
+// 2026-11-07 修 Qoder 探测两个口径 bug（官方原始目录 58318B 实测）：
+//   - qfmodel(Qwen3.8-Flash)：price_factor=0.1，但 is_free=true（残留布尔），
+//     旧逻辑 `if IsFree {免费} else if PriceFactor>0` 让残留字段盖掉真倍率，
+//     于是客户端明明是 0.1x，探测还显示「免费」。现在 price_factor>0 一律按倍率。
+//   - lmodel(QoDuck)：price_factor=0、is_free=true、tags=["free"] → 真免费。
+//
+// 规则：price_factor>0 → 倍率；==0 且 is_free → 免费；==0 且 !is_free → 无数据。
+func qoderEntryRatio(e qoderModelEntry) (label string, free bool) {
+	if e.PriceFactor > 0 {
+		return ratioLabel(e.PriceFactor), false
+	}
+	if e.IsFree {
+		return "免费", true
+	}
+	return "", false
 }
 
 // ---------- 别名表 ----------
@@ -352,7 +420,7 @@ func buildQoderAliases(catalog []qoderModelEntry) map[string]string {
 	return aliases
 }
 
-// qoderDefaultKey 从目录里挑默认模型：优先 qfmodel（Qwen3.8-Flash，免费），
+// qoderDefaultKey 从目录里挑默认模型：优先 qfmodel（Qwen3.8-Flash，官方 0.1x），
 // 其次官方 is_default 项，最后取第一个。
 func qoderDefaultKey(catalog []qoderModelEntry) string {
 	for _, m := range catalog {

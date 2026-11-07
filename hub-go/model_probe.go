@@ -11,8 +11,13 @@ package main
 //   - trae / zcode：没有公开的每模型倍率（Trae 按次扣积分），一律不标注。
 //
 // 「新模型」判定：动态目录线路（qoder/zcode）与内置目录做差集。
+//
+// 2026-11-07：探测同时是一份「官方清单快照」。Authoritative 表示这次真的
+// 打到了官方目录（或来自代码内维护的权威静态表），同步目录时才可以据此删除
+// 官方已下架的模型；只有离线快照/兜底数据时只增不删。
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -24,12 +29,13 @@ import (
 )
 
 type modelProbeItem struct {
-	ID      string         `json:"id"`
-	Display string         `json:"display,omitempty"` // 官方显示名（qoder 内部 key 的翻译）
-	Ratio   string         `json:"ratio,omitempty"`   // "免费" / "0.06x"；空 = 无公开倍率数据
-	Meta    map[string]any `json:"meta,omitempty"`    // 上下文/输入上限/思考档位
-	Free    bool           `json:"free"`
-	New     bool           `json:"new"`
+	ID       string         `json:"id"`
+	Display  string         `json:"display,omitempty"` // 官方显示名（qoder 内部 key 的翻译）
+	Ratio    string         `json:"ratio,omitempty"`   // "免费" / "0.06x"；空 = 无公开倍率数据
+	Meta     map[string]any `json:"meta,omitempty"`    // 上下文/输入上限/思考档位
+	Free     bool           `json:"free"`
+	New      bool           `json:"new"`
+	Official bool           `json:"official,omitempty"` // 来自官方目录（而非本地手工兜底）；同步时只有这些条目算「官方还在」
 }
 
 type modelProbeLine struct {
@@ -39,6 +45,10 @@ type modelProbeLine struct {
 	Models  []modelProbeItem `json:"models"`
 	NewCnt  int              `json:"new_count"`
 	FreeCnt int              `json:"free_count"`
+	// Authoritative 这份清单确实来自官方实时目录（而非离线内置快照/兜底）。
+	// 「一次模型更新」只允许拿它删掉已下架的模型；拿到的是快照时只增不删，
+	// 免得某条线路临时不可达就把用户目录清空。
+	Authoritative bool `json:"authoritative"`
 }
 
 // sortModelsFreeFirst 有倍率的按倍率升序（免费最前），无倍率的排后面按 id 排序。
@@ -137,6 +147,23 @@ func (h *Hub) domIntlItem(line, id string) modelProbeItem {
 	return item
 }
 
+// probeQoderFetch 主动抓一次 Qoder 官方模型目录。
+//
+// 做成包级变量：单测能注入假上游，不必依赖真实凭据与网络；
+// 生产路径就是「解一次凭据 + 带签名 GET /algo/api/v2/model/list」。
+var probeQoderFetch = func() ([]qoderModelEntry, error) {
+	auth, err := NewQoderAuth()
+	if err != nil {
+		return nil, err
+	}
+	if err := auth.Reload(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return fetchQoderCatalog(ctx, auth, directClientFor("qoder"), QoderModelListURL)
+}
+
 // probeLine 探测一条线路。独立函数便于并发与测试。
 func probeLine(h *Hub, key string) modelProbeLine {
 	line := modelProbeLine{Line: key}
@@ -165,12 +192,18 @@ func probeLine(h *Hub, key string) modelProbeLine {
 		// 「上游无公开模型目录接口」——那是错的，接口有，只是不在那两个路径上，
 		// 而且要 WorkBuddy/CodeBuddy 形态的 UA。改过来之后倍率和上下文不再是手工表。
 		var upstream []string
-		cat := h.refreshWBCatalog(key, p, forceWBDirectory)
+		fresh := h.refreshWBCatalog(key, p, forceWBDirectory) // 只有真抓到实时目录才算权威
+		cat := fresh
 		if cat == nil {
 			cat = wbCatalogGet(key) // 抓不动（线路没起/没凭据）就用快照，过期也比没有强
 		}
 		if cat != nil {
-			line.Note = "倍率/上下文来自上游 /v3/config（实时目录）；抓取失败时回落手工表 model_ratios.go"
+			if fresh != nil {
+				line.Note = "倍率/上下文来自上游 /v3/config（实时目录）；抓取失败时回落手工表 model_ratios.go"
+				line.Authoritative = true // 真抓到实时目录，才允许按它删除已下架模型
+			} else {
+				line.Note = "上游目录抓取失败，本次用离线快照（只增不删）"
+			}
 			seen := map[string]bool{}
 			for _, e := range cat.Entries {
 				if !e.Chat || seen[e.ID] {
@@ -179,6 +212,7 @@ func probeLine(h *Hub, key string) modelProbeLine {
 				seen[e.ID] = true
 				upstream = append(upstream, e.ID)
 				it := h.domIntlItem(key, e.ID)
+				it.Official = fresh != nil // 快照条目不算官方清单，同步时不能拿它删东西
 				if e.Name != "" {
 					it.Display = e.Name
 				}
@@ -235,42 +269,36 @@ func probeLine(h *Hub, key string) modelProbeLine {
 			}
 		}
 	case "qoder":
-		h.mu.Lock()
-		p := h.qoder
-		h.mu.Unlock()
-		if p == nil || !p.Running() {
-			line.Note = "线路未启动，仅列出内置目录"
-		} else {
-			line.Up = true
-			line.Note = "倍率/免费来自 Qoder 官方目录（实时刷新）"
-			known := map[string]bool{}
-			for _, e := range defaultQoderCatalog() {
-				known[e.Key] = true
-			}
-			for _, e := range p.catalogSnapshot() {
-				it := modelProbeItem{ID: e.Key, Display: e.DisplayName}
-				if e.IsFree {
-					it.Free = true
-					it.Ratio = "免费"
-				} else if e.PriceFactor > 0 {
-					it.Ratio = ratioLabel(e.PriceFactor)
-				}
-				it.Meta = metaJSON(h.modelMeta("qoder", e.Key))
-				it.New = !known[e.Key]
-				line.Models = append(line.Models, it)
-			}
+		// 2026-11-07：不再依赖「线路是否已启动」。探测时主动抓官方目录，
+		// 这样线路没起也能看到最新清单（QoDuck 就是这样漏掉的）。
+		// 抓到 → 权威（可删）；抓不到 → 内置快照（只增不删）。
+		known := map[string]bool{}
+		for _, e := range defaultQoderCatalog() {
+			known[e.Key] = true
 		}
-		if len(line.Models) == 0 {
+		entries, err := probeQoderFetch()
+		if err != nil || len(entries) == 0 {
+			line.Note = "抓不到官方目录（沿用内置快照，本次只增不删）"
+			if err != nil {
+				logHub("qoder 目录探测失败：%v", err)
+			}
 			for _, e := range defaultQoderCatalog() {
 				it := modelProbeItem{ID: e.Key, Display: e.DisplayName}
-				if e.IsFree {
-					it.Free = true
-					it.Ratio = "免费"
-				} else if e.PriceFactor > 0 {
-					it.Ratio = ratioLabel(e.PriceFactor)
-				}
+				it.Ratio, it.Free = qoderEntryRatio(e)
+				it.Meta = metaJSON(h.modelMeta("qoder", e.Key))
 				line.Models = append(line.Models, it)
 			}
+			break
+		}
+		line.Up = true
+		line.Authoritative = true
+		line.Note = "倍率/免费来自 Qoder 官方目录（实时抓取）"
+		for _, e := range entries {
+			it := modelProbeItem{ID: e.Key, Display: e.DisplayName, Official: true}
+			it.Ratio, it.Free = qoderEntryRatio(e)
+			it.Meta = metaJSON(h.modelMeta("qoder", e.Key))
+			it.New = !known[e.Key]
+			line.Models = append(line.Models, it)
 		}
 	case "zcode":
 		h.mu.Lock()
@@ -296,20 +324,38 @@ func probeLine(h *Hub, key string) modelProbeLine {
 		}
 	case "trae":
 		line.Up = true
+		line.Authoritative = true // 代码内维护的权威清单
 		line.Note = "按次扣积分、无公开每模型倍率，不标注免费/倍率"
 		for _, m := range TraeModels {
-			line.Models = append(line.Models, modelProbeItem{ID: m})
+			line.Models = append(line.Models, modelProbeItem{ID: m, Official: true})
 		}
 	case "mimo":
 		line.Note = "目录固定"
+	case "teleagent":
+		// 2026-11-07：TeleAgent 的模型表是代码内维护的权威清单
+		// （来自应用自己的 model-catalog.json + 源码种子），隐藏/禁用的不对外。
+		line.Up = true
+		line.Authoritative = true
+		line.Note = "清单来自 TeleAgent 应用目录；轻量/轻速不对外展示"
+		for _, id := range teleagentPublicModels() {
+			it := modelProbeItem{ID: id, Official: true}
+			if r, ok := h.modelRatio("teleagent", id); ok {
+				it.Ratio = ratioLabel(r)
+				it.Free = r == 0
+			}
+			it.Meta = metaJSON(h.modelMeta("teleagent", id))
+			line.Models = append(line.Models, it)
+		}
 	case "oc":
 		// OpenCode 免费档（2026-10-15）：清单是静态表（上游 /v1/models 不返回 limit），
 		// 全部 0 计费，元数据带上下文与输出上限。
 		line.Up = true
+		line.Authoritative = true
 		line.Note = "OpenCode 匿名 public 凭据，全部免费；上下文见元数据"
 		for _, m := range opencodeFreeModels {
 			line.Models = append(line.Models, modelProbeItem{
-				ID: m.ID, Free: true, Ratio: "免费", Meta: metaJSON(h.modelMeta("oc", m.ID)),
+				ID: m.ID, Free: true, Ratio: "免费", Official: true,
+				Meta: metaJSON(h.modelMeta("oc", m.ID)),
 			})
 		}
 	}

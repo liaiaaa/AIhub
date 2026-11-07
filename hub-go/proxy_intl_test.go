@@ -32,9 +32,21 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
+// useRepoRoot 把 hubRoot 临时指回真实数据根（依赖真实凭证的测试用），并在
+// 测试结束时恢复。2026-11-07 修：原来各测试直接 `hubRoot = repoRoot(t)` 不恢复，
+// TestCredDiscovery 无 env 守卫、每次 go test 都跑，把 hubRoot 永久指回真实根，
+// 其后所有测试的 logHub/写盘都落进生产数据根（真实 hub.log 累积了 87 条测试
+// panic）。TestMain 的临时根隔离被它整个击穿。统一走这里，保证用完即还原。
+func useRepoRoot(t *testing.T) {
+	t.Helper()
+	old := hubRoot
+	t.Cleanup(func() { hubRoot = old })
+	hubRoot = repoRoot(t)
+}
+
 func TestCredDiscovery(t *testing.T) {
 	// go test 的二进制在临时目录，hubRoot（exe 上级的上级）会算错，手动指回真实根。
-	hubRoot = repoRoot(t)
+	useRepoRoot(t)
 	// 2026-10-21 开源审查：这里原来断言几个写死的凭证目录名（作者本机账号），
 	// 既是个人称呼又依赖特定机器。改成不认名字，只认「目录里有没有凭证文件」——
 	// 这才是 credDirs() 的真实契约（目录名由用户自己起）。

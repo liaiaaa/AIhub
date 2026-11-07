@@ -65,7 +65,7 @@ func TestLiveHeartbeatProbeIntl(t *testing.T) {
 	if os.Getenv("HEARTBEAT_LIVE_TEST") != "1" {
 		t.Skip("跳过真机心跳探针验证；设置 HEARTBEAT_LIVE_TEST=1 启用")
 	}
-	hubRoot = repoRoot(t)
+	useRepoRoot(t)
 	dir := ""
 	for _, d := range credDirs() {
 		dir = d
@@ -121,7 +121,7 @@ func TestLiveHeartbeatProbeDom(t *testing.T) {
 	if os.Getenv("HEARTBEAT_LIVE_TEST") != "1" {
 		t.Skip("跳过真机 dom 心跳探针；设置 HEARTBEAT_LIVE_TEST=1 启用")
 	}
-	hubRoot = repoRoot(t)
+	useRepoRoot(t)
 	dir := liveCredDir(t, "CodeBuddy凭证")
 	p := NewDomProxyDir(dir)
 	if path := p.AuthFilePath(); path == "" || !fileExists(path) {

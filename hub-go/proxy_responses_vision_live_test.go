@@ -28,7 +28,6 @@ import (
 	"time"
 )
 
-
 // ---------- 测试用的小工具（造图 / 拼 PNG 分块） ----------
 
 // solidPNGDataURL 生成一张纯色 PNG 的 data URL，避免依赖外部图片文件。
@@ -92,7 +91,7 @@ func TestLiveToolResultImage(t *testing.T) {
 	if os.Getenv("INTL_LIVE_TEST") == "" {
 		t.Skip("跳过真实上游测试；设置 INTL_LIVE_TEST=1 启用")
 	}
-	hubRoot = repoRoot(t)
+	useRepoRoot(t)
 	// 逐个凭证试：11140 是账号级风控，跟请求内容无关，换一个凭据继续。
 	want := os.Getenv("INTL_LIVE_CRED")
 	cands := []string{}

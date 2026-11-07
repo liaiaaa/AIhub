@@ -46,7 +46,7 @@ func TestLiveDomIdentity(t *testing.T) {
 	if os.Getenv("DOM_LIVE_TEST") == "" {
 		t.Skip("跳过 dom 真机验证；设置 DOM_LIVE_TEST=1 启用")
 	}
-	hubRoot = repoRoot(t) // go test 的二进制在临时目录，hubRoot 会算错；先指回真实数据根
+	useRepoRoot(t) // go test 的二进制在临时目录，hubRoot 会算错；先指回真实数据根
 	dir := liveCredDir(t, "CodeBuddy凭证")
 	p := NewDomProxyDir(dir)
 	path := p.AuthFilePath()
@@ -117,7 +117,7 @@ func TestLiveDomCatalogAndBilling(t *testing.T) {
 	if os.Getenv("DOM_LIVE_TEST") == "" {
 		t.Skip("跳过 dom 真机验证；设置 DOM_LIVE_TEST=1 启用")
 	}
-	hubRoot = repoRoot(t) // go test 的二进制在临时目录，hubRoot 会算错；先指回真实数据根
+	useRepoRoot(t) // go test 的二进制在临时目录，hubRoot 会算错；先指回真实数据根
 	dir := liveCredDir(t, "CodeBuddy凭证")
 	p := NewDomProxyDir(dir)
 	path := p.AuthFilePath()
@@ -161,7 +161,7 @@ func TestLiveIntlIdentity(t *testing.T) {
 	if os.Getenv("INTL_LIVE_TEST") == "" {
 		t.Skip("跳过 intl 真机验证；设置 INTL_LIVE_TEST=1 启用")
 	}
-	hubRoot = repoRoot(t) // 指回真实数据根，否则 credDirs() 扫的是 go test 的临时目录
+	useRepoRoot(t) // 指回真实数据根，否则 credDirs() 扫的是 go test 的临时目录
 	dirs := credDirs()
 	if len(dirs) == 0 {
 		t.Skip("没有国际凭证目录，跳过")

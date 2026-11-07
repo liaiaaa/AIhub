@@ -126,9 +126,29 @@ func aggNormalizeDisplayLocked() {
 	}
 }
 
+// aggSaveLocked 必须在 aggMu 持锁时调用。
+//
+// 2026-11-07 改成 tmp+rename：原来直接 os.WriteFile 且把 err 丢掉，写到一半
+// 被强杀/磁盘满就留半截 JSON，而 aggLoad 解析失败是静默回落默认清单的 ——
+// 表现为「用户手选的目录模型全没了」且日志里查不到任何原因。
+// 与 state.json（hub.go saveStateLocked）保持同一套口径：失败记日志、替换
+// 用 rename，保证目标文件要么是旧的完整内容、要么是新的完整内容。
 func aggSaveLocked() {
-	b, _ := json.MarshalIndent(aggList, "", "  ")
-	os.WriteFile(dataPath("agg_models.json"), b, 0644)
+	b, err := json.MarshalIndent(aggList, "", "  ")
+	if err != nil {
+		logHub("agg_models.json 序列化失败：%v", err)
+		return
+	}
+	path := dataPath("agg_models.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		logHub("agg_models.json 写入临时文件失败：%v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		logHub("agg_models.json 替换失败：%v", err)
+		_ = os.Remove(tmp)
+	}
 }
 
 func aggSnapshot() []aggModel {

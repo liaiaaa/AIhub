@@ -56,7 +56,9 @@ _*.txt
 # ---- 与 Go 代理无关的实验沙箱（0.44GB，独立 scratch 工作区）----
 qoder-sandbox/
 
-# ---- 对外发布版（独立 git 仓库，推送 Gitee，勿嵌套进本仓库）----
+# ---- 旧发布快照（已废弃，见 hub-go-publish/DEPRECATED.md）----
+# 2026-10-22 的一次性快照，独立 git 仓库，与主源码漂移 100+ 文件；
+# origin 已摘除防误推。权威源码在本仓 hub-go/，公开仓库是主仓 origin。
 hub-go-publish/
 
 # ---- 编辑器/系统 ----

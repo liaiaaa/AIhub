@@ -225,8 +225,8 @@ func TestAggDisplayNameCarriesContext(t *testing.T) {
 func TestHumanTokensMega(t *testing.T) {
 	cases := map[int]string{
 		1000000: "1M",
-		1048576: "1M",   // 1MiB 应显示 1M，不是 1048K
-		2097152: "2M",   // 2MiB
+		1048576: "1M", // 1MiB 应显示 1M，不是 1048K
+		2097152: "2M", // 2MiB
 		196608:  "196K",
 		262144:  "262K",
 		65536:   "65K",

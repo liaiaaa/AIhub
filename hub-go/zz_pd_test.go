@@ -18,7 +18,7 @@ func TestZZPd(t *testing.T) {
 	b, s, _ := httpPostJSON(p.Backend+"/console/as/conversations/", h, []byte(body))
 	ds := string(gunzip(b))
 	var r struct {
-		Code int    `json:"code"`
+		Code int `json:"code"`
 		Data struct {
 			ID string `json:"id"`
 		} `json:"data"`

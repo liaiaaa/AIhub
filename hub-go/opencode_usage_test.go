@@ -76,10 +76,10 @@ func TestRecordOpencodeUsageLandsInLedger(t *testing.T) {
 	t.Cleanup(func() { hubRoot = old })
 
 	usage := map[string]any{
-		"prompt_tokens":            float64(1036),
-		"completion_tokens":        float64(32),
-		"total_tokens":             float64(1068),
-		"prompt_tokens_details":    map[string]any{"cached_tokens": float64(1024)},
+		"prompt_tokens":             float64(1036),
+		"completion_tokens":         float64(32),
+		"total_tokens":              float64(1068),
+		"prompt_tokens_details":     map[string]any{"cached_tokens": float64(1024)},
 		"completion_tokens_details": map[string]any{"reasoning_tokens": float64(28)},
 	}
 	recordOpencodeUsage("cat-jam-free", "chat", 200, 2400, usage)

@@ -42,7 +42,7 @@ func TestZZCbIds2(t *testing.T) {
 				hits = append(hits, v)
 			}
 			exp := regexp.MustCompile(`ex_[A-Za-z0-9]+`).FindAllString(ds, -1)
-			fmt.Printf("%-22s scene=%v exp=%v len=%d\n", strings.ReplaceAll(c.Name[:min(18,len([]rune(c.Name)))], " ", ""), uniq(hits), uniq(exp), len(ds))
+			fmt.Printf("%-22s scene=%v exp=%v len=%d\n", strings.ReplaceAll(c.Name[:min(18, len([]rune(c.Name)))], " ", ""), uniq(hits), uniq(exp), len(ds))
 			time.Sleep(150 * time.Millisecond)
 		}
 	}

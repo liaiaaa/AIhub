@@ -2,11 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
-	"io"
 )
 
 func TestZZCb403(t *testing.T) {
@@ -18,14 +18,21 @@ func TestZZCb403(t *testing.T) {
 		h, _ := cm.Headers()
 		req, _ := http.NewRequest("POST", p.Backend+"/v2/chat/completions",
 			strings.NewReader(`{"model":"hy3","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":8}`))
-		for k, v := range h { req.Header.Set(k, v) }
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		cli := &http.Client{Timeout: 30 * time.Second}
 		resp, err := cli.Do(req)
-		if err != nil { fmt.Println(cred, "ERR", err); continue }
+		if err != nil {
+			fmt.Println(cred, "ERR", err)
+			continue
+		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if len(body) > 260 { body = body[:260] }
+		if len(body) > 260 {
+			body = body[:260]
+		}
 		fmt.Printf("%s: HTTP %d %s\n", cred, resp.StatusCode, strings.ReplaceAll(string(body), "\n", " | "))
 	}
 }

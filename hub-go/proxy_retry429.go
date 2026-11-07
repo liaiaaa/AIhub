@@ -293,7 +293,6 @@ func synthResponse(status int, header http.Header, body []byte) *http.Response {
 	}
 }
 
-
 // recordRateLimitFromBody 把上游限流记进台账（供控制台展示「限到几点」）。
 // 从 429 响应体里取业务码、恢复时刻，从 payload 取模型名，从 auth 取 uid/昵称。
 // 任何一步拿不到都安静跳过——记录失败绝不能影响请求本身。

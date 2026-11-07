@@ -22,8 +22,8 @@ func TestZZTravelClaimScheduled(t *testing.T) {
 		st, _, _ := httpGetJSON(p.Backend+"/activity/growth/buddy/travel/status", headers)
 		var env struct {
 			Data struct {
-				State       string `json:"state"`
-				RewardCredit int   `json:"reward_credit"`
+				State        string `json:"state"`
+				RewardCredit int    `json:"reward_credit"`
 			} `json:"data"`
 		}
 		json.Unmarshal(st, &env)

@@ -33,7 +33,7 @@ func TestZZGyDetail(t *testing.T) {
 		if i < 0 {
 			i = strings.Index(ds, "expert")
 		}
-		fmt.Printf("=== %s\n%s\n", c.Name, ds[max(0,i-260):i+160])
+		fmt.Printf("=== %s\n%s\n", c.Name, ds[max(0, i-260):i+160])
 		break
 	}
 }

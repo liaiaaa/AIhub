@@ -30,10 +30,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,13 +41,13 @@ import (
 // wbCatalogEntry 目录里一个模型。
 type wbCatalogEntry struct {
 	ID        string `json:"id"`
-	Name      string `json:"name,omitempty"`      // 官方显示名（可能缺，缺则用 id）
-	Desc      string `json:"desc,omitempty"`      // descriptionZh
-	Ratio     string `json:"ratio,omitempty"`     // "0.79x" / "免费"；空 = 上游没给
-	Context   int    `json:"context,omitempty"`   // 能配的最大上下文（supportedLengths 取大）
-	Default   int    `json:"default,omitempty"`   // 上游默认档位
-	MaxInput  int    `json:"max_input,omitempty"` // 历史字段：**输出**上限（见下方 MaxOutput）
-	Chat      bool   `json:"chat"`                // 是否对话模型（图像/视频模型为 false）
+	Name      string `json:"name,omitempty"`       // 官方显示名（可能缺，缺则用 id）
+	Desc      string `json:"desc,omitempty"`       // descriptionZh
+	Ratio     string `json:"ratio,omitempty"`      // "0.79x" / "免费"；空 = 上游没给
+	Context   int    `json:"context,omitempty"`    // 能配的最大上下文（supportedLengths 取大）
+	Default   int    `json:"default,omitempty"`    // 上游默认档位
+	MaxInput  int    `json:"max_input,omitempty"`  // 历史字段：**输出**上限（见下方 MaxOutput）
+	Chat      bool   `json:"chat"`                 // 是否对话模型（图像/视频模型为 false）
 	IsDefault bool   `json:"is_default,omitempty"` // 上游标的主模型
 
 	// 2026-10-19 新增：把输入/输出上限拆开。
@@ -96,8 +96,9 @@ var (
 // 同一接口同一凭据，只换 UA 就从「一个倍率都没有」变成「32 个都有」。
 // 且新 UA 的 34 个 id 里，hub-go 实际路由的 15 个命中 12 个
 // （glm-5.3 / glm-5.2 / glm-5.1 / glm-5.3-flash / glm-5v-turbo / kimi-k2.7 /
-//  kimi-k2.6 / kimi-k2.5 / deepseek-v4-pro / deepseek-v4-flash / space-bunny /
-//  step-5-preview），比旧 UA 那份「37 个但全是 IDE 补全老 id」有用得多。
+//
+//	kimi-k2.6 / kimi-k2.5 / deepseek-v4-pro / deepseek-v4-flash / space-bunny /
+//	step-5-preview），比旧 UA 那份「37 个但全是 IDE 补全老 id」有用得多。
 //
 // 未命中的 3 个（minimax-m3-pay / hy3-preview-agent / auto）会照旧回落到
 // 静态表 model_ratios.go，不会因为改用目录就失去倍率——见 modelRatio 的优先级链。

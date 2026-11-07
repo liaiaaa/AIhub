@@ -7,9 +7,9 @@ package main
 
 import (
 	"encoding/json"
-	"strings"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )

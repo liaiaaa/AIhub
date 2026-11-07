@@ -41,7 +41,7 @@ func TestJWTExpiryRejectsGarbage(t *testing.T) {
 		"",
 		"not-a-jwt",
 		"only.two",
-		"a.b.c.d",              // 段数不对
+		"a.b.c.d",               // 段数不对
 		"aaa.!!!invalid!!!.ccc", // base64 解不开
 	}
 	for _, c := range cases {

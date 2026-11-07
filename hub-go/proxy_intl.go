@@ -16,8 +16,8 @@ func NewIntlProxy(authDir string) *Proxy {
 		Backend:       "https://www.workbuddy.ai",
 		DefaultDomain: "www.workbuddy.ai",
 		// 国际版同样要报官方桌面端身份；旧值 codebuddy-guoji/1.0 是自报家门的字符串。
-		UserAgent:     officialIntlUA(),
-		DefaultModel:  "deepseek-v4.1-flash",
+		UserAgent:    officialIntlUA(),
+		DefaultModel: "deepseek-v4.1-flash",
 		Models: []string{
 			"deepseek-v4.1-flash",
 			"hy4-preview",

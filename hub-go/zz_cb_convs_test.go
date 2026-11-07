@@ -17,11 +17,11 @@ func TestZZCbConvs(t *testing.T) {
 	var r struct {
 		Data struct {
 			Conversations []struct {
-				ID      string `json:"id"`
-				Name    string `json:"name"`
-				Status  string `json:"status"`
-				Origin  string `json:"conversationOrigin"`
-				Extra   any    `json:"extraInfo"`
+				ID     string `json:"id"`
+				Name   string `json:"name"`
+				Status string `json:"status"`
+				Origin string `json:"conversationOrigin"`
+				Extra  any    `json:"extraInfo"`
 			} `json:"conversations"`
 		} `json:"data"`
 	}

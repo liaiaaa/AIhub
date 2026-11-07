@@ -215,8 +215,8 @@ func anthropicAssistantToChat(content any) []any {
 				name, _ := m["name"].(string)
 				args, _ := json.Marshal(orEmptyObj(m["input"]))
 				toolCalls = append(toolCalls, map[string]any{
-					"id":   id,
-					"type": "function",
+					"id":       id,
+					"type":     "function",
 					"function": map[string]any{"name": name, "arguments": string(args)},
 				})
 			}

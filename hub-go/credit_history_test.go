@@ -81,7 +81,7 @@ func TestCreditHistoryDiffText(t *testing.T) {
 	creditHistoryState.entries["uid-x"] = &creditHistoryEntry{
 		Name: "甲",
 		Days: map[string]creditSnapshot{
-			y: {Remain: 100, Total: 200},
+			y:                               {Remain: 100, Total: 200},
 			time.Now().Format("2006-01-02"): {Remain: 130, Total: 200},
 		},
 	}

@@ -31,7 +31,7 @@ func TestZZGy2(t *testing.T) {
 				ds := string(gunzip(d))
 				i := strings.Index(ds, "ex_")
 				if i > 0 {
-					fmt.Printf("=== %s\n...%s\n", nm, ds[max(0,i-300):i+80])
+					fmt.Printf("=== %s\n...%s\n", nm, ds[max(0, i-300):i+80])
 					return
 				}
 			}

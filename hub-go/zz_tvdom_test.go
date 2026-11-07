@@ -15,8 +15,8 @@ func TestZZTvDom(t *testing.T) {
 	b, _, _ := httpGetJSON(p.Backend+"/activity/growth/buddy/travel/status", h)
 	var r struct {
 		Data struct {
-			State    string        `json:"state"`
-			RecordID json.Number   `json:"record_id"`
+			State    string      `json:"state"`
+			RecordID json.Number `json:"record_id"`
 		} `json:"data"`
 	}
 	json.Unmarshal(gunzip(b), &r)

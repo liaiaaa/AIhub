@@ -304,8 +304,9 @@ func systemProxy(req *http.Request) *url.URL {
 }
 
 // loadSystemProxy 按平台读系统代理设置：
-//   Windows → HKCU 注册表 Internet Settings（reg.exe 只读查询）
-//   其他    → GNOME dconf（gsettings）
+//
+//	Windows → HKCU 注册表 Internet Settings（reg.exe 只读查询）
+//	其他    → GNOME dconf（gsettings）
 //
 // v2rayN 这类客户端在两端都是改「系统代理」而不是导出环境变量（本机实测 shell 与
 // systemd 用户环境里都没有代理变量），所以只读 HTTP_PROXY 会让国际线路直连失败。

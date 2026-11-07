@@ -431,7 +431,6 @@ func usageReport(days int) map[string]any {
 	}
 }
 
-
 // apiUsage 给控制台返回用量报表，?days=7|14|30|0(全部)。
 func (h *Hub) apiUsage(w http.ResponseWriter, r *http.Request) {
 	days := 14

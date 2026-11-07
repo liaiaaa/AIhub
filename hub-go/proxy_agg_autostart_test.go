@@ -1,7 +1,6 @@
 package main
 
 import (
-	"time"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 2026-10-12 事故：聚合口 :8790 在 hub 重启后不自动监听，Codex 桌面版

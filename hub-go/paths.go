@@ -19,8 +19,8 @@ package main
 
 import (
 	"os"
-	"strings"
 	"path/filepath"
+	"strings"
 )
 
 // dataRootEnv 显式指定数据根目录的环境变量名。

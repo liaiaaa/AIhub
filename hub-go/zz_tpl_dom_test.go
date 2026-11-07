@@ -23,7 +23,7 @@ func TestZZTplDom(t *testing.T) {
 		body := fmt.Sprintf(`{"prompt":"回复一个字","model":"hy3","conversationOrigin":"agents","tags":["scene:%d"],"addonSelection":{"welcomeMode":"working","interactionMode":"craft","sceneId":%d},"plugins":[{"id":"welcomemode-work"},{"id":"interactionmode-craft"},{"id":"prompt-common"}]}`, c.sid, c.sid)
 		b, s, _ := httpPostJSON(p.Backend+"/console/as/conversations/", h, []byte(body))
 		var r struct {
-			Code int    `json:"code"`
+			Code int `json:"code"`
 			Data struct {
 				ID string `json:"id"`
 			} `json:"data"`

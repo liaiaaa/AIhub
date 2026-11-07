@@ -19,7 +19,7 @@ func TestZZExpBind(t *testing.T) {
 		body := fmt.Sprintf(`{"prompt":"你好，一句话自我介绍","model":"hy3","conversationOrigin":"agents","%s":"%s"}`, labels[i], vals[i])
 		b, s, _ := httpPostJSON(p.Backend+"/console/as/conversations/", h, []byte(body))
 		var r struct {
-			Code int    `json:"code"`
+			Code int `json:"code"`
 			Data struct {
 				ID string `json:"id"`
 			} `json:"data"`

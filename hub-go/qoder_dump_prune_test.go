@@ -110,10 +110,12 @@ func TestQoderPruneDumpsOnlyTouchesDumps(t *testing.T) {
 // 按体积设门槛——小载荷失败同样要给用户解释。
 //
 // 决定性对照（同账号、同时段、同模型 dfmodel）：
-//   msgs=2    payload=3KB    → 成功（session title）
-//   msgs=14   payload=61KB   → provider_error
-//   msgs=117  payload=235KB  → provider_error
-//   msgs=1517 payload=5.8MB  → provider_error
+//
+//	msgs=2    payload=3KB    → 成功（session title）
+//	msgs=14   payload=61KB   → provider_error
+//	msgs=117  payload=235KB  → provider_error
+//	msgs=1517 payload=5.8MB  → provider_error
+//
 // 61KB 就失败、3KB 就成功，说明旧门槛（512KB 才提示）是错的。
 func TestQoderUpstreamHintAlwaysExplains(t *testing.T) {
 	// 关键：小载荷也必须给提示（61KB 实测会失败）

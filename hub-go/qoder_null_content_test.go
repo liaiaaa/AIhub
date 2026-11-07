@@ -105,9 +105,10 @@ func TestNormalizeRealFailureShape(t *testing.T) {
 // 上游同样整包拒绝。真实请求里很常见（历史截断 / 工具执行到一半）。
 //
 // 二分证据（真实 dump 28 条，末尾 #27 是孤立 tool_calls）：
-//   完整 28 条     → ✗ provider_error
-//   去掉最后一条    → ✅ 通过
-//   补上 tool 响应  → ✅ 通过
+//
+//	完整 28 条     → ✗ provider_error
+//	去掉最后一条    → ✅ 通过
+//	补上 tool 响应  → ✅ 通过
 func TestFillDanglingToolCalls(t *testing.T) {
 	msgs := []any{
 		map[string]any{"role": "user", "content": "hi"},

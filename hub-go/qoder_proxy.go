@@ -169,7 +169,11 @@ func (p *QoderProxy) Start() (bool, string) {
 			}
 		}
 	}()
-	// 异步拉取官方模型目录（失败则沿用内置快照），不阻塞启动路径。
+	// 启动先用上次「探测并更新」落盘的官方快照（比内置快照新），
+	// 再异步向官方刷新；两者都拿不到时才用内置快照兜底。
+	if disk := loadQoderCatalogDB(); len(disk) > 0 {
+		p.setCatalog(disk)
+	}
 	go p.refreshCatalog()
 	if p.log != nil {
 		p.log.Log("==== qoder proxy 启动 ====")

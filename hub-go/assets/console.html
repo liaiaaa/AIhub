@@ -281,6 +281,17 @@
   .rb-note { font-size:12px; color:var(--muted); background:#fdf4e3; border:1px solid #f6e2bd;
              border-radius:9px; padding:8px 11px; margin-bottom:12px; }
 
+  /* 探测结果：每条线路一个可折叠块（2026-11-07 用户要求「区分哪条线路」） */
+  details.probe-line { border:1px solid var(--line); border-radius:var(--radius);
+                       background:#fff; margin-bottom:8px; padding:0 12px; }
+  details.probe-line > summary { cursor:pointer; list-style:none; padding:9px 0;
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-weight:650; font-size:13px; }
+  details.probe-line > summary::-webkit-details-marker { display:none; }
+  details.probe-line > summary::before { content:"▸"; font-size:10px; color:var(--faint); flex:none; }
+  details.probe-line[open] > summary::before { content:"▾"; }
+  details.probe-line > summary:hover { color:var(--brand); }
+  details.probe-line .agg-table { margin-bottom:10px; }
+
   .ctx-row { display:flex; align-items:center; gap:9px; flex-wrap:wrap;
              font-size:12.5px; }
   .ctx-row select { font:inherit; font-size:12.5px; border:1px solid var(--line);
@@ -689,8 +700,7 @@
         <div class="rb-body">
           <div class="agg-row">
             <button class="primary sm" onclick="probeModels()" id="probe-btn">探测并更新</button>
-            <button class="sm" onclick="probeModels({purge:false,mode:'supplement'})" id="probe-replace-btn">只补充不删</button>
-            <span class="tag" id="probe-note">点一次＝按官方清单更新：官方新增/下架同步进目录；只把免费项单独汇总。抓不到实时目录时自动只增不删。</span>
+            <span class="tag" id="probe-note">更新各线路模型库（官方上新/下架），不改你的目录模型；免费项单独汇总。目录里的模型由你手动添加。</span>
           </div>
           <div id="probe-free"></div>
           <div id="probe-result"></div>
@@ -2158,17 +2168,15 @@ function gotoModels(line) {
 }
 
 // ---------- 模型更新（默认折叠） ----------
-// 2026-11-07：点一次＝按官方清单更新目录。普通按钮严格镜像（官方删了也删），
-// 第二按钮是「只补充不删」的保险选项；后端会按 Authoritative 护栏自动降级。
+// 2026-11-07：点一次＝更新各线路的模型库（官方上新/下架），不改用户的目录模型。
+// 目录模型（客户端可见列表）由用户手动添加；这里只提供「加入目录」的便捷按钮。
 async function probeModels(opts) {
   opts = opts || {};
   const btn = document.getElementById('probe-btn');
-  const alt = document.getElementById('probe-replace-btn');
   const box = document.getElementById('probe-result');
   const freeBox = document.getElementById('probe-free');
   if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
-  if (alt) alt.disabled = true;
-  if (box) box.innerHTML = '<div class="gw-desc">正在拉取官方清单并更新目录…</div>';
+  if (box) box.innerHTML = '<div class="gw-desc">正在拉取官方清单并更新模型库…</div>';
   if (freeBox) freeBox.innerHTML = '';
   try {
     const r = await fetch('/api/models/probe/sync', {
@@ -2180,20 +2188,19 @@ async function probeModels(opts) {
     renderProbeFree(sync.free || []);
     renderProbe(d.lines || []);
     await aggRefresh();
-    renderProbe(d.lines || []); // 重画，让「已在目录」标记反映本次更新
+    renderProbe(d.lines || []); // 重画，让「已在目录」标记反映当前目录
     const bits = [];
-    bits.push('新增 ' + (sync.added || []).length + '、移除 ' + (sync.removed || []).length);
-    if ((sync.skipped || []).length) bits.push('未删（清单不可靠/为空）：' + (sync.skipped || []).join('、'));
-    if (sync.backup) bits.push('删前备份：<span class="slug">' + escHTML(sync.backup) + '</span>');
+    bits.push('刷新 ' + (sync.updated || []).length + ' 条线路');
+    bits.push('模型库新增 ' + (sync.added || []).length + '、下架 ' + (sync.removed || []).length);
+    if ((sync.skipped || []).length) bits.push('未更新（抓取失败）：' + (sync.skipped || []).join('、'));
     if (box) box.insertAdjacentHTML('afterbegin',
-      '<div class="rb-note"><b>本次模型更新</b> · ' + bits.join(' · ') + '</div>');
-    showMsg(d.msg || '模型更新完成', d.ok === false);
+      '<div class="rb-note"><b>本次模型库更新</b> · ' + bits.join(' · ') + ' · 你的目录模型未改动</div>');
+    showMsg(d.msg || '模型库更新完成', d.ok === false);
   } catch (e) {
     if (box) box.innerHTML = '<div class="gw-desc">模型更新失败：' + escHTML(String(e)) + '</div>';
     showMsg('模型更新失败：' + e, true);
   }
   if (btn) { btn.disabled = false; btn.textContent = '探测并更新'; }
-  if (alt) alt.disabled = false;
 }
 
 function renderProbeFree(list) {
@@ -2219,18 +2226,22 @@ function aggHasSlug(slug) {
 }
 
 let lastProbeLines = [];
+// probeOpen 记住每条线路的折叠状态（重画时不被打回原形）。
+// 默认：有新模型的线路展开，其余折叠 —— 一屏看清哪条线路上了新东西。
+let probeOpen = {};
 function renderProbe(lines) {
   const box = document.getElementById('probe-result');
   if (!box) return;
   lastProbeLines = lines || [];
-  box.innerHTML = '<div class="agg-row"><span class="tag">排序：免费 → 倍率低 → 倍率未知</span></div>' +
+  box.innerHTML = '<div class="agg-row"><span class="tag">每条线路可折叠 · 排序：免费 → 倍率低 → 倍率未知</span></div>' +
     lines.map(function (l) {
       const name = (SERVICES.find(function (s) { return s.key === l.line; }) || {}).name || l.line;
       const up = l.up ? '<span class="live-tag">可达</span>' : '<span class="off-tag">不可达</span>';
-      const head = '<tr><td class="slug" style="width:40%">' + name + '</td><td>' + up +
-        (l.new_count ? ' <span class="ratio free">新模型 ' + l.new_count + '</span>' : '') +
+      const open = (probeOpen[l.line] !== undefined) ? probeOpen[l.line] : !!l.new_count;
+      const badges = (l.new_count ? ' <span class="ratio free">新模型 ' + l.new_count + '</span>' : '') +
         (l.free_count ? ' <span class="ratio free">免费 ' + l.free_count + '</span>' : '') +
-        '</td><td class="op">' + (l.new_count ? '<button class="sm" onclick="probeAddAll(\'' + l.line + '\',this)">新模型全加入</button>' : '') + '</td></tr>';
+        ' <span class="tag">' + (l.models || []).length + ' 个模型</span>';
+      const summary = '<summary>' + name + ' ' + up + badges + '</summary>';
       const rows = (l.models || []).map(function (m) {
         const backend = probeBackend(l, m);
         const shown = m.display ? (m.display + ' <span style="color:var(--faint)">(' + m.id + ')</span>') : m.id;
@@ -2240,9 +2251,12 @@ function renderProbe(lines) {
           '<td>' + (m.new ? '<span class="ratio free">新</span>' : '') + '</td>' +
           '<td class="op">' + (m.ratio ? '<span class="ratio' + (m.free ? ' free' : '') + '">' + m.ratio + '</span>' : '<span style="color:var(--faint)">—</span>') + ' ' + addBtn + '</td></tr>';
       }).join('');
-      return '<table class="agg-table" style="margin-bottom:10px"><thead><tr>' +
+      const table = '<table class="agg-table"><thead><tr>' +
         '<th style="width:40%">' + name + (l.note ? ' <span style="font-weight:400;color:var(--faint)">· ' + l.note + '</span>' : '') + '</th><th style="width:60px"></th><th class="op" style="width:190px">倍率 · 操作</th></tr></thead>' +
-        '<tbody>' + head + rows + '</tbody></table>';
+        '<tbody>' + rows + '</tbody></table>' +
+        (l.new_count ? '<div class="agg-row" style="margin-top:6px"><button class="sm" onclick="probeAddAll(\'' + l.line + '\',this)">新模型全加入目录</button></div>' : '');
+      return '<details class="probe-line"' + (open ? ' open' : '') +
+        ' ontoggle="probeOpen[\'' + l.line + '\']=this.open">' + summary + table + '</details>';
     }).join('');
 }
 

@@ -1,16 +1,16 @@
 package main
 
-// 「探测 = 一次模型更新」的回归测试（2026-11-07）。
+// 「探测并更新 = 更新线路模型库，绝不动用户的目录模型」（2026-11-07 用户纠正）。
 //
-// 用户补充语义：「跟着官方探测的模型来就行，如果官网 app 里面删除了某个
-// 模型，那你也得删除掉，就可以理解为一次模型更新」。
+// 用户原话：「我想要的探测并更新，是更新数据库里面的模型并不是更新我
+// 【目录模型（客户端可见列表）】这个里面的，聚合线路中的模型我自己手动添加就行」。
 //
-// 测试盯住三件容易做错的事：
-//   1. 默认模式必须整组镜像：官方新增的全加、官方没有的全删；
-//   2. 只有 Official（官方目录条目）能构成保留集合，本地手工兜底不算；
-//   3. 非权威清单、空清单、隐藏线路都绝不能触发删除。
+// 上一版把官方清单整组镜像进 agg_models.json，把用户手动维护的目录冲掉了。
+// 这一版只更新各线路自己的模型库（qoder 目录热替换+落盘、dom/intl 的
+// wb_catalog_*.json 由探测本身刷新），agg_models.json 一个字节都不许动。
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,137 +51,136 @@ func withTestHubRoot(t *testing.T) string {
 	return dir
 }
 
-func TestSyncProbeModelsMirrorsOfficialCatalogByDefault(t *testing.T) {
+func withFakeQoderFetch(t *testing.T, entries []qoderModelEntry, err error) {
+	t.Helper()
+	old := probeQoderFetch
+	probeQoderFetch = func() ([]qoderModelEntry, error) { return entries, err }
+	t.Cleanup(func() { probeQoderFetch = old })
+}
+
+func TestProbeSyncNeverTouchesAggList(t *testing.T) {
 	withNoHiddenLines(t)
 	root := withTestHubRoot(t)
-	withSyncTestAggList(t, []aggModel{
+	before := []aggModel{
 		{Line: "qoder", Slug: "qoder.Qwen3.8-Flash", Backend: "Qwen3.8-Flash"},
-		{Line: "qoder", Slug: "qoder.Retired", Backend: "Retired"},
-		{Line: "trae", Slug: "trae.deepseek-v4.1-flash", Backend: "deepseek-v4.1-flash"},
-	})
-	if err := os.WriteFile(filepath.Join(root, "agg_models.json"), []byte("[]"), 0600); err != nil {
+		{Line: "dom", Slug: "dom.glm-5.3-flash", Backend: "glm-5.3-flash"},
+	}
+	withSyncTestAggList(t, before)
+	// 目录文件也放一份，验证连盘上文件都不动。
+	dirBytes := []byte(`[{"line":"qoder","slug":"qoder.Qwen3.8-Flash","backend":"Qwen3.8-Flash"}]`)
+	if err := os.WriteFile(filepath.Join(root, "agg_models.json"), dirBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
+	withFakeQoderFetch(t, []qoderModelEntry{
+		{Key: "lmodel", DisplayName: "QoDuck", PriceFactor: 0, IsFree: true},
+	}, nil)
 
-	lines := []modelProbeLine{{
-		Line: "qoder", Authoritative: true,
-		Models: []modelProbeItem{
-			{ID: "qfmodel", Display: "Qwen3.8-Flash", Ratio: "0.1x", Official: true},
-			{ID: "lmodel", Display: "QoDuck", Ratio: "免费", Free: true, Official: true},
-			{ID: "manual-only", Display: "Manual", Official: false},
-		},
-	}}
-	res := syncProbeModels(lines, probeSyncOptions{})
+	h := &Hub{qoder: NewQoderProxy()}
+	_, _ = syncModelCatalogs(h, probeSyncOptions{})
 
-	if !containsString(res.Added, "qoder.QoDuck") {
-		t.Fatalf("官方新增的免费模型必须写进目录，得到 %v", res.Added)
+	aggMu.Lock()
+	got := append([]aggModel(nil), aggList...)
+	aggMu.Unlock()
+	if len(got) != len(before) {
+		t.Fatalf("目录模型绝不该被同步改动：before=%d after=%d（%+v）", len(before), len(got), got)
 	}
-	var hasFlash bool
-	for _, m := range aggList {
-		if m.Slug == "qoder.Qwen3.8-Flash" {
-			hasFlash = true
+	for i := range before {
+		if got[i].Slug != before[i].Slug {
+			t.Fatalf("目录模型顺序/内容变了：%+v → %+v", before, got)
 		}
-		if m.Line == "qoder" && (m.Backend == "manual-only" || m.Backend == "Retired") {
-			t.Fatalf("官方清单里没有的条目不该留在目录里：%v", aggList)
-		}
 	}
-	if !hasFlash {
-		t.Fatalf("官方仍在的 0.1x 模型必须保留：%v", aggList)
-	}
-	if containsString(res.Added, "qoder.Manual") || containsString(res.Added, "qoder.manual-only") {
-		t.Fatalf("非官方兜底条目不该被当成官方模型写入，得到 %v", res.Added)
-	}
-	if !containsString(res.Removed, "qoder.Retired") {
-		t.Fatalf("官方清单里没有的旧条目必须删除，得到 %v", res.Removed)
-	}
-	if containsString(res.Removed, "trae.deepseek-v4.1-flash") {
-		t.Fatalf("未参与探测的线路不该被误删，得到 %v", res.Removed)
-	}
-	if len(res.Free) != 1 || res.Free[0] != "qoder.QoDuck" {
-		t.Fatalf("免费汇总必须只报 QoDuck，得到 %v", res.Free)
-	}
-	if res.Backup == "" {
-		t.Fatal("发生删除前必须备份 agg_models.json")
-	}
-	if _, err := os.Stat(filepath.Join(root, res.Backup)); err != nil {
-		t.Fatalf("备份文件必须落在当前数据根：%v", err)
-	}
-	for _, m := range aggList {
-		if m.Line == "qoder" && m.Backend == "manual-only" {
-			t.Fatalf("本地兜底条目不该留在目录里：%v", aggList)
-		}
+	after, err := os.ReadFile(filepath.Join(root, "agg_models.json"))
+	if err != nil || string(after) != string(dirBytes) {
+		t.Fatalf("agg_models.json 磁盘文件也不该动：%q → %q（err=%v）", dirBytes, after, err)
 	}
 }
 
-func TestSyncProbeModelsSupplementNeverRemoves(t *testing.T) {
+func TestProbeSyncUpdatesQoderCatalogDB(t *testing.T) {
 	withNoHiddenLines(t)
-	withTestHubRoot(t)
-	withSyncTestAggList(t, []aggModel{
-		{Line: "qoder", Slug: "qoder.Retired", Backend: "Retired"},
-	})
-	res := syncProbeModels([]modelProbeLine{{
-		Line: "qoder", Authoritative: true,
-		Models: []modelProbeItem{{ID: "lmodel", Display: "QoDuck", Free: true, New: true, Official: true}},
-	}}, probeSyncOptions{Mode: "supplement"})
+	root := withTestHubRoot(t)
+	withSyncTestAggList(t, nil)
+	withFakeQoderFetch(t, []qoderModelEntry{
+		{Key: "qfmodel", DisplayName: "Qwen3.8-Flash", PriceFactor: 0.1, IsFree: true},
+		{Key: "lmodel", DisplayName: "QoDuck", PriceFactor: 0, IsFree: true},
+	}, nil)
 
-	if !containsString(res.Added, "qoder.QoDuck") {
-		t.Fatalf("supplement 仍应补新/免费模型，得到 %v", res.Added)
+	p := NewQoderProxy()
+	// 预置一份「旧模型库」（不含 QoDuck、含一个将被官方下架的旧模型），
+	// 模拟上次更新落盘的清单；内置快照已含 QoDuck，不能拿它当基线。
+	p.setCatalog([]qoderModelEntry{
+		{Key: "qfmodel", DisplayName: "Qwen3.8-Flash", PriceFactor: 0.1},
+		{Key: "retired", DisplayName: "Retired-Model", PriceFactor: 0.5},
+	})
+	h := &Hub{qoder: p}
+	res, _ := syncModelCatalogs(h, probeSyncOptions{})
+
+	// 1. 运行中的线路目录被热替换成官方清单
+	snap := p.catalogSnapshot()
+	if len(snap) != 2 {
+		t.Fatalf("线路模型库应被官方清单替换（2 个），得到 %d：%+v", len(snap), snap)
 	}
-	if len(res.Removed) != 0 {
-		t.Fatalf("supplement 必须只增不删，得到 %v", res.Removed)
+	// 2. 落盘，重启后也能用
+	if _, err := os.Stat(filepath.Join(root, "qoder_catalog.json")); err != nil {
+		t.Fatalf("官方清单必须落盘成 qoder_catalog.json：%v", err)
+	}
+	loaded := loadQoderCatalogDB()
+	if len(loaded) != 2 {
+		t.Fatalf("落盘的清单要能读回（2 个），得到 %d", len(loaded))
+	}
+	// 3. 回执：新增 QoDuck、下架内置快照里的旧模型、免费只报 QoDuck
+	if !containsString(res.Added, "qoder.QoDuck") {
+		t.Fatalf("新增要报 QoDuck，得到 %v", res.Added)
+	}
+	if len(res.Removed) == 0 {
+		t.Fatal("内置快照里被官方下架的旧模型要报 removed")
+	}
+	if !containsString(res.Updated, "qoder") {
+		t.Fatalf("qoder 要写进 Updated，得到 %v", res.Updated)
+	}
+	if !containsString(res.Free, "qoder.QoDuck") {
+		t.Fatalf("免费汇总必须有 QoDuck，得到 %v", res.Free)
+	}
+	if containsString(res.Free, "qoder.Qwen3.8-Flash") {
+		t.Fatalf("qfmodel 是 0.1x，绝不能报成免费，得到 %v", res.Free)
 	}
 }
 
-func TestSyncProbeModelsNonAuthoritativeNeverRemoves(t *testing.T) {
+func TestProbeSyncFetchFailureKeepsDB(t *testing.T) {
 	withNoHiddenLines(t)
-	withTestHubRoot(t)
-	withSyncTestAggList(t, []aggModel{
-		{Line: "qoder", Slug: "qoder.Retired", Backend: "Retired"},
-	})
-	res := syncProbeModels([]modelProbeLine{{
-		Line: "qoder", Authoritative: false,
-		Models: []modelProbeItem{{ID: "lmodel", Display: "QoDuck", Free: true, Official: true}},
-	}}, probeSyncOptions{})
+	root := withTestHubRoot(t)
+	withSyncTestAggList(t, nil)
+	withFakeQoderFetch(t, nil, errors.New("网络不通"))
 
-	if len(res.Removed) != 0 {
-		t.Fatalf("非权威清单绝不删除，得到 %v", res.Removed)
+	p := NewQoderProxy()
+	before := len(p.catalogSnapshot())
+	h := &Hub{qoder: p}
+	res, _ := syncModelCatalogs(h, probeSyncOptions{})
+
+	if len(p.catalogSnapshot()) != before {
+		t.Fatal("抓取失败绝不能动现有模型库")
+	}
+	if _, err := os.Stat(filepath.Join(root, "qoder_catalog.json")); !os.IsNotExist(err) {
+		t.Fatal("抓取失败不该写落盘文件")
 	}
 	if !containsString(res.Skipped, "qoder") {
-		t.Fatalf("非权威线路要写进 Skipped，得到 %v", res.Skipped)
+		t.Fatalf("抓取失败要写进 Skipped，得到 %v", res.Skipped)
 	}
 }
 
-func TestSyncProbeModelsEmptyLineSkipped(t *testing.T) {
-	withNoHiddenLines(t)
+func TestQoderCatalogDBRoundTrip(t *testing.T) {
 	withTestHubRoot(t)
-	withSyncTestAggList(t, []aggModel{
-		{Line: "teleagent", Slug: "teleagent.chat-pro", Backend: "chat-pro"},
-	})
-	res := syncProbeModels([]modelProbeLine{{Line: "teleagent", Authoritative: true}}, probeSyncOptions{})
-
-	if len(res.Removed) != 0 {
-		t.Fatalf("空清单不能清空目录，得到 %v", res.Removed)
+	if got := loadQoderCatalogDB(); got != nil {
+		t.Fatalf("没有落盘文件时应返回 nil，得到 %+v", got)
 	}
-	if !containsString(res.Skipped, "teleagent") {
-		t.Fatalf("空清单也要写进 Skipped，得到 %v", res.Skipped)
+	want := []qoderModelEntry{
+		{Key: "lmodel", DisplayName: "QoDuck", PriceFactor: 0, IsFree: true},
+		{Key: "qfmodel", DisplayName: "Qwen3.8-Flash", PriceFactor: 0.1},
 	}
-}
-
-func TestSyncProbeModelsQoderAliasesKeepOldDisplayName(t *testing.T) {
-	withNoHiddenLines(t)
-	withTestHubRoot(t)
-	withSyncTestAggList(t, []aggModel{
-		{Line: "qoder", Slug: "qoder.Kimi-K3", Backend: "Kimi-K3"},
-	})
-	res := syncProbeModels([]modelProbeLine{{
-		Line: "qoder", Authoritative: true,
-		Models: []modelProbeItem{{ID: "kmodel_latest", Display: "Kimi-K3.1-Pro", Official: true}},
-	}}, probeSyncOptions{})
-
-	if containsString(res.Removed, "qoder.Kimi-K3") {
-		t.Fatalf("旧显示名是官方别名，不该被当官方下架删掉，得到 %v", res.Removed)
+	if err := saveQoderCatalogDB(want); err != nil {
+		t.Fatal(err)
 	}
-	if !containsString(res.Added, "qoder.Kimi-K3.1-Pro") {
-		t.Fatalf("官方新显示名应同步进目录，得到 %v", res.Added)
+	got := loadQoderCatalogDB()
+	if len(got) != 2 || got[0].Key != "lmodel" || got[1].PriceFactor != 0.1 {
+		t.Fatalf("落盘读回不一致：%+v", got)
 	}
 }

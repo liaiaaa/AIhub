@@ -124,6 +124,8 @@ intl_burn.json
 # 用通配而非逐个列举：2026-10-19 接上 dom 目录后生成了 wb_catalog_dom.json，
 # 写死 intl 就又漏一个（和凭证目录当初踩的坑一样）。
 wb_catalog_*.json
+# qoder 官方模型目录落盘（「探测并更新」写入，运行时状态；2026-11-07 补）
+qoder_catalog.json
 
 # ---- 2026-10-21 开源审查补漏 ----
 # 下面这几项此前都没被忽略，`git add -A` 会直接把本机隐私提交进仓库：

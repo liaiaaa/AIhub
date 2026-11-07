@@ -546,6 +546,9 @@ func (p *QoderProxy) refreshCatalog() {
 		return
 	}
 	p.setCatalog(entries)
+	if err := saveQoderCatalogDB(entries); err != nil {
+		logHub("qoder 模型库落盘失败：%v", err)
+	}
 	if p.log != nil {
 		p.log.Log("模型目录已从官方接口刷新：%d 个模型（%s）", len(entries), qoderCatalogSummary(entries))
 	}

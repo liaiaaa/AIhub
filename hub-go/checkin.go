@@ -26,12 +26,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
 )
 
 const qoderOpenAPIBase = "https://openapi.qoder.com.cn"
+
+// qoderCheckinBase 签到用的 API 根地址。做成变量是为了测试里能指向本地假上游，
+// 不打真实 Qoder 接口（与 qoderCredsUsageURL 同一套路）。
+var qoderCheckinBase = qoderOpenAPIBase
 
 // intlReportURL 国际版活跃上报端点。独立成变量，测试里替换为桩服务地址。
 var intlReportURL = "https://www.workbuddy.ai/v2/report"
@@ -216,11 +221,135 @@ func intlChatRequestEvent(uid, modelID, modelName string) map[string]any {
 }
 
 // qoderCheckin Qoder 国内版每日签到：查活动 → 逐个领取。
+//
+// 2026-11-08 修：和国内/国际签到同口径，遍历 qoder-accounts/ 里每个去重后的账号，
+// 用各自快照里的 token 签到；不能只签当前桌面端 live 账号。用户实测「切号前点
+// 签到，切号后另一个号没签」正是这个原因。整个过程不改写 live 凭据、不重启线路。
 func qoderCheckin() checkinResult {
-	token, err := qoderDeviceToken()
-	if err != nil {
-		return checkinResult{OK: false, Detail: err.Error()}
+	accounts := qoderCheckinAccounts()
+	mt, mtype := qoderMachineInfo()
+	parts := make([]string, 0, len(accounts))
+	allOK := true
+	for _, a := range accounts {
+		if a.err != "" {
+			allOK = false
+			parts = append(parts, a.label+" "+a.err)
+			continue
+		}
+		res := qoderCheckinWithToken(a.token, mt, mtype)
+		if !res.OK {
+			allOK = false
+		}
+		parts = append(parts, a.label+" "+res.Detail)
 	}
+	return checkinResult{OK: allOK, Detail: strings.Join(parts, "；")}
+}
+
+// qoderCheckinAccount 一个待签到账号。err 非空表示该账号的快照读不出来，
+// 仍要在结果里点名，不能静默跳过。
+type qoderCheckinAccount struct {
+	label string
+	token string
+	err   string
+}
+
+// qoderCheckinAccounts 列出全部去重后的账号快照；桌面端当前账号如果还没进
+// 快照仓库，也一并签（用户刚切号/刚登录时不能漏）。仓库为空时只签 live，
+// 保持单机、未启用多账号看板时的旧行为。
+func qoderCheckinAccounts() []qoderCheckinAccount {
+	list, listErr := qoderVaultList()
+	if listErr != nil {
+		// 快照仓库读坏不该连累桌面端 live 账号：照旧签 live，异常写进日志，
+		// 不把它伪装成一个「签到失败的账号」（那会让整体状态无谓变红）。
+		logHub("Qoder 签到：读取账号快照失败：%v；本次只签当前桌面端账号", listErr)
+		return qoderLiveOnlyAccounts()
+	}
+	list = qoderVaultDedupeByUID(list)
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
+
+	// 桌面端当前凭据里的 uid 是权威：同一个 uid 的旧快照 token 不参与签到，
+	// 否则刷新 token 后会出现「旧 token 打一次 + 新 token 打一次」的重复请求。
+	liveUID, liveToken, liveErr := qoderLiveCreds()
+	accounts := make([]qoderCheckinAccount, 0, len(list)+1)
+	for _, meta := range list {
+		if liveErr == nil && liveUID != "" && meta.UID == liveUID {
+			// 桌面端 live 凭据刷新过：该账号用新 token，旧快照 token 不再参与。
+			accounts = append(accounts, qoderCheckinAccount{label: meta.Name, token: liveToken})
+			continue
+		}
+		b, err := os.ReadFile(qoderVaultPath(meta.Name))
+		if err != nil {
+			accounts = append(accounts, qoderCheckinAccount{label: meta.Name, err: "读取快照失败：" + err.Error()})
+			continue
+		}
+		creds, err := qoderVaultTokenFromBytes(b)
+		if err != nil {
+			accounts = append(accounts, qoderCheckinAccount{label: meta.Name, err: "解密快照失败：" + err.Error()})
+			continue
+		}
+		accounts = append(accounts, qoderCheckinAccount{label: meta.Name, token: creds.Token})
+	}
+
+	// 桌面端 live 凭据可能属于一个还没进快照仓库的账号（刚切换/刚登录），
+	// 按 token 判重后补上，否则又会漏签。
+	if liveErr == nil {
+		known := false
+		for _, a := range accounts {
+			if a.token == liveToken {
+				known = true
+				break
+			}
+		}
+		if !known {
+			label := "当前桌面端"
+			if cur, err := qoderVaultCurrent(); err == nil && cur.Nick != "" {
+				label = cur.Nick
+			}
+			accounts = append(accounts, qoderCheckinAccount{label: label, token: liveToken})
+		}
+	} else if len(accounts) == 0 {
+		// 一份快照都没有、桌面端也解不开：把错误如实带出来，别假装「今日已签」。
+		return []qoderCheckinAccount{{label: "当前桌面端", err: liveErr.Error()}}
+	}
+	if len(accounts) > 0 {
+		return accounts
+	}
+	return qoderLiveOnlyAccounts()
+}
+
+// qoderLiveOnlyAccounts 只签当前桌面端账号（快照仓库为空或不可读时的保底路径）。
+func qoderLiveOnlyAccounts() []qoderCheckinAccount {
+	_, token, err := qoderLiveCreds()
+	if err != nil {
+		return []qoderCheckinAccount{{label: "当前桌面端", err: err.Error()}}
+	}
+	label := "当前桌面端"
+	if cur, e := qoderVaultCurrent(); e == nil && cur.Nick != "" {
+		label = cur.Nick
+	}
+	return []qoderCheckinAccount{{label: label, token: token}}
+}
+
+// qoderLiveCreds 读当前桌面端凭据，返回 uid 与 token（不打印 token）。
+func qoderLiveCreds() (uid, token string, err error) {
+	a, err := NewQoderAuth()
+	if err != nil {
+		return "", "", err
+	}
+	if err := a.Reload(); err != nil {
+		return "", "", fmt.Errorf("解密 Qoder 桌面端凭据失败：%w（请确认桌面端已登录）", err)
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.creds.Token == "" {
+		return "", "", fmt.Errorf("Qoder 凭据中 token 为空，请先在桌面端登录")
+	}
+	return a.creds.User.ID, a.creds.Token, nil
+}
+
+// qoderCheckinWithToken 用指定账号的 token 完成一次 campaigns 查询 + claim。
+// 机器身份由调用方取一次后传入，避免多账号时反复执行桌面端 runtime-info。
+func qoderCheckinWithToken(token, mt, mtype string) checkinResult {
 	headers := map[string]string{
 		"Authorization":   "Bearer " + token,
 		"Cosy-ClientType": "10", // 必须：其他值会静默返回空活动列表
@@ -230,7 +359,7 @@ func qoderCheckin() checkinResult {
 	}
 	// 桌面端 SDK 对 campaigns.list 调的是 requireMachineIdentity()：
 	// 带机器身份更像客户端（实测不带也返回 200，但带上零成本）。
-	if mt, mtype := qoderMachineInfo(); mt != "" {
+	if mt != "" {
 		headers["X-Machine-Id"] = mt
 		if mtype != "" {
 			headers["X-Machine-Type"] = mtype
@@ -240,7 +369,7 @@ func qoderCheckin() checkinResult {
 		// 2026-11-05 实测修正：campaigns **列表是 GET**（POST 一律 404
 		// {"errorCode":"NotFound"}）。旧实现用 POST，于是永远解析成「没有活动」，
 		// 看起来像「账号没活动」，实际是方法用错。领取仍是 POST。
-		body, status, err := httpGetJSON(qoderOpenAPIBase+"/sash/api/v1/me/campaigns", headers)
+		body, status, err := httpGetJSON(qoderCheckinBase+"/sash/api/v1/me/campaigns", headers)
 		if err != nil {
 			return nil, status, err
 		}
@@ -279,7 +408,7 @@ func qoderCheckin() checkinResult {
 	var got []string
 	failed := 0
 	for _, c := range claimable {
-		body, status, err := httpPostJSON(qoderOpenAPIBase+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim", headers, nil)
+		body, status, err := httpPostJSON(qoderCheckinBase+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim", headers, nil)
 		if err != nil || status != http.StatusOK {
 			failed++
 			continue

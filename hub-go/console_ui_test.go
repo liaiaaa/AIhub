@@ -121,6 +121,23 @@ func TestConsolePageAnchor(t *testing.T) {
 	}
 }
 
+// TestConsoleQoderMultiAccountCheckin（2026-11-08）：Qoder 签到按账号逐个返回后，
+// 芯片摘要不能只认「以签到成功开头」的字符串，否则第二个账号的「签到成功」
+// 会被当成普通文本截断。完整文案仍通过 title 可见。
+func TestConsoleQoderMultiAccountCheckin(t *testing.T) {
+	src := consoleSource(t)
+	for _, want := range []string{
+		"function shortCheckinOne(",
+		"s.split('；').map(shortCheckinOne)",
+		"join(' | ')",
+		"title=\"' + (s || '未签到')", // 每个账号的完整回执仍可查看
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("控制台缺少 Qoder 多账号签到摘要要素：%q", want)
+		}
+	}
+}
+
 // TestConsoleCreditUseCard 积分消耗卡片（2026-11-02）：必须调 /api/credits/history
 // 并把「今日消耗 / 近 7 天消耗 / 到账」三列渲染出来，避免以后退化成只显示余额。
 func TestConsoleCreditUseCard(t *testing.T) {

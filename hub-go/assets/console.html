@@ -1667,7 +1667,14 @@ function gotoLineCard(key) { switchPage('lines'); setTimeout(function () {
 }, 60); }
 
 // ---------- 签到（沿用） ----------
+// Qoder 一键签到现在按账号逐个返回「账号A 今日已领…；账号B 签到成功 +100」。
+// 旧版 shortCheckin 只认以「签到成功」开头的字符串，会把 B 的成功截成乱码，
+// 所以先按「；」拆开逐个缩写，再用 | 拼回芯片；完整文案仍在 title 里。
 function shortCheckin(s) {
+  if (!s) return '';
+  return s.split('；').map(shortCheckinOne).filter(Boolean).join(' | ');
+}
+function shortCheckinOne(s) {
   if (!s) return '';
   if (s.indexOf('签到成功') >= 0) {
     const m = s.match(/\+\s*([\d,]+)/);

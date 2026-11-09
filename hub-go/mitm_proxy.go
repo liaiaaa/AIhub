@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,9 +35,11 @@ import (
 )
 
 const (
-	// mitmPort 是本地分流代理的监听端口。挑 18790 是因为 18788 已被占用、
-	// 18791 留给 clauderipple 风格的远端隧道，避开常用区间。
-	mitmPort = 18790
+	// mitmPort 是本地分流代理的监听端口。
+	// 2026-11-09：原来用 18790，与 proxy_agg_autostart_test.go 的 useTestAggPort
+	// 撞车（测试把聚合口临时指到 18790）—— 全量测试时两边抢同一个端口，
+	// 代理先起来就让测试报「目录不是合法 JSON」。挪到 18792 避开。
+	mitmPort = 18792
 
 	// mitmPrimaryHost 是 TLS 客户端没发 SNI 时用的兜底主机名。
 	mitmPrimaryHost = "api.anthropic.com"
@@ -422,12 +425,32 @@ var (
 	mitmUpVal  *http.Client
 )
 
-// mitmUpstreamClient 访问真 Anthropic：不走环境代理（否则会绕回自己），
-// 也不校验证书链（我们只做转发，不做安全判断）。
+// mitmUpstreamClient 访问真 Anthropic。
+//
+// 关键：**必须走系统代理**（本机是 v2rayN 的 xray，gsettings manual →
+// 127.0.0.1:10808）。2026-11-09 实测：本机直连 api.anthropic.com 返回 403
+// （Cloudflare 拦国内 IP），经 10808 才是 401（通了、只是没凭据）。
+// 原来写 Proxy: nil 等于「不走代理」，透传路径根本连不上上游。
+//
+// 也不能用 http.ProxyFromEnvironment —— aihub 进程环境里没有任何代理变量
+// （systemd 单元没设），只有 gsettings 里有。所以直接复用 aihub 已有的
+// resolveRequestProxy：它先看环境变量、再探系统代理、代理死了自动回落直连。
+//
+// 但要排掉「代理指向自己」的环路：如果系统代理恰好是 127.0.0.1:mitmPort
+// （用户误配），必须直连，否则请求自己转自己。
 func mitmUpstreamClient() *http.Client {
 	mitmUpOnce.Do(func() {
 		tr := &http.Transport{
-			Proxy:               nil,
+			Proxy: func(req *http.Request) (*url.URL, error) {
+				u := resolveRequestProxy(req)
+				if u == nil {
+					return nil, nil
+				}
+				if sameProxyAsSelf(u) {
+					return nil, nil // 防自环
+				}
+				return u, nil
+			},
 			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 			ForceAttemptHTTP2:   true,
 			MaxIdleConnsPerHost: 8,
@@ -440,6 +463,26 @@ func mitmUpstreamClient() *http.Client {
 		mitmUpVal = &http.Client{Transport: tr, Timeout: 0}
 	})
 	return mitmUpVal
+}
+
+// sameProxyAsSelf 判断这个代理地址是不是就是本进程的 MITM 端口（防自环）。
+func sameProxyAsSelf(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	host := u.Hostname()
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return port == fmt.Sprint(mitmPort)
 }
 
 // mitmStatus 给控制台/API 用的快照。

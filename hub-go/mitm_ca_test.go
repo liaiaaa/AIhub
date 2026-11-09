@@ -8,7 +8,10 @@ package main
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,7 +194,7 @@ func TestMITMEnvSnippetPointsAtRealCA(t *testing.T) {
 		t.Fatalf("生成 CA 失败：%v", err)
 	}
 	s := mitmEnvSnippet()
-	if !strings.Contains(s, "HTTPS_PROXY=http://127.0.0.1:18790") {
+	if !strings.Contains(s, "HTTPS_PROXY=http://127.0.0.1:18792") {
 		t.Errorf("片段里缺 HTTPS_PROXY：%s", s)
 	}
 	if !strings.Contains(s, "NODE_EXTRA_CA_CERTS="+mitmCACertPath()) {
@@ -220,7 +223,7 @@ func TestMITMStatusBeforeStart(t *testing.T) {
 func TestMITMStartStop(t *testing.T) {
 	withTempDataRoot(t)
 	// 端口若已被占用（开发机上开着），跳过而不是失败。
-	if ln, err := net.Listen("tcp", "127.0.0.1:18790"); err == nil {
+	if ln, err := net.Listen("tcp", "127.0.0.1:18792"); err == nil {
 		ln.Close()
 	} else {
 		t.Skipf("端口 %d 不可用：%v", mitmPort, err)
@@ -248,5 +251,48 @@ func TestMITMStartStop(t *testing.T) {
 	// 停止后再停也不报错。
 	if ok, _ := h.mitmStop(); !ok {
 		t.Error("重复停止应返回 true")
+	}
+}
+
+// TestMITMUpstreamGoesThroughSystemProxy 上游透传必须走系统代理。
+//
+// 2026-11-09 实测：本机直连 api.anthropic.com → 403（Cloudflare 拦国内 IP），
+// 经系统代理 127.0.0.1:10808 → 401（通了）。原来 Proxy: nil 等于不走代理，
+// 透传路径根本连不上上游。
+func TestMITMUpstreamGoesThroughSystemProxy(t *testing.T) {
+	c := mitmUpstreamClient()
+	if c == nil || c.Transport == nil {
+		t.Fatal("上游 client 未初始化")
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport 类型 %T", c.Transport)
+	}
+	if tr.Proxy == nil {
+		t.Fatal("Proxy 是 nil —— 透传会直连，本机会 403")
+	}
+}
+
+// TestMITMProxySelfLoopGuard 系统代理若指向自己，必须直连（否则自己转自己）。
+func TestMITMProxySelfLoopGuard(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{fmt.Sprintf("http://127.0.0.1:%d", mitmPort), true},
+		{fmt.Sprintf("http://localhost:%d", mitmPort), true},
+		{fmt.Sprintf("http://[::1]:%d", mitmPort), true},
+		{"http://127.0.0.1:10808", false},
+		{"http://127.0.0.1:7890", false},
+		{"socks5://127.0.0.1:10809", false},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.url)
+		if err != nil {
+			t.Fatalf("解析 %s 失败：%v", c.url, err)
+		}
+		if got := sameProxyAsSelf(u); got != c.want {
+			t.Errorf("sameProxyAsSelf(%s) = %v，期望 %v", c.url, got, c.want)
+		}
 	}
 }

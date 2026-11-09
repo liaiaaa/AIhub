@@ -24,7 +24,10 @@ import (
 func useTestAggPort(t *testing.T) {
 	t.Helper()
 	old := aggPort
-	aggPort = 18790
+	// 2026-11-09：原来用 18790，与 MITM 分流代理的默认端口撞车（当时代理也是
+	// 18790），全量测试时两边抢同一个端口。代理已挪到 18792，这里再用 18791
+	// 彻底避开 —— 测试端口与任何生产端口都不该重叠。
+	aggPort = 18791
 	t.Cleanup(func() { aggPort = old })
 }
 

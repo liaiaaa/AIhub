@@ -86,6 +86,9 @@ func main() {
 	// 2026-11-05：客户端心跳模拟 + 出站 TLS 指纹（见 heartbeat.go / tlsfp.go）
 	mux.HandleFunc("/api/heartbeat", hub.apiHeartbeat)
 	mux.HandleFunc("/api/tls-fingerprint", hub.apiTLSFingerprint)
+	// 2026-11-09：Claude Desktop「chat + code 同时」的本地分流代理（见 mitm_proxy.go）
+	mux.HandleFunc("/api/mitm", hub.apiMITM)
+	mux.HandleFunc("/api/mitm/ca.pem", hub.apiMITMCA)
 	mux.HandleFunc("/api/nick", hub.apiNick)
 	mux.HandleFunc("/api/dom/cred", hub.apiDomCred)
 	mux.HandleFunc("/api/dom/switch", hub.apiDomSwitch)

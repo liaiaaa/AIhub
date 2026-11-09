@@ -41,6 +41,11 @@ type Hub struct {
 
 	// hb 客户端心跳模拟（2026-11-05，见 heartbeat.go）。nil = 未启动。
 	hb *heartbeatState
+
+	// mitm 本地分流代理（2026-11-09，见 mitm_proxy.go）：让 Claude Desktop
+	// 保持 1P 登录态（chat 走官方），只把 Code 子进程的流量按 model 分流到
+	// 聚合口或原样透传。nil = 未初始化。
+	mitm *mitmProxy
 }
 
 // checkinRecord 最近一次签到结果（逻辑见 checkin.go），随 state.json 持久化，

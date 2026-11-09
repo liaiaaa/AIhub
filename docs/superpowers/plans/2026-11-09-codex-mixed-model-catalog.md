@@ -840,8 +840,19 @@ func writeCodexMixedCatalog(h *Hub) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(out) > codexMixedMaxBytes {
-		return "", fmt.Errorf("混合目录 %d 字节超过上限 %d", len(out), codexMixedMaxBytes)
+	// 字节上限也要「截断」而不是报错：单条官方条目实测 37–87 KB，
+	// 4 MiB 往往比 200 条更早触发。从尾部（第三方 → 官方 hide）往前丢，
+	// 丢掉后重新编号 priority，保证截断后仍非空。
+	for len(out) > codexMixedMaxBytes && len(entries) > 1 {
+		entries = entries[:len(entries)-1]
+		for i, e := range entries {
+			e["priority"] = i + 1
+		}
+		out, err = json.MarshalIndent(map[string]any{"models": entries}, "", " ")
+		if err != nil {
+			return "", err
+		}
+		logHub("混合目录超 4 MiB，已截断到 %d 条", len(entries))
 	}
 	var check struct {
 		Models []map[string]any `json:"models"`

@@ -25,10 +25,6 @@ const officialBackendURL = "https://chatgpt.com/backend-api/codex/responses"
 // officialBackendURLVar 官方 responses 后端地址；测试用 httptest 覆盖它。
 var officialBackendURLVar = officialBackendURL
 
-// officialCatalogModels 模型选择器里展示的官方模型（请求侧不做白名单校验：
-// gpt- 前缀一律透传，官方没这个名字时由官方 API 报错，避免网关侧失真）。
-var officialCatalogModels = []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"}
-
 // isOfficialModelSlug gpt- 前缀即官方模型。放在 resolveAggModel 的最后一级，
 // 不会与 白名单 / ccs- / <线路>.<模型> 形式冲突（没有以 gpt- 开头的线路键）。
 func isOfficialModelSlug(slug string) bool {
@@ -127,11 +123,6 @@ func officialFixBody(nb []byte) []byte {
 	}
 	return out
 }
-
-// officialCatalogModels 只保留给桌面版目录文件（codex_catalog.go）与测试引用。
-// 2026-10-15：gpt-* 不再进 /v1/models 目录（用户要求目录只放 hub-go 线路模型，
-// 不混官方模型），透传路由本身在 resolveAggModel 里保留。
-// 原来的 officialCodexEntries / officialOpenAIEntries 已随目录改造删除。
 
 // officialChatUnsupported chat 形态（OpenAI /chat/completions）用不了官方透传：
 // auth.json 的 OAuth token 只对 codex 后端 /responses 有效，不是 api.openai.com 的

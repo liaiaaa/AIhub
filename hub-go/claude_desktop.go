@@ -11,33 +11,73 @@ package main
 //
 // 模型名映射：Desktop 只会请求"安全角色名"（claude-sonnet-5 等，可能带日期
 // 后缀），hub-go 的 resolveAggModel 里用下面这张表映射到聚合 slug。
+//
+// 2026-11-09 用户报「intl 线路不咋用，能不能只用聚合口的模型」：原表把
+// claude-sonnet-* 写死到 intl.deepseek-v4.1-flash，intl 一停整个 Code 模式就
+// 503。改成「偏好 + 兜底」——优先用下面列的首选 slug，该 slug 不在当前聚合
+// 目录里时按顺序取聚合目录里的下一个顶上，所以只要聚合口还有模型，Code 就
+// 不会因为某条线路停摆而整体不可用。
 
 import (
 	"net/http"
 	"strings"
 )
 
-// desktopRoleModels Desktop 安全角色名 → 聚合 slug。
+// desktopRolePrefs Desktop 安全角色名 → 首选聚合 slug。
 // 日期后缀（claude-haiku-4-5-20251001 之类）按前缀匹配。
-var desktopRoleModels = []struct {
-	role  string
-	slug  string
-	label string
+// 首选 slug 不在当前聚合目录时按顺序兜底（见 desktopRoleTable）。
+var desktopRolePrefs = []struct {
+	role string
+	slug string
 }{
-	{"claude-sonnet-5", "intl.deepseek-v4.1-flash", "DeepSeek V4.1 Flash（国际）"},
-	{"claude-sonnet-4-6", "intl.deepseek-v4.1-flash", "DeepSeek V4.1 Flash（国际）"},
-	{"claude-opus-5", "dom.glm-5.3-flash", "GLM 5.3 Flash（国内）"},
-	{"claude-opus-4-8", "dom.glm-5.3-flash", "GLM 5.3 Flash（国内）"},
-	{"claude-fable-5", "qoder.Qwen3.8-Flash", "Qwen3.8 Flash（Qoder）"},
-	{"claude-haiku-4-5", "trae.glm-5.2", "GLM 5.2（Trae）"},
+	{"claude-sonnet-5", "dom.deepseek-v4-flash"},
+	{"claude-sonnet-4-6", "qoder.DeepSeek-Flash"},
+	{"claude-opus-5", "qoder.Qwen3.8-Flash"},
+	{"claude-opus-4-8", "qoder.QoDuck"},
+	{"claude-fable-5", "teleagent.chat-pro"},
+	{"claude-haiku-4-5", "teleagent.chat-flagship"},
+}
+
+// desktopRoleEntry 一条实际生效的映射。
+type desktopRoleEntry struct {
+	Role  string
+	Slug  string
+	Label string
+}
+
+// desktopRoleTable 按当前聚合目录算出实际生效的角色名映射。
+//
+// 规则：首选 slug 在聚合目录里就用它；不在就按位置取聚合目录里的下一个；
+// 聚合目录为空时退回首选 slug（保持「不因目录空而整个入口失效」的旧行为）。
+func desktopRoleTable() []desktopRoleEntry {
+	snap := aggSnapshot()
+	out := make([]desktopRoleEntry, 0, len(desktopRolePrefs))
+	for i, p := range desktopRolePrefs {
+		e := desktopRoleEntry{Role: p.role, Slug: p.slug}
+		for _, am := range snap {
+			if am.Slug == p.slug {
+				e.Slug, e.Label = am.Slug, am.Display
+				break
+			}
+		}
+		if e.Label == "" && len(snap) > 0 {
+			am := snap[i%len(snap)]
+			e.Slug, e.Label = am.Slug, am.Display
+		}
+		if e.Label == "" {
+			e.Label = e.Slug // 聚合目录为空：只回 slug，不编显示名
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // resolveDesktopRole 把 Desktop 角色名（含日期后缀）映射为聚合 slug；不是角色名返回空。
 func resolveDesktopRole(model string) string {
 	m := strings.TrimSpace(model)
-	for _, r := range desktopRoleModels {
-		if m == r.role || strings.HasPrefix(m, r.role+"-2") { // -20251001 日期后缀
-			return r.slug
+	for _, e := range desktopRoleTable() {
+		if m == e.Role || strings.HasPrefix(m, e.Role+"-2") { // -20251001 日期后缀
+			return e.Slug
 		}
 	}
 	return ""
@@ -46,14 +86,18 @@ func resolveDesktopRole(model string) string {
 // aggOpenAIModelsHandler /claude-desktop/v1/models：Desktop 的模型目录
 // （角色名列表，与 profile 的 inferenceModels 一致）。
 func (h *Hub) aggOpenAIModelsHandler(w http.ResponseWriter, r *http.Request) {
-	data := make([]any, 0, len(desktopRoleModels))
+	table := desktopRoleTable()
+	data := make([]any, 0, len(table))
 	seen := map[string]bool{}
-	for _, rm := range desktopRoleModels {
-		if seen[rm.role] {
+	for _, e := range table {
+		if seen[e.Role] {
 			continue
 		}
-		seen[rm.role] = true
-		data = append(data, map[string]any{"id": rm.role, "object": "model", "supports1m": true})
+		seen[e.Role] = true
+		data = append(data, map[string]any{
+			"id": e.Role, "object": "model", "supports1m": true,
+			"display_name": e.Label,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }

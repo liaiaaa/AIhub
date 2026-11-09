@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -29,6 +30,13 @@ const (
 	aggGatewayBase  = "http://127.0.0.1:8790"
 	aggDefaultModel = "intl.deepseek-v4.1-flash"
 )
+
+// A′ 的 Codex 原生 responses 前缀。实测 Codex 0.167 会把 /responses 拼在
+// openai_base_url 后面，因此网关侧必须在这个前缀上提供 handler。
+const codexBasePath = "/backend-api/codex"
+
+// codexBaseURL 是写进 ~/.codex/config.toml 顶层 openai_base_url 的值。
+const codexBaseURL = aggGatewayBase + codexBasePath
 
 // userHomeDir 是 homeJoin 的 home 来源，做成变量以便测试注入。
 //
@@ -46,12 +54,15 @@ func homeJoin(elem ...string) (string, error) {
 	return filepath.Join(append([]string{home}, elem...)...), nil
 }
 
-func backupFile(path string) (string, error) {
+// backupFileTagged 备份 path 为 <path>.bak-<tag>-<时间戳>，沿用原 mode（取不到用 0600）。
+// tag 用来区分「接管前」与「还原前」两类备份：还原只认 bak-hubgo-*，
+// 否则第二次还原会把上一轮的还原备份当成原始态，越还原越乱。
+func backupFileTagged(path, tag string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err // 文件不存在就没有备份一说
 	}
-	bak := fmt.Sprintf("%s.bak-hubgo-%s", path, time.Now().Format("20060102-150405"))
+	bak := fmt.Sprintf("%s.bak-%s-%s", path, tag, time.Now().Format("20060102-150405"))
 	// 2026-10-21 开源审查修：原来固定 0644。被备份的是 ~/.codex/config.toml
 	// 这类文件（原权限可能是 0600，且常含其他供应商的 API key），备份留在
 	// 家目录里长期不动，不该比原文件更宽松。沿用原 mode，取不到就 0600。
@@ -63,6 +74,19 @@ func backupFile(path string) (string, error) {
 		return "", err
 	}
 	return bak, nil
+}
+
+// backupFile 接管前备份（保持既有调用方语义与文件名）。
+func backupFile(path string) (string, error) { return backupFileTagged(path, "hubgo") }
+
+// latestBackup 返回 <path>.bak-<tag>-* 里最新的一个；没有返回空串。
+func latestBackup(path, tag string) string {
+	matches, err := filepath.Glob(fmt.Sprintf("%s.bak-%s-*", path, tag))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches) // 时间戳定长，字典序即时间序
+	return matches[len(matches)-1]
 }
 
 // dropStaleRouterSections 删掉 cc-switch/Hub Switch 时代写进 config.toml 的
@@ -109,17 +133,15 @@ func dropStaleRouterSections(lines []string) []string {
 	return out
 }
 
-// takeOverCodex 文本手术：改顶层 model_provider / model / model_catalog_json，
-// 确保 [model_providers.aihub] 段存在。
+// takeOverCodex A′ 接管（2026-11-09）：把 responses 经统一网关转发，
+// 同时把「官方 + 第三方」混合目录写成 Codex 的选择器目录。
 //
-// 2026-10-13 修复一个长期 bug：providerSet 曾被两个语义复用（顶层 provider 行、
-// aihub 段是否存在），aihub 段已存在时顶层 model_provider 行**永远不会写入**，
-// 桌面版就一直走官方 provider——选择器只剩官方推荐模型集。现在拆开：
-//   - 顶层已有 model_provider 行 → 原地改值；
-//   - 没有 → 在顶层区插入一行；
-//   - model_catalog_json 不再注释掉：桌面版靠它拿模型列表（app-server 只在启动
-//     读一次，不会拉网关 /v1/models），指向 hub-go 生成的 aihub-model-catalog.json
-//     （见 codex_catalog.go），官方模型与第三方模型在同一份列表里共存。
+// 与旧实现（model_provider=aihub + /v1/responses）的区别，实测依据见
+// docs/superpowers/specs/2026-11-09-codex-mixed-model-catalog-design.md：
+//   - 顶层必须**移除** model_provider：留着它 responses 会走
+//     [model_providers.aihub].base_url（/v1/responses），而不是 openai_base_url；
+//   - 顶层必须**保留** model_catalog_json：Codex 0.167 的选择器只读它或内置目录，
+//     不会来拉 /models（实测 models_hits=0）。
 func takeOverCodex() (string, error) {
 	path, err := homeJoin(".codex", "config.toml")
 	if err != nil {
@@ -133,30 +155,42 @@ func takeOverCodex() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读不到 %s：%v", path, err)
 	}
-	if bak, err := backupFile(path); err == nil {
-		defer func() { _ = bak }() // 备份路径放返回信息里
-	}
+	bak, _ := backupFile(path)
+
 	lines := strings.Split(string(raw), "\n")
 	lines = dropStaleRouterSections(lines)
-	hasProviderLine, modelSet := false, false
-	// 先扫一遍看 [model_providers.aihub] 段是否已存在（决定要不要补段）
+
 	hasAihubSection := false
+	hasCatalogLine := false
 	for _, ln := range lines {
-		if strings.TrimSpace(ln) == "[model_providers.aihub]" {
+		t := strings.TrimSpace(ln)
+		if t == "[model_providers.aihub]" {
 			hasAihubSection = true
-			break
+		}
+		if strings.HasPrefix(t, "model_catalog_json") {
+			hasCatalogLine = true
 		}
 	}
-	// 逐行替换（顶层第一处命中后不再动其它 section 里的同名键）
+
+	baseComment := "# aihub: Codex 的 responses 经统一网关转发（删除本行与下面 openai_base_url 即恢复官方直连）"
+	baseLine := `openai_base_url = "` + codexBaseURL + `"`
+
+	out := make([]string, 0, len(lines)+6)
 	topSection := true
-	out := make([]string, 0, len(lines)+4)
+	baseWritten := false
+	modelSet := false
+	writeBase := func() {
+		if baseWritten {
+			return
+		}
+		out = append(out, baseComment, baseLine)
+		baseWritten = true
+	}
 	for _, ln := range lines {
 		t := strings.TrimSpace(ln)
 		if strings.HasPrefix(t, "[") {
-			if topSection && !hasProviderLine {
-				// 顶层区结束还没见过 model_provider 行：在这里插入（provider + 目录指针）
-				out = append(out, `model_provider = "aihub"`)
-				out = append(out, `model_catalog_json = "`+catalogPath+`"`)
+			if topSection {
+				writeBase() // 顶层区结束前补上 openai_base_url
 			}
 			topSection = false
 			out = append(out, ln)
@@ -166,9 +200,12 @@ func takeOverCodex() (string, error) {
 			out = append(out, ln)
 			continue
 		}
+		// 顶层：删 model_provider（关键），改写 openai_base_url / model_catalog_json
 		if strings.HasPrefix(t, "model_provider") {
-			out = append(out, `model_provider = "aihub"`)
-			hasProviderLine = true
+			continue
+		}
+		if strings.HasPrefix(t, "openai_base_url") {
+			writeBase()
 			continue
 		}
 		if strings.HasPrefix(t, "model_catalog_json") {
@@ -177,42 +214,49 @@ func takeOverCodex() (string, error) {
 		}
 		if !modelSet && strings.HasPrefix(t, "model") && strings.Contains(t, "=") &&
 			!strings.HasPrefix(t, "model_provider") && !strings.HasPrefix(t, "model_reasoning") &&
-			!strings.HasPrefix(t, "model_catalog_json") {
+			!strings.HasPrefix(t, "model_catalog_json") && !strings.HasPrefix(t, "model_verbosity") {
 			out = append(out, `model = "`+aggDefaultModel+`"`)
 			modelSet = true
 			continue
 		}
 		out = append(out, ln)
 	}
-	if topSection && !hasProviderLine {
-		// 整个文件没有 section（理论不会）：补在末尾
-		out = append(out, `model_provider = "aihub"`)
+	writeBase()
+	if !hasCatalogLine {
 		out = append(out, `model_catalog_json = "`+catalogPath+`"`)
 	}
-	var aihubSection []string
+	res := strings.Join(out, "\n")
 	if !hasAihubSection {
-		aihubSection = []string{
+		res += "\n" + strings.Join([]string{
 			"",
 			`[model_providers.aihub]`,
 			`name = "AIHub 统一网关"`,
 			`base_url = "` + aggGatewayBase + `/v1"`,
 			`wire_api = "responses"`,
 			`requires_openai_auth = true`,
-		}
+		}, "\n") + "\n"
 	}
-	res := strings.Join(out, "\n")
-	if len(aihubSection) > 0 {
-		res += "\n" + strings.Join(aihubSection, "\n") + "\n"
-	}
-	if err := os.WriteFile(path, []byte(res), 0644); err != nil {
+	// 原子写：先写 tmp 再 rename，避免写一半留下坏 TOML 让 Codex 起不来。
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(res), 0644); err != nil {
 		return "", err
 	}
-	// 目录文件：混合列表（第三方 + 官方），桌面版启动时读一次
-	catalogMsg := ""
-	if p, err := writeCodexCatalogFile(hubShared()); err == nil {
-		catalogMsg = "；目录文件 " + p
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
 	}
-	msg := "Codex 已切到统一网关 :8790（model_provider=aihub，model=" + aggDefaultModel + catalogMsg + "；重开 Codex 生效）"
+
+	catalogMsg := ""
+	if p, cerr := writeCodexMixedCatalog(hubShared()); cerr == nil {
+		catalogMsg = "；混合目录 " + p
+	} else {
+		catalogMsg = "；⚠ 混合目录生成失败：" + cerr.Error()
+	}
+	msg := "Codex 已切到统一网关 :8790（openai_base_url=" + codexBaseURL + "，model=" + aggDefaultModel + catalogMsg
+	if bak != "" {
+		msg += "；原配置已备份为 " + filepath.Base(bak)
+	}
+	msg += "；重开 Codex 生效）"
 	return msg, nil
 }
 
@@ -262,14 +306,12 @@ func takeOverClaude() (string, error) {
 	return "Claude Code 已切到统一网关 :8790（模型 " + aggDefaultModel + "；重开 Claude Code 生效）", nil
 }
 
-// restoreCodex 恢复 Codex 官方直连（与接管互逆）：
-//   - 删顶层 model_provider = "aihub"（回到内置 openai provider + 官方登录）；
-//   - 删顶层 model = 聚合 slug 行（intl./dom./qoder./trae./zcode. 或 gpt- 由网关
-//     提供的模型名），Codex 回官方默认模型选择；
-//   - [model_providers.aihub] 与 [profiles.*] 保留：无害，且用户还能用
-//     codex --profile aihub 随时切回第三方。
+// restoreCodex 恢复 Codex 官方直连。
 //
-// 官方登录（auth.json）全程不动，恢复后模型选择器就是官方推荐模型集。
+// 2026-11-09（A′）：改为「从最新 bak-hubgo-* 逐字节还原」，这样接管期间被改写的
+// model / model_catalog_json / 删掉的 model_provider 都能一字不差回来；
+// 还原动作自己的备份用 bak-restore-* 后缀，避免下次还原把还原态当原始态。
+// 没有 bak-hubgo-* 时退回文本手术（只删 aihub 加的键），保证老环境也能恢复。
 func restoreCodex() (string, error) {
 	path, err := homeJoin(".codex", "config.toml")
 	if err != nil {
@@ -279,39 +321,62 @@ func restoreCodex() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读不到 %s：%v", path, err)
 	}
-	if _, err := backupFile(path); err != nil && !os.IsNotExist(err) {
+	if _, err := backupFileTagged(path, "restore"); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
+	if bak := latestBackup(path, "hubgo"); bak != "" {
+		bb, rerr := os.ReadFile(bak)
+		if rerr != nil {
+			return "", fmt.Errorf("读备份 %s 失败：%v", bak, rerr)
+		}
+		tmp := path + ".tmp"
+		if werr := os.WriteFile(tmp, bb, 0644); werr != nil {
+			return "", werr
+		}
+		if rerr := os.Rename(tmp, path); rerr != nil {
+			_ = os.Remove(tmp)
+			return "", rerr
+		}
+		return "Codex 已恢复官方直连（从备份 " + filepath.Base(bak) + " 逐字节还原；重开 Codex 生效）", nil
+	}
+
+	// 兜底：没有备份时做文本手术，只删 aihub 加的键。
 	lines := strings.Split(string(raw), "\n")
 	out := make([]string, 0, len(lines))
 	topSection := true
 	for _, ln := range lines {
 		t := strings.TrimSpace(ln)
 		if strings.HasPrefix(t, "[") {
-			topSection = true // 后面还有顶层键？没有——TOML 里 [ 后全是 section；保守起见 section 内一律不动
+			topSection = false
+			out = append(out, ln)
+			continue
 		}
-		if topSection && strings.HasPrefix(t, "model_provider") {
-			continue // 删掉 provider 指向
-		}
-		if topSection && strings.HasPrefix(t, "model_catalog_json") {
-			continue // 删掉桌面版目录指针，回官方推荐模型集
-		}
-		if topSection && strings.HasPrefix(t, "model") && strings.Contains(t, "=") &&
-			!strings.HasPrefix(t, "model_provider") && !strings.HasPrefix(t, "model_reasoning") &&
-			!strings.HasPrefix(t, "model_catalog_json") {
-			// 顶层 model 若指向聚合 slug / 官方透传名，删除让 Codex 用官方默认
-			if strings.Contains(t, `"intl.`) || strings.Contains(t, `"dom.`) ||
-				strings.Contains(t, `"qoder.`) || strings.Contains(t, `"trae.`) ||
-				strings.Contains(t, `"zcode.`) || strings.Contains(t, `"gpt-`) {
+		if topSection {
+			if strings.HasPrefix(t, "openai_base_url") || strings.HasPrefix(t, "model_provider") ||
+				strings.HasPrefix(t, "model_catalog_json") || strings.HasPrefix(t, "# aihub:") {
 				continue
+			}
+			if strings.HasPrefix(t, "model") && strings.Contains(t, "=") &&
+				!strings.HasPrefix(t, "model_reasoning") {
+				if strings.Contains(t, `"intl.`) || strings.Contains(t, `"dom.`) ||
+					strings.Contains(t, `"qoder.`) || strings.Contains(t, `"trae.`) ||
+					strings.Contains(t, `"zcode.`) || strings.Contains(t, `"teleagent.`) ||
+					strings.Contains(t, `"oc.`) {
+					continue
+				}
 			}
 		}
 		out = append(out, ln)
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(out, "\n")), 0644); err != nil {
 		return "", err
 	}
-	return "Codex 已恢复官方直连（登录身份保留；重开 Codex 生效）。[profiles.aihub] 仍在，可随时 codex --profile aihub 切回第三方", nil
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return "Codex 已恢复官方直连（无备份可还原，已删除网关相关键；重开 Codex 生效）", nil
 }
 
 // restoreClaude 恢复 Claude Code 官方直连：只删指向 :8790 网关的 env 键
@@ -441,13 +506,26 @@ func (h *Hub) apiRatios(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": userRatiosSnapshot()})
 }
+
+// apiClientsStatus 客户端接管状态。
+// 2026-11-09（A′）：口径从 model_provider 改为 openai_base_url；
+// 同时修掉旧实现 m[1] 无匹配时的越界 panic。
 func (h *Hub) apiClientsStatus(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"ok": true}
 	if p, err := homeJoin(".codex", "config.toml"); err == nil {
 		if b, err := os.ReadFile(p); err == nil {
-			re := regexp.MustCompile(`model_provider\s*=\s*"([^"]+)"`)
-			m := re.FindStringSubmatch(string(b))
-			out["codex_provider"] = m[1]
+			s := string(b)
+			baseURL := ""
+			if m := regexp.MustCompile(`(?m)^\s*openai_base_url\s*=\s*"([^"]*)"`).FindStringSubmatch(s); len(m) > 1 {
+				baseURL = m[1]
+			}
+			provider := ""
+			if m := regexp.MustCompile(`(?m)^\s*model_provider\s*=\s*"([^"]*)"`).FindStringSubmatch(s); len(m) > 1 {
+				provider = m[1]
+			}
+			out["codex_base_url"] = baseURL
+			out["codex_provider"] = provider // 保留旧字段，前端还有兼容分支
+			out["codex_taken_over"] = strings.Contains(baseURL, "/backend-api/codex")
 		}
 	}
 	// 2026-10-19：Claude Code / Claude Desktop 已恢复官方直连，控制台不再接管它们，

@@ -761,7 +761,7 @@
           </tbody>
         </table>
         <div class="ctx-row" style="margin-top:8px">
-          <span class="hint">接管 = 配置指向 :8790（Codex 的官方登录身份与官方模型 gpt-* 保留，经网关透传与第三方模型共存）；恢复官方 = 回到纯官方直连。均自动备份，改动重开客户端生效。<br>
+          <span class="hint">接管 = 把 Codex 的 responses 指向 :8790/backend-api/codex（顶层写 openai_base_url、去掉 model_provider），并把「官方模型 + 第三方模型」写成一份混合目录供选择器读取；官方登录身份（auth.json）全程不动、仍由 Codex 自己携带。恢复官方 = 从接管前的备份逐字节还原。均自动备份，改动重开客户端生效。<br>
           2026-10-19 起只接管 Codex：Claude Code 与 Claude Desktop 已恢复官方直连，控制台不再改它们的配置（想手动接入可在上面「接入点」里复制配置）。<br>
           DSH 的「同步模型」只重写 profile 里 aihub 那个 provider 的 models 列表（含每个模型的上下文/输出上限与思考档位），其他 provider、默认模型、agent 配置一个字都不动，同样先备份。</span>
         </div>
@@ -1399,9 +1399,9 @@ function renderOverview() {
   // 客户端接管状态（横条）。2026-10-19 起只显示 Codex：
   // Claude Code / Claude Desktop 已恢复官方直连，不再出现在这里。
   const gwUp = state.agg && state.agg.up;
-  const codexOk = clients.codex_provider === 'aihub';
+  const codexOk = clients.codex_taken_over === true;
   const codexEl = document.getElementById('cc-codex');
-  if (codexEl) codexEl.textContent = clients.codex_provider ? (codexOk ? '✓ 已接管' : '未接管（' + clients.codex_provider + '）') : '—';
+  if (codexEl) codexEl.textContent = clients.codex_taken_over ? '✓ 已接管' : (clients.codex_base_url ? ('未接管（' + clients.codex_base_url + '）') : '—');
   const running = SERVICES.filter(function (s) { return lineUp(s.key); }).length;
   document.getElementById('hero-models').textContent = gwUp ? (state.agg.models + ' 个') : '—';
   document.getElementById('hero-ctx').textContent = ctxWindow ? fmtTok(ctxWindow) : '—';
@@ -1416,7 +1416,7 @@ function renderOverview() {
     a.innerHTML = '<button class="primary sm" onclick="act(\'agg/start\')">启动网关</button>';
   } else if (!codexOk) {
     v.className = 'hero-verdict bad';
-    t.textContent = '⚠ 网关运行中，但 Codex 未接管（指向 ' + (clients.codex_provider || '—') + '）';
+    t.textContent = '⚠ 网关运行中，但 Codex 未接管（base_url ' + (clients.codex_base_url || '—') + '）';
     a.innerHTML = '<button class="sm" onclick="switchPage(\'settings\')">去设置</button>';
   } else if (running === 0) {
     v.className = 'hero-verdict bad';
@@ -2588,7 +2588,7 @@ function renderClients() {
     .then(function (d) {
       clients = d;
       const codex = document.getElementById('st-codex');
-      if (codex) codex.textContent = d.codex_provider === 'aihub' ? 'provider=aihub ✓ 已接管' : ('provider=' + (d.codex_provider || '—') + '（未接管）');
+      if (codex) codex.textContent = d.codex_taken_over ? ('openai_base_url=' + d.codex_base_url + ' ✓ 已接管') : ('base_url=' + (d.codex_base_url || '—') + '（未接管）');
       const dsh = document.getElementById('st-dsh');
       if (dsh && d.dsh) dsh.textContent = d.dsh.ok ? ('profile=' + d.dsh.profile + (d.dsh.backups ? ' · 备份 ' + d.dsh.backups + ' 份' : '')) : (d.dsh.msg || '—');
       renderOverview();

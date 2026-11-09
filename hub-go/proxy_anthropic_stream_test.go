@@ -153,3 +153,65 @@ func TestAnthropicStreamTextThenToolIndexes(t *testing.T) {
 		t.Fatalf("text→tool 应为 index 0,1，得到 %v", starts)
 	}
 }
+
+// TestAnthropicStreamToolBlockEmitsStop 工具块必须发 content_block_stop。
+//
+// 2026-11-09 实测：Claude Code CLI 经 aihub 打 qoder，工具调用报
+// 「The model's tool call could not be parsed (retry also failed)」。
+// 抓到的流里 content_block_start 有、content_block_delta 有，
+// **但没有任何 content_block_stop** —— 客户端要等 stop 才开始解析参数。
+//
+// 根因：closeOpenBlocks 只关 text/thinking 两种块，注释写着「tool 块由索引表
+// 管理不在此关」，但索引表只存映射、没有任何地方真去发 stop。
+func TestAnthropicStreamToolBlockEmitsStop(t *testing.T) {
+	var b strings.Builder
+	rec := &flushRecorder{b: &b}
+	// 一段最简的 chat SSE：一个工具调用，参数分两片。
+	src := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"/tmp/a.py\"}"}}]}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_use"}]}`,
+		`data: [DONE]`,
+	}, "\n")
+	anthropicStreamResponse(rec, strings.NewReader(src), "test.Model", false)
+	out := b.String()
+
+	var starts, stops, deltas int
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev map[string]any
+		if json.Unmarshal([]byte(line[6:]), &ev) != nil {
+			continue
+		}
+		switch ev["type"] {
+		case "content_block_start":
+			starts++
+		case "content_block_stop":
+			stops++
+		case "content_block_delta":
+			deltas++
+		}
+	}
+	if starts == 0 {
+		t.Fatalf("一个 content_block_start 都没有：\n%s", out)
+	}
+	if deltas == 0 {
+		t.Fatalf("一个 content_block_delta 都没有：\n%s", out)
+	}
+	if stops == 0 {
+		t.Fatalf("缺 content_block_stop —— Claude Code 会报「tool call could not be parsed」：\n%s", out)
+	}
+	// 每个 start 都要有对应的 stop（块必须成对关闭）。
+	if stops != starts {
+		t.Errorf("start=%d 但 stop=%d，块没有成对关闭：\n%s", starts, stops, out)
+	}
+	// stop 必须排在 message_delta 之前（协议要求）。
+	iStop := strings.Index(out, `"type":"content_block_stop"`)
+	iMsgDelta := strings.Index(out, `"type":"message_delta"`)
+	if iStop < 0 || iMsgDelta < 0 || iStop > iMsgDelta {
+		t.Errorf("content_block_stop 必须在 message_delta 之前（stop@%d msgDelta@%d）", iStop, iMsgDelta)
+	}
+}

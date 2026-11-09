@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -661,7 +662,13 @@ func (s *anthStreamState) openThinking() {
 	})
 }
 
-// closeOpenBlocks 关闭所有打开的块（text/thinking；tool 块由索引表管理不在此关）。
+// closeOpenBlocks 关闭所有打开的块。
+//
+// 2026-11-09 修：原来只关 text/thinking，注释写「tool 块由索引表管理不在此关」
+// —— 但索引表只存映射，没有任何地方真去发 stop。结果流里只有
+// content_block_start/delta、没有 content_block_stop，Claude Code 一直等
+// 块结束才解析参数，最后报「The model's tool call could not be parsed」。
+// 工具块必须和 text/thinking 一样成对关闭，且要排在 message_delta 之前。
 func (s *anthStreamState) closeOpenBlocks() {
 	if s.thinkOpen {
 		s.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": s.blockIdx})
@@ -670,6 +677,19 @@ func (s *anthStreamState) closeOpenBlocks() {
 	if s.textOpen {
 		s.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": s.blockIdx})
 		s.textOpen = false
+	}
+	// 工具块：按打开顺序（blockIdx 升序）关，保证嵌套关系正确。
+	if len(s.toolBlocks) > 0 {
+		type opened struct{ chatIdx, blockIdx int }
+		list := make([]opened, 0, len(s.toolBlocks))
+		for ci, bi := range s.toolBlocks {
+			list = append(list, opened{ci, bi})
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].blockIdx < list[j].blockIdx })
+		for _, o := range list {
+			s.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": o.blockIdx})
+			delete(s.toolBlocks, o.chatIdx)
+		}
 	}
 }
 

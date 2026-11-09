@@ -148,3 +148,7 @@ cred-backups/
 
 # Qoder 账号快照（auth.v1.dat 是加密凭据、meta.json 含 uid/email，绝不入库）
 qoder-accounts/
+
+# 本地 MITM CA（2026-11-09）：ca.key / leaf.key 是私钥，绝不能进仓库。
+# 这份 CA 能解密信任它的进程的全部 HTTPS，泄露等于把本机流量拱手让人。
+mitm/

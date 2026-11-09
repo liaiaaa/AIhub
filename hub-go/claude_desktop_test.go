@@ -10,6 +10,8 @@ package main
 //  3. 首选 slug 不在目录里时必须换成目录里的模型（不返回死 slug）。
 
 import (
+	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -115,6 +117,46 @@ func TestDesktopRoleResolvesThroughAggModel(t *testing.T) {
 	for _, e := range desktopRoleTable() {
 		if _, ok := resolveAggModel(e.Slug); !ok {
 			t.Errorf("角色 %s 映射到 %q，但 resolveAggModel 解析不了", e.Role, e.Slug)
+		}
+	}
+}
+
+// TestDesktopModelsHandlerReturnsDynamicTable /claude-desktop/v1/models
+// 必须跟着聚合目录走，且带 display_name。
+func TestDesktopModelsHandlerReturnsDynamicTable(t *testing.T) {
+	withAggList(t, []aggModel{
+		{Line: "dom", Slug: "dom.deepseek-v4-flash", Backend: "deepseek-v4-flash", Display: "DeepSeek V4 Flash（国内）"},
+		{Line: "qoder", Slug: "qoder.Qwen3.8-Flash", Backend: "Qwen3.8-Flash", Display: "Qwen3.8 Flash（Qoder）"},
+	})
+	h := &Hub{}
+	rec := httptest.NewRecorder()
+	h.aggOpenAIModelsHandler(rec, httptest.NewRequest("GET", "/claude-desktop/v1/models", nil))
+	if rec.Code != 200 {
+		t.Fatalf("状态码 %d，期望 200", rec.Code)
+	}
+	var body struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON：%v", err)
+	}
+	if len(body.Data) != len(desktopRolePrefs) {
+		t.Errorf("返回 %d 个模型，期望 %d 个", len(body.Data), len(desktopRolePrefs))
+	}
+	for _, m := range body.Data {
+		if m.ID == "" || m.DisplayName == "" {
+			t.Errorf("条目缺字段：%+v", m)
+		}
+	}
+	// 每个返回的 id 都必须能被 resolveAggModel 解析
+	for _, m := range body.Data {
+		if slug := resolveDesktopRole(m.ID); slug != "" {
+			if _, ok := resolveAggModel(slug); !ok {
+				t.Errorf("%s → %s 解析不了", m.ID, slug)
+			}
 		}
 	}
 }

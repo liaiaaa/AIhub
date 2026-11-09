@@ -527,7 +527,11 @@ type anthStreamState struct {
 
 func anthropicStreamResponse(w http.ResponseWriter, body io.Reader, slug string, wantThinking bool) {
 	flusher, _ := w.(http.Flusher)
-	st := &anthStreamState{w: w, flusher: flusher, model: slug, toolBlocks: map[int]int{}, toolNames: map[int]string{}}
+	// blockIdx 从 -1 起：Anthropic 要求首个 content block 的 index 是 0，
+	// 而下面每个 open* 都是先 ++ 再 emit。初值给 0 会让首块变成 index=1，
+	// 客户端（Claude Code / Desktop）解析工具调用时按 index 0 取块，取不到就报
+	// 「The model's tool call could not be parsed」（2026-11-09 实测）。
+	st := &anthStreamState{w: w, flusher: flusher, model: slug, blockIdx: -1, toolBlocks: map[int]int{}, toolNames: map[int]string{}}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)

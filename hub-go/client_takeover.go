@@ -155,7 +155,13 @@ func takeOverCodex() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读不到 %s：%v", path, err)
 	}
-	bak, _ := backupFile(path)
+	// 只在「当前还没被接管」时备份：否则重复点接管会把已接管状态存成
+	// bak-hubgo-<更新时间戳>，而 restore 取最新备份 → 还原回已接管态。
+	alreadyTakenOver := strings.Contains(string(raw), codexBaseURL)
+	bak := ""
+	if !alreadyTakenOver {
+		bak, _ = backupFile(path)
+	}
 
 	lines := strings.Split(string(raw), "\n")
 	lines = dropStaleRouterSections(lines)
@@ -222,8 +228,25 @@ func takeOverCodex() (string, error) {
 		out = append(out, ln)
 	}
 	writeBase()
+	// 注意：model_catalog_json 必须在顶层区补齐，绝不能 append 到文件末尾 ——
+	// 那样会落进最后一个 section（例如 [profiles.official]），变成 profile 的键，
+	// Codex 读不到目录指针。writeBase 已在顶层区结束处调用，这里用同一位置。
 	if !hasCatalogLine {
-		out = append(out, `model_catalog_json = "`+catalogPath+`"`)
+		// writeBase 已把 base 行写进 out 的顶层区末尾；把目录指针插到它后面。
+		idx := -1
+		for i := len(out) - 1; i >= 0; i-- {
+			if strings.HasPrefix(strings.TrimSpace(out[i]), "openai_base_url") {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			out = append(out, "")
+			copy(out[idx+2:], out[idx+1:])
+			out[idx+1] = `model_catalog_json = "` + catalogPath + `"`
+		} else {
+			out = append(out, `model_catalog_json = "`+catalogPath+`"`)
+		}
 	}
 	res := strings.Join(out, "\n")
 	if !hasAihubSection {

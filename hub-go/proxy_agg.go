@@ -330,8 +330,9 @@ func (h *Hub) startAggLine() (bool, string) {
 		h.aggDispatch(w, r, "responses")
 	})
 	// Codex 原生 responses 路径（A′ 方案）：config.toml 只留 openai_base_url 时
-	// Codex 把 /responses 打到 /backend-api/codex/responses。GET 同样接受，
-	// 因为部分客户端会用 GET 做重试探测。
+	// Codex 把 /responses 打到 /backend-api/codex/responses。
+	// 只处理 POST：这是 responses 的唯一合法动词；其它动词会因为没有 body
+	// 落到「请求体缺少 model 字段」400，不做额外分支。
 	mux.HandleFunc("/backend-api/codex/responses", func(w http.ResponseWriter, r *http.Request) {
 		h.codexBackendResponses(w, r)
 	})

@@ -22,6 +22,9 @@ import (
 
 const officialBackendURL = "https://chatgpt.com/backend-api/codex/responses"
 
+// officialBackendURLVar 官方 responses 后端地址；测试用 httptest 覆盖它。
+var officialBackendURLVar = officialBackendURL
+
 // officialCatalogModels 模型选择器里展示的官方模型（请求侧不做白名单校验：
 // gpt- 前缀一律透传，官方没这个名字时由官方 API 报错，避免网关侧失真）。
 var officialCatalogModels = []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"}
@@ -54,7 +57,7 @@ func (h *Hub) officialPassthrough(w http.ResponseWriter, r *http.Request, nb []b
 	nb = officialFixBody(nb)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, officialBackendURL, bytes.NewReader(nb))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, officialBackendURLVar, bytes.NewReader(nb))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]any{"message": err.Error(), "type": "internal_error"},

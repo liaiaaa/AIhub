@@ -329,6 +329,12 @@ func (h *Hub) startAggLine() (bool, string) {
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		h.aggDispatch(w, r, "responses")
 	})
+	// Codex 原生 responses 路径（A′ 方案）：config.toml 只留 openai_base_url 时
+	// Codex 把 /responses 打到 /backend-api/codex/responses。GET 同样接受，
+	// 因为部分客户端会用 GET 做重试探测。
+	mux.HandleFunc("/backend-api/codex/responses", func(w http.ResponseWriter, r *http.Request) {
+		h.codexBackendResponses(w, r)
+	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		h.aggDispatch(w, r, "chat")
 	})
@@ -493,12 +499,9 @@ func (h *Hub) lineRunning(line string) bool {
 	return ad.Running()
 }
 
-// resolveAggModel 统一网关的模型名解析（2026-10-13 方案 C 升级）。
-// 三级匹配：
-//  1. 白名单精确命中（agg_models.json，控制台可管理）；
-//  2. Hub Switch 时代前缀：ccs-<key>/<model>、ccs-claude-<key>--<model>；
-//  3. 动态 <线路>.<模型>（如 dom.glm-5.3-flash）——零配置，所有线路全模型可用。
-func resolveAggModel(slug string) (aggModel, bool) {
+// resolveAggThirdParty 只解析「第三方」模型：白名单 / ccs- / <线路>.<模型>。
+// A′ 的 Codex 原生路径用它判定「是不是第三方」，从而不会把官方 slug 当成线路模型。
+func resolveAggThirdParty(slug string) (aggModel, bool) {
 	for _, am := range aggSnapshot() {
 		if am.Slug == slug {
 			return am, true
@@ -528,6 +531,15 @@ func resolveAggModel(slug string) (aggModel, bool) {
 	if line, model, found := strings.Cut(slug, "."); found && aggSelectableLine(line) && model != "" {
 		return aggModel{Line: line, Slug: slug, Backend: model,
 			Display: model + "（" + aggLineCN[line] + "）"}, true
+	}
+	return aggModel{}, false
+}
+
+// resolveAggModel 统一网关的模型名解析（2026-10-13 方案 C 升级）。
+// 前三级与 resolveAggThirdParty 完全相同；最后一级把官方 gpt-* 解析成 official。
+func resolveAggModel(slug string) (aggModel, bool) {
+	if am, ok := resolveAggThirdParty(slug); ok {
+		return am, true
 	}
 	// 官方 ChatGPT 模型（gpt-*）：透传官方 API（2026-10-13 共存方案，见 proxy_official.go）。
 	if isOfficialModelSlug(slug) {

@@ -55,7 +55,7 @@ var (
 // aggLinePort 各线路本地端口（拉取在线模型目录用，与 webui SERVICES 一致）。
 // "agg" 不是真实线路，是「被聚合口拒掉的请求」的统计归属（如未知模型 400），
 // 没有它用量表会显示成空名字（见 usage_stats.go 的 line_cn）。
-var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "teleagent": "TeleAgent", "zcode": "Zcode", "oc": "OpenCode免费", "official": "官方", "agg": "聚合口(未受理)"}
+var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "teleagent": "TeleAgent", "zcode": "Zcode", "oc": "OpenCode免费", "official": "官方", "codex": "Codex", "agg": "聚合口(未受理)"}
 
 // aggSelectableLine 判断是不是「可挂模型的真实线路」。
 // 不能拿 aggLineCN 当校验表——它含 "agg" 这个纯统计用的键，
@@ -331,8 +331,8 @@ func (h *Hub) startAggLine() (bool, string) {
 	})
 	// Codex 原生 responses 路径（A′ 方案）：config.toml 只留 openai_base_url 时
 	// Codex 把 /responses 打到 /backend-api/codex/responses。
-	// 只处理 POST：这是 responses 的唯一合法动词；其它动词会因为没有 body
-	// 落到「请求体缺少 model 字段」400，不做额外分支。
+	// 不按 HTTP 动词分流：非 POST 因为没有 body 会落到「请求体缺少 model 字段」400，
+	// 这个响应本身就是对的，额外加 method 判断只会多一条分支要维护。
 	mux.HandleFunc("/backend-api/codex/responses", func(w http.ResponseWriter, r *http.Request) {
 		h.codexBackendResponses(w, r)
 	})

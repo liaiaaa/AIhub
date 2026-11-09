@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -18,10 +19,21 @@ const codexUnknownModelMsg = "未知模型（既不在聚合白名单/线路前�
 
 // codexBackendResponses 处理 POST /backend-api/codex/responses。
 func (h *Hub) codexBackendResponses(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	const codexBackendMaxBody = 64 << 20
+	body, err := io.ReadAll(io.LimitReader(r.Body, codexBackendMaxBody+1))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]any{"message": "read body: " + err.Error(), "type": "invalid_request_error"},
+		})
+		return
+	}
+	if len(body) > codexBackendMaxBody {
+		// 超限时不要说「缺少 model 字段」——那是截断后的假象，会把人引向错误方向。
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error": map[string]any{
+				"message": fmt.Sprintf("请求体超过 %d MiB 上限（历史图片过多时常见，可在 Codex 里 /compact）", codexBackendMaxBody>>20),
+				"type":    "payload_too_large",
+			},
 		})
 		return
 	}

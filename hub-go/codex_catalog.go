@@ -185,13 +185,17 @@ func cloneJSONMap(m map[string]any) (map[string]any, error) {
 
 // codexCatalogRefresh 白名单变化后异步刷新桌面版目录文件（失败只记日志，
 // 不打断增删操作）。sharedHub 未就绪时跳过。
+//
+// 2026-11-09（A′ 审查修）：必须写「混合目录」而不是「只写第三方」。
+// 原来调 writeCodexCatalogFile 会把官方条目全冲掉 —— 用户动一次白名单，
+// 官方模型就从 /model 消失，直到再点一次「接管」。
 func codexCatalogRefresh() {
 	if sharedHub == nil {
 		return
 	}
 	go func() {
-		defer recoverGoroutine("codex_catalog.go:210")
-		if _, err := writeCodexCatalogFile(sharedHub); err != nil {
+		defer recoverGoroutine("codex_catalog.go:codexCatalogRefresh")
+		if _, err := writeCodexMixedCatalog(sharedHub); err != nil {
 			logHub("桌面版目录文件刷新失败：%v", err)
 		}
 	}()

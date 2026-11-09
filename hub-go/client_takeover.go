@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -142,6 +141,11 @@ func dropStaleRouterSections(lines []string) []string {
 //     [model_providers.aihub].base_url（/v1/responses），而不是 openai_base_url；
 //   - 顶层必须**保留** model_catalog_json：Codex 0.167 的选择器只读它或内置目录，
 //     不会来拉 /models（实测 models_hits=0）。
+//
+// 文本手术的边界（2026-11-09 审查修）：
+//   - 只动**顶层区**（第一个 section 之前）；
+//   - 顶层键只改 `model` / `model_catalog_json` 两个精确键名，其余 `model_*` 一律不动；
+//   - 写完用 python3 tomllib 校验，失败自动从备份还原。
 func takeOverCodex() (string, error) {
 	path, err := homeJoin(".codex", "config.toml")
 	if err != nil {
@@ -155,26 +159,33 @@ func takeOverCodex() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读不到 %s：%v", path, err)
 	}
-	// 只在「当前还没被接管」时备份：否则重复点接管会把已接管状态存成
-	// bak-hubgo-<更新时间戳>，而 restore 取最新备份 → 还原回已接管态。
-	alreadyTakenOver := strings.Contains(string(raw), codexBaseURL)
+	origMode := tomlFileMode(path)
+
+	// 只在「顶层尚未接管」时备份：判据是顶层有没有我们写的那行 openai_base_url。
+	// 不能用「全文包含网关 URL」——注释或某个 profile 里出现同样的 URL 时
+	// 会误判成已接管而跳过备份，之后还原就丢了原始配置。
+	alreadyTakenOver := topLevelHasKey(string(raw), "openai_base_url")
 	bak := ""
 	if !alreadyTakenOver {
 		bak, _ = backupFile(path)
+		if bak != "" {
+			// 记下本次接管用的备份路径：还原时优先用它。
+			// 只按时间戳取最新会拿到一个月前的旧备份（本机 ~/.codex 里就有 15 个），
+			// 还原成旧配置还报成功。
+			if merr := os.WriteFile(takeoverMarkerPath(path), []byte(bak+"\n"), 0600); merr != nil {
+				logHub("记录接管备份路径失败：%v", merr)
+			}
+		}
 	}
 
 	lines := strings.Split(string(raw), "\n")
 	lines = dropStaleRouterSections(lines)
 
 	hasAihubSection := false
-	hasCatalogLine := false
 	for _, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if t == "[model_providers.aihub]" {
+		if tomlSectionName(ln) == "model_providers.aihub" {
 			hasAihubSection = true
-		}
-		if strings.HasPrefix(t, "model_catalog_json") {
-			hasCatalogLine = true
+			break
 		}
 	}
 
@@ -184,6 +195,7 @@ func takeOverCodex() (string, error) {
 	out := make([]string, 0, len(lines)+6)
 	topSection := true
 	baseWritten := false
+	catalogWritten := false
 	modelSet := false
 	writeBase := func() {
 		if baseWritten {
@@ -194,9 +206,14 @@ func takeOverCodex() (string, error) {
 	}
 	for _, ln := range lines {
 		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "[") {
+		if strings.HasPrefix(t, "[") && tomlSectionName(ln) != "" {
 			if topSection {
-				writeBase() // 顶层区结束前补上 openai_base_url
+				// 顶层区结束：补齐我们需要的两行，再进 section
+				if !catalogWritten {
+					out = append(out, `model_catalog_json = "`+catalogPath+`"`)
+					catalogWritten = true
+				}
+				writeBase()
 			}
 			topSection = false
 			out = append(out, ln)
@@ -206,47 +223,41 @@ func takeOverCodex() (string, error) {
 			out = append(out, ln)
 			continue
 		}
-		// 顶层：删 model_provider（关键），改写 openai_base_url / model_catalog_json
-		if strings.HasPrefix(t, "model_provider") {
-			continue
-		}
-		if strings.HasPrefix(t, "openai_base_url") {
-			writeBase()
-			continue
-		}
-		if strings.HasPrefix(t, "model_catalog_json") {
-			out = append(out, `model_catalog_json = "`+catalogPath+`"`)
-			continue
-		}
-		if !modelSet && strings.HasPrefix(t, "model") && strings.Contains(t, "=") &&
-			!strings.HasPrefix(t, "model_provider") && !strings.HasPrefix(t, "model_reasoning") &&
-			!strings.HasPrefix(t, "model_catalog_json") && !strings.HasPrefix(t, "model_verbosity") {
-			out = append(out, `model = "`+aggDefaultModel+`"`)
-			modelSet = true
-			continue
-		}
-		out = append(out, ln)
-	}
-	writeBase()
-	// 注意：model_catalog_json 必须在顶层区补齐，绝不能 append 到文件末尾 ——
-	// 那样会落进最后一个 section（例如 [profiles.official]），变成 profile 的键，
-	// Codex 读不到目录指针。writeBase 已在顶层区结束处调用，这里用同一位置。
-	if !hasCatalogLine {
-		// writeBase 已把 base 行写进 out 的顶层区末尾；把目录指针插到它后面。
-		idx := -1
-		for i := len(out) - 1; i >= 0; i-- {
-			if strings.HasPrefix(strings.TrimSpace(out[i]), "openai_base_url") {
-				idx = i
-				break
+		key, _, isKV := tomlTopKey(ln)
+		if !isKV {
+			// 顶层注释/空行：丢掉旧的 aihub 注释行（避免重复累积），其余原样保留
+			if strings.HasPrefix(t, "# aihub:") {
+				continue
 			}
+			out = append(out, ln)
+			continue
 		}
-		if idx >= 0 {
-			out = append(out, "")
-			copy(out[idx+2:], out[idx+1:])
-			out[idx+1] = `model_catalog_json = "` + catalogPath + `"`
-		} else {
+		switch key {
+		case "model_provider":
+			continue // 关键：留着它 responses 会走 /v1/responses
+		case "openai_base_url":
+			writeBase()
+		case "model_catalog_json":
 			out = append(out, `model_catalog_json = "`+catalogPath+`"`)
+			catalogWritten = true
+		case "model":
+			if !modelSet {
+				out = append(out, `model = "`+aggDefaultModel+`"`)
+				modelSet = true
+			} else {
+				out = append(out, ln)
+			}
+		default:
+			out = append(out, ln)
 		}
+	}
+	if topSection {
+		// 整个文件没有 section：补两行在末尾（writeBase 幂等，已写过就跳过）
+		if !catalogWritten {
+			out = append(out, `model_catalog_json = "`+catalogPath+`"`)
+			catalogWritten = true
+		}
+		writeBase()
 	}
 	res := strings.Join(out, "\n")
 	if !hasAihubSection {
@@ -259,13 +270,10 @@ func takeOverCodex() (string, error) {
 			`requires_openai_auth = true`,
 		}, "\n") + "\n"
 	}
-	// 原子写：先写 tmp 再 rename，避免写一半留下坏 TOML 让 Codex 起不来。
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(res), 0644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+
+	// 原子写 + TOML 校验 + 失败自动还原：文本手术一旦产出坏 TOML，
+	// Codex 就起不来，所以必须校验（规格第 7 章）。
+	if err := writeFileChecked(path, []byte(res), origMode, bak); err != nil {
 		return "", err
 	}
 
@@ -275,7 +283,11 @@ func takeOverCodex() (string, error) {
 	} else {
 		catalogMsg = "；⚠ 混合目录生成失败：" + cerr.Error()
 	}
-	msg := "Codex 已切到统一网关 :8790（openai_base_url=" + codexBaseURL + "，model=" + aggDefaultModel + catalogMsg
+	modelNote := "model=" + aggDefaultModel
+	if !strings.Contains(res, `model = "`+aggDefaultModel+`"`) {
+		modelNote = "model 未改动（原配置没有顶层 model 行）"
+	}
+	msg := "Codex 已切到统一网关 :8790（openai_base_url=" + codexBaseURL + "，" + modelNote + catalogMsg
 	if bak != "" {
 		msg += "；原配置已备份为 " + filepath.Base(bak)
 	}
@@ -347,19 +359,20 @@ func restoreCodex() (string, error) {
 	if _, err := backupFileTagged(path, "restore"); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
-	if bak := latestBackup(path, "hubgo"); bak != "" {
+	origMode := tomlFileMode(path)
+	if bak := preferredBackup(path); bak != "" {
 		bb, rerr := os.ReadFile(bak)
 		if rerr != nil {
 			return "", fmt.Errorf("读备份 %s 失败：%v", bak, rerr)
 		}
-		tmp := path + ".tmp"
-		if werr := os.WriteFile(tmp, bb, 0644); werr != nil {
+		// 备份文件本身要先过校验：万一备份是坏的，宁可不动当前文件。
+		if ok, detail := tomlValid(bb); !ok {
+			return "", fmt.Errorf("备份 %s 不是合法 TOML（%s），未还原", filepath.Base(bak), detail)
+		}
+		if werr := writeFileChecked(path, bb, origMode, ""); werr != nil {
 			return "", werr
 		}
-		if rerr := os.Rename(tmp, path); rerr != nil {
-			_ = os.Remove(tmp)
-			return "", rerr
-		}
+		_ = os.Remove(takeoverMarkerPath(path))
 		return "Codex 已恢复官方直连（从备份 " + filepath.Base(bak) + " 逐字节还原；重开 Codex 生效）", nil
 	}
 
@@ -391,12 +404,7 @@ func restoreCodex() (string, error) {
 		}
 		out = append(out, ln)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strings.Join(out, "\n")), 0644); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeFileChecked(path, []byte(strings.Join(out, "\n")), origMode, ""); err != nil {
 		return "", err
 	}
 	return "Codex 已恢复官方直连（无备份可还原，已删除网关相关键；重开 Codex 生效）", nil
@@ -538,14 +546,9 @@ func (h *Hub) apiClientsStatus(w http.ResponseWriter, r *http.Request) {
 	if p, err := homeJoin(".codex", "config.toml"); err == nil {
 		if b, err := os.ReadFile(p); err == nil {
 			s := string(b)
-			baseURL := ""
-			if m := regexp.MustCompile(`(?m)^\s*openai_base_url\s*=\s*"([^"]*)"`).FindStringSubmatch(s); len(m) > 1 {
-				baseURL = m[1]
-			}
-			provider := ""
-			if m := regexp.MustCompile(`(?m)^\s*model_provider\s*=\s*"([^"]*)"`).FindStringSubmatch(s); len(m) > 1 {
-				provider = m[1]
-			}
+			// 只读顶层：profile 段里出现同样的 URL 时不能报「已接管」（界面会说谎）
+			baseURL := topLevelValue(s, "openai_base_url")
+			provider := topLevelValue(s, "model_provider")
 			out["codex_base_url"] = baseURL
 			out["codex_provider"] = provider // 保留旧字段，前端还有兼容分支
 			out["codex_taken_over"] = strings.Contains(baseURL, "/backend-api/codex")

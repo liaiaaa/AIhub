@@ -655,7 +655,7 @@ FAIL
 
 - [ ] **Step 3: 抽出第三方条目生成函数（行为保持）**
 
-把 `hub-go/codex_catalog.go` 里 `writeCodexCatalogFile` 的条目生成段抽成独立函数，`writeCodexCatalogFile` 改为调用它。替换 `hub-go/codex_catalog.go:90-153`（从 `func writeCodexCatalogFile` 到 `entries = append(entries, e)` 结束的 `}`）为下面两段：
+把 `hub-go/codex_catalog.go` 里 `writeCodexCatalogFile` 的条目生成段抽成独立函数，`writeCodexCatalogFile` 改为调用它。**整段替换** `hub-go/codex_catalog.go:84-190`（从 `// writeCodexCatalogFile 把当前混合目录写到桌面版目录文件` 注释起，到该函数结尾的 `}`；即整份旧 `writeCodexCatalogFile` 一并替换，不要只替换前半段，否则旧函数尾巴会残留成孤儿代码）为下面两段：
 
 ```go
 // codexThirdPartyEntries 把聚合白名单转成 Codex 目录条目（33+ 键模板克隆）。
@@ -1620,6 +1620,17 @@ func latestBackup(path, tag string) string {
 ```
 
 并在文件顶部 import 块加入 `"sort"`。
+
+同一处（`backupFile` 定义之前）补上 A′ 用到的两个常量：
+
+```go
+// A′ 的 Codex 原生 responses 前缀。实测 Codex 0.167 会把 /responses 拼在
+// openai_base_url 后面，因此网关侧必须在这个前缀上提供 handler。
+const codexBasePath = "/backend-api/codex"
+
+// codexBaseURL 是写进 ~/.codex/config.toml 顶层 openai_base_url 的值。
+const codexBaseURL = aggGatewayBase + codexBasePath
+```
 
 - [ ] **Step 4: 改写 `takeOverCodex`**
 

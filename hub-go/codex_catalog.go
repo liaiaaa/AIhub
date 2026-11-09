@@ -276,6 +276,7 @@ func writeCodexMixedCatalog(h *Hub) (string, error) {
 	// 字节上限也要「截断」而不是报错：单条官方条目实测 37–87 KB，
 	// 4 MiB 往往比 200 条更早触发。从尾部（第三方 → 官方 hide）往前丢，
 	// 丢掉后重新编号 priority，保证截断后仍非空。
+	beforeTruncate := len(entries)
 	for len(out) > codexMixedMaxBytes && len(entries) > 1 {
 		entries = entries[:len(entries)-1]
 		for i, e := range entries {
@@ -285,7 +286,10 @@ func writeCodexMixedCatalog(h *Hub) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		logHub("混合目录超 4 MiB，已截断到 %d 条", len(entries))
+	}
+	if len(entries) < beforeTruncate {
+		// 只记一次：逐条记会刷出上百行日志（最多可丢 133 条）
+		logHub("混合目录超 4 MiB：%d → %d 条", beforeTruncate, len(entries))
 	}
 	var check struct {
 		Models []map[string]any `json:"models"`

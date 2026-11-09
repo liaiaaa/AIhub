@@ -1,10 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // bundledSample 是本机 `codex debug models --bundled` 的真实形态（截取 3 条）。
@@ -76,18 +76,27 @@ func TestCodexOfficialSlugsRoundTrip(t *testing.T) {
 	if len(got) != 2 || got[0] != "gpt-6.1-sol" {
 		t.Fatalf("读回 = %v", got)
 	}
-	// 内存缓存必须同步生效
-	set := codexOfficialSlugSet()
-	if !set["codex-auto-review"] {
-		t.Error("内存缓存里没有 codex-auto-review")
+	// 内存缓存必须同步生效：直接查包级缓存，不经 codexOfficialSlugSet
+	// （走后者会读盘重填，删掉 save 里的 setOfficialSlugCache 也照样过 —— 那是空断言）
+	officialSlugMu.RLock()
+	cached := officialSlugCache
+	officialSlugMu.RUnlock()
+	if !cached["codex-auto-review"] {
+		t.Errorf("save 之后内存缓存没同步：%v", cached)
 	}
 }
 
 func TestCodexOfficialSlugSetFallsBackToBundle(t *testing.T) {
 	isolateOfficialDataRoot(t) // 磁盘上没有任何 slug 文件
 	officialSlugMu.Lock()
-	officialSlugCache = nil
+	oldCache, oldFailed := officialSlugCache, officialSlugFailedAt
+	officialSlugCache, officialSlugFailedAt = nil, time.Time{}
 	officialSlugMu.Unlock()
+	t.Cleanup(func() {
+		officialSlugMu.Lock()
+		officialSlugCache, officialSlugFailedAt = oldCache, oldFailed
+		officialSlugMu.Unlock()
+	})
 	withBundledJSON(t, bundledSample)
 
 	set := codexOfficialSlugSet()
@@ -105,5 +114,4 @@ func TestCodexOfficialSlugListSkipsEmptySlug(t *testing.T) {
 	if len(got) != 1 || got[0] != "a" {
 		t.Fatalf("slug 列表 = %v", got)
 	}
-	_ = json.Valid
 }

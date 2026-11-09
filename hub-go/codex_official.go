@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -34,7 +33,9 @@ func codexBinPath() string {
 var codexBundledJSON = func() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, codexBinPath(), "debug", "models", "--bundled").Output()
+	// 走 execCmdContext 而不是标准库：Windows 产物是 -H=windowsgui，
+	// 直接 exec.Command 会弹控制台黑框（见 exec_hidden.go:5 的约定）。
+	out, err := execCmdContext(ctx, codexBinPath(), "debug", "models", "--bundled").Output()
 	if err != nil {
 		return nil, fmt.Errorf("运行 codex debug models --bundled 失败：%w", err)
 	}
@@ -90,9 +91,14 @@ func codexOfficialSlugList(entries []map[string]any) []string {
 func codexOfficialSlugsPath() string { return dataPath(codexOfficialSlugsFile) }
 
 var (
-	officialSlugMu    sync.RWMutex
-	officialSlugCache map[string]bool
+	officialSlugMu       sync.RWMutex
+	officialSlugCache    map[string]bool
+	officialSlugFailedAt time.Time
 )
+
+// codexSlugFailTTL 负缓存时长：取官方目录失败后这段时间内不再重试。
+// 1 分钟足够挡住热路径上的连续请求，又不至于让「刚装好 Codex」等太久。
+const codexSlugFailTTL = time.Minute
 
 // saveCodexOfficialSlugs 落盘并刷新内存缓存。0600：内容是官方模型名单。
 func saveCodexOfficialSlugs(slugs []string) error {
@@ -142,12 +148,22 @@ func setOfficialSlugCache(slugs []string) {
 
 // codexOfficialSlugSet 取官方 slug 集合：内存 → 磁盘 → 现场只读重算。
 // 只读重算不落盘（落盘只发生在生成混合目录时）。
+//
+// 返回的 map 由本包持有，调用方**只读**；就地写会与其它读者构成 DATA RACE。
+//
+// 失败要负缓存：本函数在 /backend-api/codex/responses 的热路径上
+// （codex_backend.go 的官方分支），Codex 未安装时每次请求都 fork/exec 一次
+// 既慢又刷日志。失败结果缓存 codexSlugFailTTL，过期后允许重试以便装上 Codex 后自愈。
 func codexOfficialSlugSet() map[string]bool {
 	officialSlugMu.RLock()
 	cached := officialSlugCache
+	failedAt := officialSlugFailedAt
 	officialSlugMu.RUnlock()
 	if len(cached) > 0 {
 		return cached
+	}
+	if !failedAt.IsZero() && time.Since(failedAt) < codexSlugFailTTL {
+		return nil
 	}
 	if slugs := loadCodexOfficialSlugs(); len(slugs) > 0 {
 		setOfficialSlugCache(slugs)
@@ -158,10 +174,18 @@ func codexOfficialSlugSet() map[string]bool {
 	entries, err := codexOfficialEntries()
 	if err != nil {
 		logHub("官方 slug 集合缺失且重算失败：%v", err)
+		markOfficialSlugFailed()
 		return nil
 	}
 	setOfficialSlugCache(codexOfficialSlugList(entries))
 	officialSlugMu.RLock()
 	defer officialSlugMu.RUnlock()
 	return officialSlugCache
+}
+
+// markOfficialSlugFailed 记下失败时刻，供负缓存判定。
+func markOfficialSlugFailed() {
+	officialSlugMu.Lock()
+	officialSlugFailedAt = time.Now()
+	officialSlugMu.Unlock()
 }

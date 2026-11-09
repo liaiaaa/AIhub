@@ -128,6 +128,8 @@ intl_burn.json
 wb_catalog_*.json
 # qoder 官方模型目录落盘（「探测并更新」写入，运行时状态；2026-11-07 补）
 qoder_catalog.json
+# Codex 官方 slug 集合（数据根运行时文件，不进库）
+codex_official_slugs.json
 
 # ---- 2026-10-21 开源审查补漏 ----
 # 下面这几项此前都没被忽略，`git add -A` 会直接把本机隐私提交进仓库：

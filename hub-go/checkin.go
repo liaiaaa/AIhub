@@ -649,6 +649,7 @@ func runCheckin(h *Hub) (bool, string) {
 	domCh := make(chan checkinResult, 1)
 	qoderCh := make(chan checkinResult, 1)
 	traeCh := make(chan checkinResult, 1)
+	hwCh := make(chan checkinResult, 1)
 	go func() {
 		defer recoverGoroutine("checkin.go:500")
 		domCh <- domCheckin()
@@ -661,9 +662,14 @@ func runCheckin(h *Hub) (bool, string) {
 		defer recoverGoroutine("checkin.go:502")
 		traeCh <- traeCheckin()
 	}()
+	go func() {
+		defer recoverGoroutine("checkin.go:503")
+		hwCh <- hwCheckin()
+	}()
 	dom := <-domCh
 	qoder := <-qoderCh
 	trae := <-traeCh
+	hw := <-hwCh
 
 	h.mu.Lock()
 	h.checkin = checkinRecord{
@@ -672,14 +678,15 @@ func runCheckin(h *Hub) (bool, string) {
 		Dom:   dom.Detail,
 		Qoder: qoder.Detail,
 		Trae:  trae.Detail,
-		OK:    dom.OK && qoder.OK && trae.OK,
+		Hw:    hw.Detail,
+		OK:    dom.OK && qoder.OK && trae.OK && hw.OK,
 	}
 	h.saveStateLocked()
 	rec := h.checkin
 	h.mu.Unlock()
 
-	logHub("签到 | 国内=%s | Qoder=%s | Trae=%s", dom.Detail, rec.Qoder, rec.Trae)
-	msg := "国内：" + dom.Detail + "；Qoder：" + rec.Qoder + "；Trae：" + rec.Trae
+	logHub("签到 | 国内=%s | Qoder=%s | Trae=%s | 果办=%s", dom.Detail, rec.Qoder, rec.Trae, rec.Hw)
+	msg := "国内：" + dom.Detail + "；Qoder：" + rec.Qoder + "；Trae：" + rec.Trae + "；果办：" + rec.Hw
 	return rec.OK, msg
 }
 

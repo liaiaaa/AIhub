@@ -296,6 +296,41 @@ func (a mimoAdapter) Chat(w http.ResponseWriter, r *http.Request) {
 func (a mimoAdapter) NativeResponses() http.HandlerFunc { return nil }
 func (a mimoAdapter) Models() []string                  { return nil }
 
+// huaweiAdapter 果办 OfficeAce：vault STS + 网关三要素 + Basic 认证。
+// 不参与聚合（模型表由网关动态，聚合目录里先不加；点开线路后 /v1/models 可用）。
+type huaweiAdapter struct{ h *Hub }
+
+func (a huaweiAdapter) Key() string { return "huawei" }
+
+func (a huaweiAdapter) Running() bool {
+	a.h.mu.Lock()
+	defer a.h.mu.Unlock()
+	return a.h.huawei != nil && a.h.huawei.Running()
+}
+
+func (a huaweiAdapter) Start() (bool, string) { return a.h.startHuawei() }
+func (a huaweiAdapter) Stop() (bool, string)  { return a.h.stopHuawei() }
+
+func (a huaweiAdapter) Chat(w http.ResponseWriter, r *http.Request) {
+	a.h.mu.Lock()
+	p := a.h.huawei
+	a.h.mu.Unlock()
+	if p != nil {
+		p.handleChat(w, r)
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"error": map[string]any{"message": "果办线路未初始化", "type": "line_unavailable"},
+	})
+}
+
+func (a huaweiAdapter) NativeResponses() http.HandlerFunc { return nil }
+
+// Models 果办模型表（静态兜底；线路在跑时可用 /v1/models 动态探测）。
+func (a huaweiAdapter) Models() []string {
+	return append([]string{}, hwStaticModels...)
+}
+
 // lineAdapters 线路注册表：新增线路在这里加一行构造器。
 var lineAdapters = map[string]func(*Hub) lineAdapter{
 	"dom":       func(h *Hub) lineAdapter { return proxyLineAdapter{h: h, key: "dom"} },
@@ -306,6 +341,7 @@ var lineAdapters = map[string]func(*Hub) lineAdapter{
 	"zcode":     func(h *Hub) lineAdapter { return zcodeAdapter{h: h} },
 	"mimo":      func(h *Hub) lineAdapter { return mimoAdapter{h: h} },
 	"oc":        func(h *Hub) lineAdapter { return ocAdapter{h: h} },
+	"huawei":    func(h *Hub) lineAdapter { return huaweiAdapter{h: h} },
 }
 
 // adapterFor 取某条线路的适配器；未注册返回 false。

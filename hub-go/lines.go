@@ -42,6 +42,7 @@ var lineSpecs = []lineSpec{
 	{Key: "zcode", Display: "Zcode（Z.ai）", Port: ZcodePort, LogFile: "converter-zcode.log", Aggregated: true},
 	{Key: "mimo", Display: "MiMo（小米）", Port: MimoPort, LogFile: "converter-mimo.log"},
 	{Key: "oc", Display: "OpenCode 免费档", Port: OpencodePort, LogFile: "converter-opencode.log", Aggregated: true},
+	{Key: "huawei", Display: "果办 OfficeAce（华为）", Port: HuaweiPort, LogFile: "converter-huawei.log", Aggregated: true},
 }
 
 // lineKeys 返回全部线路名，顺序与 lineSpecs 一致。

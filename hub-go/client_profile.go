@@ -57,6 +57,9 @@ var clientWires = map[string]clientWire{
 	"oc": {TLS: "golang", Heartbeat: false},
 	// 线路还没打通，先按桌面端登记，等能用了再补探针。
 	"mimo": {TLS: "chrome", Heartbeat: false},
+	// 果办走华为官方 API 网关（Basic 认证 + 服务端计费），没有客户端指纹校验，
+	// 也没有需要模拟的周期动作（额度/签到由用户手动触发，见 main.go:160 的口径）。
+	"huawei": {TLS: "golang", Heartbeat: false},
 }
 
 // clientProfile 线路画像的完整视图（给控制台/接口看，也给内部判断用）。

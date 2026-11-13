@@ -18,6 +18,23 @@ import (
 )
 
 var modelRatios = map[string]map[string]float64{
+	// 果办 OfficeAce（2026-11-13）：倍率实测自 GET /v1/model-token-rates
+	// （V11 签名，2026-11-12）。口径是「每 token 消耗的积分系数」，不是折扣率；
+	// 沿用本表统一的「数字越大越贵」约定，ratioLabel 会渲染成 "0.18x" 形态。
+	"huawei": {
+		"deepseek-v4.1-flash":      0.18,
+		"deepseek-v4.1-flash-1017": 0.18,
+		"deepseek-v4-flash":        0.27,
+		"deepseek-v4-flash-0731":   0.27,
+		"deepseek-v4-pro":          0.30,
+		"deepseek-v3.2":            0.30,
+		"glm-5":                    0.50,
+		"glm-5.1":                  0.67,
+		"glm-5.2":                  0.70,
+		"glm-5.3":                  0.79,
+		"glm-5.3-flash":            0.08,
+		"kimi-k3":                  2.38,
+	},
 	// 2026-10-13 依用户桌面端实拍矫正（倍率/workbuddy国内.md）：
 	// Hy3 0.05x（限时免费档另计）、Step-5 0（独家限免）、Space-Bunny 0.08x、
 	// DeepSeek-V4-Pro 0.51x、GLM-5.3 0.79x、GLM-5.3-Flash 0.06x（订阅优先）、

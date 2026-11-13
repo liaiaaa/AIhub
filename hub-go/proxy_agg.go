@@ -55,7 +55,7 @@ var (
 // aggLinePort 各线路本地端口（拉取在线模型目录用，与 webui SERVICES 一致）。
 // "agg" 不是真实线路，是「被聚合口拒掉的请求」的统计归属（如未知模型 400），
 // 没有它用量表会显示成空名字（见 usage_stats.go 的 line_cn）。
-var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "teleagent": "TeleAgent", "zcode": "Zcode", "oc": "OpenCode免费", "official": "官方", "codex": "Codex", "agg": "聚合口(未受理)"}
+var aggLineCN = map[string]string{"dom": "国内", "intl": "国际", "qoder": "Qoder", "trae": "Trae", "teleagent": "TeleAgent", "zcode": "Zcode", "oc": "OpenCode免费", "huawei": "果办", "official": "官方", "codex": "Codex", "agg": "聚合口(未受理)"}
 
 // aggSelectableLine 判断是不是「可挂模型的真实线路」。
 // 不能拿 aggLineCN 当校验表——它含 "agg" 这个纯统计用的键，
@@ -65,7 +65,7 @@ func aggSelectableLine(line string) bool {
 		return false // 隐藏的线路不能再被加进聚合白名单
 	}
 	switch line {
-	case "dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc":
+	case "dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc", "huawei":
 		return true
 	}
 	return false
@@ -82,6 +82,8 @@ var aggCCSKeys = map[string]string{
 	"dom": "dom", "intl": "intl", "qoder": "qoder", "trae": "trae", "zcode": "zcode",
 	"claude-dom": "dom", "claude-intl": "intl", "claude-qoder": "qoder",
 	"claude-trae": "trae", "claude-zcode": "zcode",
+	// 2026-11-13 果办 OfficeAce
+	"huawei": "huawei", "claude-huawei": "huawei",
 }
 
 func aggDefaults() []aggModel {

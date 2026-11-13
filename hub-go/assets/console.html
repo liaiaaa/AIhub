@@ -202,6 +202,27 @@
   .cred-badge.warn { background:#fdf4e3; color:#a35a00; }
   .cred-badge.bad { background:#fdecea; color:#b3261e; }
 
+  /* 果办账号池（2026-11-13）：登录按钮 + 账号卡片，与通用凭证卡片区分开 */
+  .hw-login-box { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px;
+                  padding-top:8px; border-top:1px dashed var(--line); }
+  .hw-login-status { font-size:11.5px; color:var(--muted); }
+  .hw-login-status.ok { color:#0b7a43; }
+  .hw-login-status.bad { color:var(--err); }
+  .hw-login-url { flex-basis:100%; font-size:11.5px; }
+  .hw-login-url a { color:#2563eb; }
+  .hw-empty { font-size:11.5px; color:var(--muted); padding:6px 2px; }
+  .hw-acc { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+            border:1px solid var(--line); border-radius:10px; padding:8px 10px; background:#fbfcfd; }
+  .hw-acc.sel { border-color:#c7d4fe; background:#f5f7ff; }
+  .hw-acc-main { display:flex; align-items:center; gap:9px; flex:1; cursor:pointer; min-width:0; }
+  .hw-acc-name { font-weight:600; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hw-acc-rest { font-size:11.5px; color:var(--muted); font-family:var(--mono); }
+  .hw-acc-badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; }
+  .hw-acc-badge.ok { background:#e8f7ee; color:#0b7a43; }
+  .hw-acc-badge.bad { background:#fdecea; color:#b3261e; }
+  .hw-acc-btns { display:flex; gap:4px; }
+  .hw-acc-btns .text.danger { color:var(--err); }
+
   .tile-credit { display:flex; align-items:center; gap:8px; font-size:12px;
                  color:var(--muted); min-height:20px; }
   .tile-credit .stale { color:var(--faint); }
@@ -682,6 +703,7 @@
             <option value="teleagent">TeleAgent</option>
             <option value="zcode">Zcode</option>
             <option value="oc">OpenCode 免费档</option>
+            <option value="huawei">果办 OfficeAce（华为）</option>
           </select>
           <select id="agg-model"><option value="">—</option></select>
           <button class="primary sm" onclick="aggAdd()">加入目录</button>
@@ -875,6 +897,7 @@ const SERVICES = [
   { key:'mimo',  name:'MiMo（小米）' },
   { key:'zcode', name:'Zcode（Z.ai）', zkey:true },
   { key:'oc',    name:'OpenCode 免费档' },
+  { key:'huawei', name:'果办 OfficeAce（华为）', cred:true, quota:true, hw:true },
 ];
 const HUBGO_LINES = {
   'hubgo-dom':  { name:'国内 WorkBuddy' },
@@ -1696,6 +1719,9 @@ function renderCheckin() {
   const lines = [
     ['国内', c && c.dom], ['国际', c && c.intl],
     ['Qoder', c && c.qoder], ['Trae', c && c.trae],
+    // 2026-11-13：果办 OfficeAce 接进一键签到后，芯片也要显示它——
+    // 否则后端签了、界面上看不到，用户会以为没签。
+    ['果办', c && c.hw],
   ];
   // 签到记录必须是今天的才算数。旧实现只对主芯片做日期判断、四个线路芯片
   // 直接渲染持久化的上次结果，导致新一天没签也顶着昨天的「✓ 100」
@@ -1707,7 +1733,8 @@ function renderCheckin() {
   const fresh = !!(c && c.date === todayStr);
   const lastDetail = c && c.date
     ? '上次签到：' + c.date + (c.time ? ' ' + c.time : '') + '　' +
-      [c.dom && '国内 ' + c.dom, c.intl && '国际 ' + c.intl, c.qoder && 'Qoder ' + c.qoder, c.trae && 'Trae ' + c.trae]
+      [c.dom && '国内 ' + c.dom, c.intl && '国际 ' + c.intl, c.qoder && 'Qoder ' + c.qoder,
+       c.trae && 'Trae ' + c.trae, c.hw && '果办 ' + c.hw]
         .filter(Boolean).join('；')
     : '';
   if (!fresh) {
@@ -1757,11 +1784,22 @@ function ensureLineTiles() {
 function svcTile(s) {
   let extra = '';
   if (s.zkey) extra += '<input type="password" class="zkey" id="zcode-apikey" placeholder="可选 API Key，留空自动读桌面端凭据">';
-  const credSum = s.cred
+  // 果办（2026-11-13）：账号区是专属的——它要展示「登录按钮 + 多账号池 +
+  // 凭据剩余时间」，通用凭证卡片（dom/intl/qoder 那种纯单选框）装不下这些。
+  const credSum = s.hw
+    ? '<button class="cred-sum" id="cred-sum-' + s.key + '" onclick="toggleCreds(\'' + s.key + '\')"><span class="arrow">▶</span>' +
+      '<span id="cred-sum-text-' + s.key + '">账号 —</span></button>' +
+      '<div class="cred-list" id="cred-list-' + s.key + '"></div>' +
+      '<div class="hw-login-box" id="hw-login-box">' +
+      '<button class="sm" id="hw-login-btn" onclick="hwLoginStart()">果办浏览器登录</button>' +
+      '<span class="hw-login-status" id="hw-login-status"></span>' +
+      '<div class="hw-login-url" id="hw-login-url" style="display:none"></div>' +
+      '</div>'
+    : (s.cred
     ? '<button class="cred-sum" id="cred-sum-' + s.key + '" onclick="toggleCreds(\'' + s.key + '\')"><span class="arrow">▶</span>' +
       '<span id="cred-sum-text-' + s.key + '">凭证 —</span><span class="cred-risk-dot" id="cred-risk-dot-' + s.key + '" style="display:none"></span></button>' +
       '<div class="cred-list" id="cred-list-' + s.key + '"></div>'
-    : '';
+    : '');
   return '<div class="tile" id="stile-' + s.key + '">' +
     '<div class="tile-head" onclick="toggleTileCollapse(\'' + s.key + '\')">' +
     '<span class="dot" id="sdot-' + s.key + '"></span>' +
@@ -1782,7 +1820,7 @@ function svcTile(s) {
     '<div class="tile-btns">' +
     '<button id="tile-primary-' + s.key + '" class="sm" onclick="act(\'' + s.key + '/start\')">启用</button>' +
     '<span class="spacer"></span>' +
-    (s.cred ? '<button class="text" onclick="act(\'' + s.key + '/switch\')">换凭证并重启</button>' : '') +
+    (s.cred && !s.hw ? '<button class="text" onclick="act(\'' + s.key + '/switch\')">换凭证并重启</button>' : '') +
     (s.qvault ? '<button class="text" onclick="qoderVaultSaveTile()">存当前号快照</button>' : '') +
     '<button class="text" onclick="openLog(\'' + s.key + '\')">日志</button>' +
     (s.key === 'intl' || s.key === 'dom' ? '<span class="golink" onclick="gotoModels(\'' + s.key + '\')">在模型页查看线路模型 →</span>' : '') +
@@ -2123,8 +2161,8 @@ async function aggLoadLineModels() {
 // 模型标识的显示美化：slug 里的线路代号换成中文（协议值不变，title 里保留完整名）。
 // 目录/白名单返回 intl.deepseek-v4.1-flash 形态，网关记账还有 ccs-dom/xxx 形态，两种都映射。
 const SLUG_CN = {
-  'intl.': '国际·', 'dom.': '国内·', 'qoder.': 'Qoder·', 'trae.': 'Trae·', 'zcode.': 'Zcode·', 'mimo.': 'MiMo·', 'oc.': 'OpenCode免费·', 'teleagent.': 'TeleAgent·',
-  'ccs-intl/': '国际·', 'ccs-dom/': '国内·', 'ccs-qoder/': 'Qoder·', 'ccs-trae/': 'Trae·', 'ccs-zcode/': 'Zcode·', 'ccs-mimo/': 'MiMo·', 'ccs-oc/': 'OpenCode免费·', 'ccs-teleagent/': 'TeleAgent·',
+  'intl.': '国际·', 'dom.': '国内·', 'qoder.': 'Qoder·', 'trae.': 'Trae·', 'zcode.': 'Zcode·', 'mimo.': 'MiMo·', 'oc.': 'OpenCode免费·', 'teleagent.': 'TeleAgent·', 'huawei.': '果办·',
+  'ccs-intl/': '国际·', 'ccs-dom/': '国内·', 'ccs-qoder/': 'Qoder·', 'ccs-trae/': 'Trae·', 'ccs-zcode/': 'Zcode·', 'ccs-mimo/': 'MiMo·', 'ccs-oc/': 'OpenCode免费·', 'ccs-teleagent/': 'TeleAgent·', 'ccs-huawei/': '果办·',
 };
 function slugCN(slug) {
   const s = String(slug || '');
@@ -2671,6 +2709,126 @@ async function loadCredits(force, key) {
     }
   } catch (e) { /* 忽略 */ }
 }
+// ---------- 果办（OfficeAce）账号池：浏览器登录 + 多账号 ----------
+// 2026-11-13：aihub 接管 dsh 插件的全部果办能力。登录走 PKCE+DPoP 浏览器授权，
+// 账号落库在 ~/.dsh/.huaweicloud-connect/officeace-vault/（与插件同一份，可共存）。
+let hwAccounts = [], hwLoginPoll = null;
+
+async function hwLoadAccounts() {
+  try {
+    const d = await fetch('/api/huawei/accounts', { signal: AbortSignal.timeout(15000) }).then(function (r) { return r.json(); });
+    hwAccounts = d.accounts || [];
+    renderHwAccounts();
+    if (d.login) renderHwLogin(d.login);
+  } catch (e) { /* 接口没起就静默 */ }
+}
+
+function hwAgo(min) {
+  if (min === undefined || min === null) return '—';
+  if (min < 0) return '已过期';
+  if (min < 60) return min + ' 分钟';
+  return Math.floor(min / 60) + ' 小时 ' + (min % 60) + ' 分';
+}
+
+function renderHwAccounts() {
+  const box = document.getElementById('cred-list-huawei');
+  const sum = document.getElementById('cred-sum-text-huawei');
+  if (!box) return;
+  if (sum) sum.textContent = hwAccounts.length ? ('账号 ' + hwAccounts.filter(function (a) { return a.usable; }).length + '/' + hwAccounts.length + ' 可用') : '账号 —';
+  if (!hwAccounts.length) {
+    box.innerHTML = '<div class="hw-empty">还没有果办账号，点下面按钮登录（会打开浏览器授权）</div>';
+    return;
+  }
+  box.innerHTML = hwAccounts.map(function (a) {
+    const sel = a.selected ? ' sel' : '';
+    const okCls = a.usable ? 'ok' : 'bad';
+    return '<div class="hw-acc' + sel + '" data-id="' + a.id + '">' +
+      '<label class="hw-acc-main">' +
+      '<input type="radio" name="hw-acc" value="' + a.id + '"' + (a.selected ? ' checked' : '') +
+      ' onchange="hwSelectAccount(\'' + a.id + '\')">' +
+      '<span class="hw-acc-name">' + (a.user_name || a.label || a.id) + '</span>' +
+      '<span class="hw-acc-badge ' + okCls + '">' + (a.usable ? '可用' : (a.reason || '不可用')) + '</span>' +
+      '<span class="hw-acc-rest">凭据 ' + hwAgo(a.sts_rest_min) + (a.renewable ? ' · 可续期' : ' · 需重登') + '</span>' +
+      '</label>' +
+      '<span class="hw-acc-btns">' +
+      '<button class="text" onclick="hwTestAccount(\'' + a.id + '\')">测试</button>' +
+      '<button class="text danger" onclick="hwRemoveAccount(\'' + a.id + '\')">删除</button>' +
+      '</span></div>';
+  }).join('');
+}
+
+function renderHwLogin(login) {
+  const el = document.getElementById('hw-login-status');
+  const urlBox = document.getElementById('hw-login-url');
+  const btn = document.getElementById('hw-login-btn');
+  if (!el) return;
+  const phase = (login && login.phase) || 'idle';
+  const detail = (login && login.detail) || '';
+  const map = { idle:'', preparing:'准备中…', 'awaiting-user':'等待浏览器授权…', exchanging:'换取凭据…', done:'✓ ' + detail, failed:'✗ ' + detail };
+  el.textContent = map[phase] !== undefined ? map[phase] : detail;
+  el.className = 'hw-login-status' + (phase === 'failed' ? ' bad' : (phase === 'done' ? ' ok' : ''));
+  if (btn) btn.disabled = (phase === 'preparing' || phase === 'awaiting-user' || phase === 'exchanging');
+  if (urlBox) {
+    if (login && login.authorize_url && phase === 'awaiting-user') {
+      urlBox.style.display = '';
+      urlBox.innerHTML = '浏览器没自动打开？<a href="' + login.authorize_url + '" target="_blank" rel="noopener">点这里手动授权</a>';
+    } else { urlBox.style.display = 'none'; urlBox.innerHTML = ''; }
+  }
+  // 登录完成后刷新账号列表并停轮询
+  if (phase === 'done') { hwStopLoginPoll(); hwLoadAccounts(); }
+  if (phase === 'failed') { hwStopLoginPoll(); }
+}
+
+function hwStopLoginPoll() {
+  if (hwLoginPoll) { clearInterval(hwLoginPoll); hwLoginPoll = null; }
+}
+
+async function hwLoginStart() {
+  try {
+    const r = await fetch('/api/huawei/login/start', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:'{}', signal: AbortSignal.timeout(20000) });
+    const d = await r.json();
+    showMsg(d.msg, !d.ok);
+    if (d.ok) {
+      hwStopLoginPoll();
+      hwLoginPoll = setInterval(async function () {
+        try {
+          const st = await fetch('/api/huawei/login/status', { signal: AbortSignal.timeout(8000) }).then(function (x) { return x.json(); });
+          renderHwLogin(st);
+        } catch (e) { /* 轮询失败忽略 */ }
+      }, 1500);
+    }
+  } catch (e) { showMsg('发起登录失败：' + e, true); }
+}
+
+async function hwSelectAccount(id) {
+  try {
+    const d = await fetch('/api/huawei/accounts/select', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ id: id }), signal: AbortSignal.timeout(15000) }).then(function (r) { return r.json(); });
+    showMsg(d.msg, !d.ok);
+    await hwLoadAccounts();
+  } catch (e) { showMsg('切换失败：' + e, true); }
+}
+
+async function hwRemoveAccount(id) {
+  if (!confirm('确定删除这个果办账号？删除后需要重新登录才能用。')) return;
+  try {
+    const d = await fetch('/api/huawei/accounts/remove', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ id: id }), signal: AbortSignal.timeout(15000) }).then(function (r) { return r.json(); });
+    showMsg(d.msg, !d.ok);
+    await hwLoadAccounts();
+  } catch (e) { showMsg('删除失败：' + e, true); }
+}
+
+async function hwTestAccount(id) {
+  try {
+    const d = await fetch('/api/huawei/accounts/test', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ id: id }), signal: AbortSignal.timeout(40000) }).then(function (r) { return r.json(); });
+    showMsg(d.msg, !d.ok);
+    await hwLoadAccounts();
+  } catch (e) { showMsg('测试失败：' + e, true); }
+}
+
 async function loadCredStatus(force) {
   // 国内/国际各拉一次。用 allSettled 而不是 all：一条线的接口挂了不能把另一条
   // 的看板也一起清空（国内是新加的接口，更要能独立失败）。
@@ -2681,6 +2839,7 @@ async function loadCredStatus(force) {
       if (d && d.creds) { credStatus[line] = d.creds; renderCreds(line); }
     } catch (e) { /* 忽略：保留上一次结果 */ }
   }));
+  await hwLoadAccounts();
   render();
 }
 

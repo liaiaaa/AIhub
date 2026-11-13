@@ -123,9 +123,15 @@ func isOwnProcessName(pid int) bool {
 }
 
 func openBrowser(port int) {
-	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	openURLInBrowser(fmt.Sprintf("http://127.0.0.1:%d/", port))
+}
+
+// openURLInBrowser 用系统默认浏览器打开任意 URL（果办登录授权页要用）。
+// 无桌面环境（纯终端/SSH）时静默跳过——调用方仍会把链接显示在控制台上，
+// 用户可手动复制。
+func openURLInBrowser(url string) {
 	if _, err := exec.LookPath("xdg-open"); err != nil {
-		return // 无桌面环境（纯终端/SSH）时静默跳过，-no-browser 之外的兜底
+		return
 	}
 	execCmd("xdg-open", url).Start()
 }

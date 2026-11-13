@@ -23,6 +23,7 @@ type Hub struct {
 	mimo      *Proxy
 	qoder     *QoderProxy
 	zcode     *ZcodeProxy
+	huawei    *HuaweiProxy // 果办 OfficeAce（2026-11-13，华为）
 	trae      *TraeProxy
 	teleagent *TeleAgentProxy // TeleAgent（TeleAI，2026-11-02）
 	oc        *OpencodeProxy  // OpenCode 免费档（2026-10-15，只挂免费模型）
@@ -57,6 +58,7 @@ type checkinRecord struct {
 	Intl  string `json:"intl"`
 	Qoder string `json:"qoder"`
 	Trae  string `json:"trae"`
+	Hw    string `json:"hw"` // 果办（2026-11-13，华为 OfficeAce 积分签到）
 	OK    bool   `json:"ok"`
 }
 
@@ -278,6 +280,8 @@ func (h *Hub) startLineByName(name string) (bool, string) {
 		return h.startOpencode()
 	case "teleagent":
 		return h.startTeleagent()
+	case "huawei":
+		return h.startHuawei()
 	}
 	return false, "未知线路：" + name
 }
@@ -619,6 +623,50 @@ func (h *Hub) stopTeleagent() (bool, string) {
 	return false, "TeleAgent 停止失败"
 }
 
+// startHuawei 起果办线路（2026-11-13）。
+// 凭据来自 dsh 插件的 vault（~/.dsh/.huaweicloud-connect/officeace-vault/），
+// STS 过期自动续期（huawei_vault.go），网关三要素缓存 30 分钟（huawei_proxy.go）。
+func (h *Hub) startHuawei() (bool, string) {
+	h.mu.Lock()
+	if h.huawei != nil && h.huawei.Running() {
+		h.mu.Unlock()
+		return true, "已在运行"
+	}
+	h.mu.Unlock()
+
+	p := NewHuaweiProxy()
+	ok, msg := p.Start()
+	if !ok {
+		return false, msg
+	}
+	h.mu.Lock()
+	if h.huawei != nil && h.huawei.Running() {
+		h.mu.Unlock()
+		p.Stop()
+		return true, "已在运行"
+	}
+	h.huawei = p
+	h.mu.Unlock()
+	h.rememberLine("huawei")
+	return true, msg
+}
+
+func (h *Hub) stopHuawei() (bool, string) {
+	h.mu.Lock()
+	p := h.huawei
+	h.huawei = nil
+	h.mu.Unlock()
+	if p == nil {
+		h.forgetLine("huawei")
+		return true, "果办已停止"
+	}
+	if p.Stop() {
+		h.forgetLine("huawei")
+		return true, "果办已停止"
+	}
+	return false, "果办停止失败"
+}
+
 // startOpencode 起 OpenCode 免费档线路（2026-10-15）。
 // 无需本机凭据：走的是上游公开的匿名 "public" 凭据。
 func (h *Hub) startOpencode() (bool, string) {
@@ -736,6 +784,7 @@ func (h *Hub) statusMap() map[string]any {
 	traeP := h.trae
 	ocP := h.oc
 	teleagentP := h.teleagent
+	huaweiP := h.huawei
 	h.mu.Unlock()
 
 	dom := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
@@ -803,6 +852,16 @@ func (h *Hub) statusMap() map[string]any {
 		teleagent["models"] = nTA
 	}
 
+	// 果办 OfficeAce（华为，2026-11-13）：vault STS + 网关 Basic 认证。
+	huawei := map[string]any{"up": false, "ok": false, "nick": "", "detail": ""}
+	if huaweiP != nil && huaweiP.Running() {
+		huawei["up"] = true
+		huawei["ok"] = true
+		hwModels := huaweiP.modelNames()
+		huawei["detail"] = fmt.Sprintf("华为果办 OfficeAce · %d 个模型 · 积分计费", len(hwModels))
+		huawei["models"] = len(hwModels)
+	}
+
 	dirs := credDirs()
 	creds := make([]string, 0, len(dirs))
 	for k := range dirs {
@@ -818,6 +877,7 @@ func (h *Hub) statusMap() map[string]any {
 		"trae":            trae,
 		"oc":              oc,
 		"teleagent":       teleagent,
+		"huawei":          huawei,
 		"intl_cred":       cred,
 		"creds":           creds,
 		"dom_cred":        domCred,

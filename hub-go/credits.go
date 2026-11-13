@@ -62,7 +62,9 @@ var creditsState = struct {
 
 const creditsTTL = 5 * time.Minute
 
-var creditKeys = []string{"dom", "intl", "qoder", "trae", "teleagent"}
+// creditKeys 额度面板覆盖的平台。huawei=果办 OfficeAce（2026-11-13，
+// 华为积分桶：套餐 500 + bonus 4000/签到 100）。
+var creditKeys = []string{"dom", "intl", "qoder", "trae", "teleagent", "huawei"}
 
 // creditsSnapshot 返回各平台额度（缓存优先）；过期/强制时后台补拉。
 // force=true 立即作废全部缓存。
@@ -172,6 +174,8 @@ func fetchCredit(h *Hub, key string) *creditInfo {
 		return traeCredits()
 	case "teleagent":
 		return teleagentCredits()
+	case "huawei":
+		return hwCredits()
 	}
 	return &creditInfo{OK: false, Text: "未知平台"}
 }

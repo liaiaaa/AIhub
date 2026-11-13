@@ -85,6 +85,13 @@ func lineIdentities() map[string]lineIdentity {
 			UserAgent: "MiClaw/1.0",
 			Note:      "只有 UA，缺设备头；等有 MiMo 登录数据时再补齐（目前线路也用不了）",
 		},
+		"huawei": {
+			Client:    "OfficeAce",
+			Version:   hwClientVersion,
+			Desktop:   false,
+			UserAgent: "OfficeAce/" + hwClientVersion,
+			Note:      "华为官方开放网关（Basic 认证 + 服务端计费），没有客户端指纹校验；UA 只做标识，不参与鉴权",
+		},
 	}
 }
 

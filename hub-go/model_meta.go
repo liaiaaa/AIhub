@@ -22,6 +22,17 @@ type modelMeta struct {
 
 // staticModelMeta dom/intl 实测元数据（未列出的模型 = 无可靠数据）。
 var staticModelMeta = map[string]map[string]modelMeta{
+	// 果办 OfficeAce（2026-11-13）：官方网关不返回 limit，上下文取 dsh 插件
+	// FALLBACK_MODELS 的声明值（全 1M ctx / 131072 输出）。
+	"huawei": {
+		"deepseek-v4.1-flash": {ContextWindow: 1048576, MaxInput: 131072},
+		"deepseek-v4-flash":   {ContextWindow: 1048576, MaxInput: 131072},
+		"deepseek-v4-pro":     {ContextWindow: 1048576, MaxInput: 131072},
+		"glm-5.3":             {ContextWindow: 1048576, MaxInput: 131072},
+		"glm-5.2":             {ContextWindow: 1048576, MaxInput: 131072},
+		"glm-5.1":             {ContextWindow: 1048576, MaxInput: 131072},
+		"kimi-k3":             {ContextWindow: 1048576, MaxInput: 131072},
+	},
 	"dom": {
 		// 2026-10-15 依 倍率/workbuddy国内.md + workbuddy国际.md 补上下文窗口。
 		// 表里上下文一列写「1M/32–128K」这类入/出区间：入取上限 1M；出取区间

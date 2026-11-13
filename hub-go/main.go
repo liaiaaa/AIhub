@@ -123,6 +123,16 @@ func main() {
 	mux.HandleFunc("/api/qoder/accounts/save", hub.apiQoderAccountsSave)
 	mux.HandleFunc("/api/qoder/accounts/use", hub.apiQoderAccountsUse)
 	mux.HandleFunc("/api/qoder/accounts/delete", hub.apiQoderAccountsDelete)
+	// 果办账号管理（2026-11-13）：让 aihub 完全替代 dsh 插件——
+	// 浏览器 OAuth 登录、多账号池、选号、删号、凭据测试都在这里。
+	mux.HandleFunc("/api/huawei/accounts", hub.apiHuaweiAccounts)
+	mux.HandleFunc("/api/huawei/login/status", hub.apiHuaweiLoginStatus)
+	mux.HandleFunc("/api/huawei/login/start", hub.apiHuaweiLoginStart)
+	mux.HandleFunc("/api/huawei/login/cancel", hub.apiHuaweiLoginCancel)
+	mux.HandleFunc("/api/huawei/accounts/select", hub.apiHuaweiAccountsSelect)
+	mux.HandleFunc("/api/huawei/accounts/remove", hub.apiHuaweiAccountsRemove)
+	mux.HandleFunc("/api/huawei/accounts/test", hub.apiHuaweiAccountTest)
+	mux.HandleFunc("/api/huawei/logout", hub.apiHuaweiLogout)
 	mux.HandleFunc("/api/checkin", hub.apiCheckin)
 	mux.HandleFunc("/api/intl/checkin", hub.apiIntlCheckin)
 	mux.HandleFunc("/api/intl/creds", hub.apiIntlCreds)
@@ -201,9 +211,12 @@ func isConsoleWritePath(path string) bool {
 			return true
 		}
 	}
-	// /api/<line>/{start,stop,switch,cred} 这类动态路径
+	// /api/<line>/{start,stop,switch,cred} 这类动态路径。
+	// 2026-11-13 补 /select /remove /logout /test /cancel：果办账号管理的
+	// 变更端点必须只收 POST，否则 <img src> 就能删账号。
 	if strings.HasPrefix(path, "/api/") {
-		for _, suf := range []string{"/start", "/stop", "/switch", "/takeover", "/restore", "/apply", "/claim", "/refresh"} {
+		for _, suf := range []string{"/start", "/stop", "/switch", "/takeover", "/restore", "/apply", "/claim", "/refresh",
+			"/select", "/remove", "/logout", "/test", "/cancel"} {
 			if strings.HasSuffix(path, suf) {
 				return true
 			}

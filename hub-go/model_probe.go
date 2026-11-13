@@ -358,12 +358,29 @@ func probeLine(h *Hub, key string) modelProbeLine {
 				Meta: metaJSON(h.modelMeta("oc", m.ID)),
 			})
 		}
+	case "huawei":
+		// 果办 OfficeAce（2026-11-13）：官方开放网关，模型表静态（与 dsh 插件同款
+		// 7 个），倍率按积分计（不是「免费」，是消耗账号积分桶）。
+		line.Up = true
+		line.Authoritative = true
+		line.Note = "华为果办官方网关（Basic 认证 · 积分计费）；模型表为静态清单"
+		for _, id := range hwStaticModels {
+			ratio, hasRatio := staticModelRatio("huawei", id)
+			ratioText := ""
+			if hasRatio {
+				ratioText = ratioLabel(ratio)
+			}
+			line.Models = append(line.Models, modelProbeItem{
+				ID: id, Free: false, Ratio: ratioText, Official: true,
+				Meta: metaJSON(h.modelMeta("huawei", id)),
+			})
+		}
 	}
 	summarize(&line)
 	return line
 }
 
-var modelProbeLines = []string{"dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc"}
+var modelProbeLines = []string{"dom", "intl", "qoder", "trae", "teleagent", "zcode", "oc", "huawei"}
 
 // probeAllModels 并发探测全部线路。
 func probeAllModels(h *Hub) []modelProbeLine {

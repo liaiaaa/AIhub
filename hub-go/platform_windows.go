@@ -78,6 +78,10 @@ func isOwnProcessName(pid int) bool {
 }
 
 func openBrowser(port int) {
-	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	openURLInBrowser(fmt.Sprintf("http://127.0.0.1:%d/", port))
+}
+
+// openURLInBrowser 用系统默认浏览器打开任意 URL（果办登录授权页要用）。
+func openURLInBrowser(url string) {
 	execCmd("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }
